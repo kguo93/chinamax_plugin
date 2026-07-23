@@ -2,7 +2,19 @@
 
 Inventory lives in `./repo-map.md`. Domain vocabulary lives in `./CONTEXT.md` — use its terms (Bridge Agent, Runtime, Job, Thread, Profile) in code, docs, and commits.
 
-Decisions so far (design phase):
+## How to run and test
+
+The Runtime lives in its own conda env — never `py_automation`, never the repo's ambient python:
+
+```bash
+conda create -y -n chinamax python=3.12
+conda run -n chinamax pip install -e '/home/klg2138/deepseek_plugin[test]'
+conda run -n chinamax python -m pytest /home/klg2138/deepseek_plugin/tests -q
+```
+
+The editable install is what puts `chinamax` on the path; the suite imports the installed package, not a relative path. `pip install -e` leaves `src/chinamax.egg-info/` and `__pycache__/` byproducts behind — build artifacts, never committed.
+
+Design/implementation decisions:
 - Runtime is a custom agent loop modeled on the OpenAI Codex plugin's orchestration, written in Python 3 in a dedicated fresh conda env (not `py_automation`).
 - Runtime speaks the providers' Anthropic-compatible Messages API, reusing the proven `/anthropic` base URLs, model strings, and keys from the implement-handoff skill verbatim.
 - Plugin and Bridge Agent are both named `chinamax` (agent type `chinamax:chinamax`); providers are config Profiles — pro tiers only: deepseek, mimo, glm, minimax, kimi (flash/ultraspeed rows of implement-handoff are excluded). No default Profile: every dispatch names one explicitly.
@@ -21,3 +33,11 @@ Decisions so far (design phase):
 - Keys: all five profiles resolve from ~/.claude/model-keys.env (GLM_API_KEY and MINIMAX_API_KEY appended from the implement-handoff literals).
 - See docs/adr/ (0001–0011) for the recorded design decisions and their rejected alternatives.
 - API keys resolve via `~/.claude/model-keys.env`.
+
+Runtime conventions now in force (slice runtime-01, the walking skeleton):
+- Every `~/.claude/...` path resolves through `Path.home()`, never a hardcoded `/home/...` — that is what lets the suite run keylessly under a temporary `HOME`.
+- `model-keys.env` values are unquoted by shell rules (`shlex`), never a bare `split("=", 1)`: the real file single-quotes some values because it is normally bash-sourced.
+- The client is built with `auth_token=` (bearer), never `api_key=`, and with `max_retries=0` so the SDK's own retries cannot nest under the Runtime's ladder. The shared exec entry pops `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` from `os.environ` first, so the Profile is the only source of endpoint and credential.
+- The loop's termination keys on the ABSENCE of `tool_use` blocks, never on `stop_reason == "end_turn"` — `max_tokens` and `stop_sequence` produce the same tool-less turn.
+- The transcript is write-ahead: the outgoing delta is appended and flushed BEFORE the API call. Later slices depend on this ordering; do not batch the writes.
+- The `write` flag is advisory in this slice (system-prompt posture only); read-only enforcement belongs to slice 02.

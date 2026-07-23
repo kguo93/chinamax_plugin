@@ -1,0 +1,32 @@
+[
+  {
+    "name": "deepseek",
+    "base_url": "https://api.deepseek.com/anthropic",
+    "model": "deepseek-v4-pro[1m]",
+    "api_key_env": "DEEPSEEK_API_KEY"
+  },
+  {
+    "name": "mimo",
+    "base_url": "https://api.xiaomimimo.com/anthropic",
+    "model": "mimo-v2.5-pro[1m]",
+    "api_key_env": "MIMO_API_KEY"
+  },
+  {
+    "name": "glm",
+    "base_url": "https://api.z.ai/api/anthropic",
+    "model": "glm-5.2[1m]",
+    "api_key_env": "GLM_API_KEY"
+  },
+  {
+    "name": "minimax",
+    "base_url": "https://api.minimax.io/anthropic",
+    "model": "MiniMax-M3[1m]",
+    "api_key_env": "MINIMAX_API_KEY"
+  },
+  {
+    "name": "kimi",
+    "base_url": "https://api.moonshot.ai/anthropic",
+    "model": "kimi-k3",
+    "api_key_env": "KIMI_API_KEY"
+  }
+]

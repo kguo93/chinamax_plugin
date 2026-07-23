@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chinamax"
+version = "0.1.0"
+description = "Runtime for the chinamax worker-model subagent plugin"
+requires-python = ">=3.12"
+dependencies = ["anthropic>=0.37,<1"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+chinamax = ["data/*.json"]

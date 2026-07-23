@@ -1,7 +1,11 @@
 # repo-map
 
-Design-phase repository for the `chinamax` worker-model subagent plugin for Claude Code. No source yet.
+Repository for the `chinamax` worker-model subagent plugin for Claude Code. The Runtime's walking skeleton (slice runtime-01) is implemented; the jobs and surface scopes are still design-only.
 
+- `pyproject.toml` — packaging for the `chinamax` Runtime: src layout, `anthropic` runtime dep, `[test]` extra, and the `data/*.json` package-data rule that ships the shipped Profiles.
+- `.gitignore` — the editable install's byproducts (`__pycache__/`, `*.pyc`, `*.egg-info/`), which are never committed.
+- `src/` — the Runtime package (`chinamax`); see `src/repo-map.md`.
+- `tests/` — pytest suite driving the Runtime against the hermetic fake provider; see `tests/repo-map.md`.
 - `CONTEXT.md` — domain glossary (Bridge Agent, Runtime, Job, Thread, Profile, Steer, Pro).
 - `CLAUDE.md` — conventions and design-phase decisions (see `./repo-map.md` for inventory).
 - `AGENTS.md` — stub pointing agents at `CLAUDE.md`.
