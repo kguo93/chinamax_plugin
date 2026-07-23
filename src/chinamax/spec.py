@@ -8,6 +8,7 @@ those paths, because the durable state layout belongs to the jobs scope.
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,8 +16,12 @@ from pathlib import Path
 from chinamax import ChinamaxError, profiles
 
 REQUIRED_FIELDS = ("workspace", "profile", "prompt", "transcript_path", "result_path")
-OPTIONAL_FIELDS = ("write", "job_id")
+OPTIONAL_FIELDS = ("write", "job_id", "bash_timeout_s")
 _ABSOLUTE_PATH_FIELDS = ("workspace", "transcript_path", "result_path")
+
+#: Per-command bash timeout when the spec does not override it (ADR 0002's ten
+#: minutes). It bounds one command, never the Job: expiry is an observation.
+DEFAULT_BASH_TIMEOUT_S = 600.0
 
 
 @dataclass(frozen=True)
@@ -30,6 +35,7 @@ class JobSpec:
     result_path: Path
     write: bool = True
     job_id: str | None = None
+    bash_timeout_s: float = DEFAULT_BASH_TIMEOUT_S
 
 
 def load_spec(path: str | Path) -> JobSpec:
@@ -119,4 +125,38 @@ def parse_spec(data: object) -> JobSpec:
         result_path=result_path,
         write=write,
         job_id=job_id,
+        bash_timeout_s=_parse_bash_timeout(data.get("bash_timeout_s")),
     )
+
+
+def _parse_bash_timeout(value: object) -> float:
+    """Validate the optional per-command bash timeout.
+
+    A bad value here would kill every command the Job runs, so it fails spec
+    validation rather than degrading silently. ``bool`` is rejected explicitly:
+    it subclasses ``int``, so a bare ``true`` would otherwise sail through an
+    ``isinstance(value, (int, float))`` check as a one-second timeout.
+
+    Args:
+        value: The spec's ``bash_timeout_s``, or None when it was omitted.
+
+    Returns:
+        The timeout in seconds, defaulting to `DEFAULT_BASH_TIMEOUT_S`.
+
+    Raises:
+        ChinamaxError: If the value is boolean, non-numeric, non-finite, or not
+            strictly positive.
+    """
+    if value is None:
+        return DEFAULT_BASH_TIMEOUT_S
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or value <= 0
+    ):
+        raise ChinamaxError(
+            "job spec field 'bash_timeout_s' must be a finite positive number of "
+            f"seconds, not {value!r}"
+        )
+    return float(value)

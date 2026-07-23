@@ -40,4 +40,10 @@ Runtime conventions now in force (slice runtime-01, the walking skeleton):
 - The client is built with `auth_token=` (bearer), never `api_key=`, and with `max_retries=0` so the SDK's own retries cannot nest under the Runtime's ladder. The shared exec entry pops `ANTHROPIC_API_KEY`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_BASE_URL` from `os.environ` first, so the Profile is the only source of endpoint and credential.
 - The loop's termination keys on the ABSENCE of `tool_use` blocks, never on `stop_reason == "end_turn"` — `max_tokens` and `stop_sequence` produce the same tool-less turn.
 - The transcript is write-ahead: the outgoing delta is appended and flushed BEFORE the API call. Later slices depend on this ordering; do not batch the writes.
-- The `write` flag is advisory in this slice (system-prompt posture only); read-only enforcement belongs to slice 02.
+
+Runtime conventions added by slice runtime-02 (the tool registry and its confinement) — the working detail lives in `src/chinamax/CLAUDE.md` and `src/chinamax/tools/CLAUDE.md`:
+- Confinement is component-wise realpath containment, never a string prefix; the workspace realpath is resolved once per Job and carried on `ToolContext`.
+- The bash denylist and the read-only write-shaped filter share ONE `shlex` lexer and match at command position, so a denied word inside a quoted argument still runs.
+- Read-only enforcement is a single posture-filtered registry serving both the advertised schema and the dispatch table — schema omission alone is not the enforcement point.
+- A bash timeout kills the child's whole process group and comes back as an observation; the Job continues (ADR 0002). `bash_timeout_s` is bounds-checked at spec validation.
+- ADR 0005's residual risks (read-only bash bypasses, network egress, substitution evasions) are documented, not defended. Do not expand the denylist to chase them.

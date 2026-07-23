@@ -14,19 +14,10 @@ from conftest import (
     bash_then_report_script,
     report_turn,
     text_block,
+    tool_results,
     tool_use_block,
     turn,
 )
-
-
-def tool_results(messages: list[dict]) -> list[dict]:
-    """Return every tool_result block in a message sequence, in order."""
-    return [
-        block
-        for message in messages
-        for block in message["content"]
-        if isinstance(block, dict) and block.get("type") == "tool_result"
-    ]
 
 
 def test_bash_then_report_result(job_env):
@@ -70,7 +61,7 @@ def test_tool_less_turn_is_nudged(job_env, stop_reason):
 
 
 def test_bearer_auth_and_advertised_tools(job_env, monkeypatch):
-    """An ambient ANTHROPIC_API_KEY never reaches the wire, and two tools are advertised."""
+    """An ambient ANTHROPIC_API_KEY never reaches the wire, and the rich set is advertised."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ambient-must-not-be-used")
     env = job_env(bash_then_report_script())
 
@@ -81,6 +72,13 @@ def test_bearer_auth_and_advertised_tools(job_env, monkeypatch):
     assert "x-api-key" not in headers
     assert [tool["name"] for tool in env.requests[0]["body"]["tools"]] == [
         "bash",
+        "read_file",
+        "write_file",
+        "str_replace_edit",
+        "list_dir",
+        "grep",
+        "glob",
+        "apply_patch",
         "report_result",
     ]
 

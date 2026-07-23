@@ -9,27 +9,26 @@ after the stream completes.
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import anthropic
 
+from chinamax.confinement import ToolContext
 from chinamax.profiles import Profile
 from chinamax.spec import JobSpec
-from chinamax.tools import (
-    BASH,
-    REPORT_RESULT,
-    TOOLS,
-    TOOLS_BY_NAME,
-    format_bash_result,
-    run_bash,
-    validate_input,
-)
+from chinamax.tools import REPORT_RESULT, Registry, build_registry
 from chinamax.transcript import Transcript
 
 SYSTEM_TEMPLATE = """You are a worker model executing one task inside the workspace {workspace}.
 
 {posture}
 
-Use the bash tool to inspect and change that workspace; every command runs with \
-{workspace} as its working directory.
+Every tool is confined to that workspace: the file tools reject any path that \
+resolves outside it, and bash runs with {workspace} as its working directory. \
+Commands that destroy data or leave the machine are refused, and each one is \
+bounded by a timeout whose expiry comes back as an observation rather than \
+ending the job.
 
 When the task is finished — whether it succeeded or not — you MUST call the \
 report_result tool. That call is the only way to end this job, and its payload is \
@@ -39,11 +38,13 @@ and concerns as far as they apply."""
 
 WRITE_POSTURE = "You may create and modify files in this workspace."
 READ_ONLY_POSTURE = (
-    "This job is read-only: investigate and report, do not modify this workspace."
+    "This job is read-only: investigate and report, do not modify this workspace. "
+    "The file-editing tools are not available to you and write-shaped shell "
+    "commands are refused."
 )
 
 NUDGE = (
-    "Your last turn used no tools. Keep working with the bash tool, or call the "
+    "Your last turn used no tools. Keep working with the tools you have, or call the "
     "report_result tool to finish this job — report_result is the only way to end it."
 )
 
@@ -65,10 +66,18 @@ def run_loop(
     Returns:
         The ``report_result`` payload, verbatim.
     """
+    registry = build_registry(spec.write)
+    # The workspace realpath is resolved once per Job: every later containment
+    # check compares against it instead of realpathing the root again.
+    context = ToolContext(
+        root=Path(os.path.realpath(spec.workspace)),
+        write=spec.write,
+        bash_timeout_s=spec.bash_timeout_s,
+    )
     messages: list[dict] = []
     _append(transcript, messages, "user", [{"type": "text", "text": spec.prompt}])
     while True:
-        content = _stream_turn(client, profile, spec, messages)
+        content = _stream_turn(client, profile, spec, registry, messages)
         _append(transcript, messages, "assistant", content)
 
         tool_uses = [block for block in content if block.get("type") == "tool_use"]
@@ -79,7 +88,7 @@ def run_loop(
             _append(transcript, messages, "user", [{"type": "text", "text": NUDGE}])
             continue
 
-        results, payload = _run_tool_uses(tool_uses, spec)
+        results, payload = _run_tool_uses(tool_uses, registry, context)
         if payload is not None:
             # Siblings of the terminal report_result are still answered in the
             # durable record, even though no further request is sent.
@@ -93,6 +102,7 @@ def _stream_turn(
     client: anthropic.Anthropic,
     profile: Profile,
     spec: JobSpec,
+    registry: Registry,
     messages: list[dict],
 ) -> list[dict]:
     """Stream one assistant turn and return its content blocks as plain dicts."""
@@ -100,19 +110,26 @@ def _stream_turn(
         model=profile.model,
         max_tokens=profile.max_tokens,
         system=_system_prompt(spec),
-        tools=TOOLS,
+        tools=registry.schemas,
         messages=messages,
     ) as stream:
         message = stream.get_final_message()
     return [_block_to_dict(block) for block in message.content]
 
 
-def _run_tool_uses(tool_uses: list[dict], spec: JobSpec) -> tuple[list[dict], dict | None]:
+def _run_tool_uses(
+    tool_uses: list[dict], registry: Registry, context: ToolContext
+) -> tuple[list[dict], dict | None]:
     """Execute every tool_use block in arrival order.
+
+    Every call goes through the registry, so a name this Job does not carry —
+    a write tool in a read-only Job, or one that was never registered — comes
+    back as an error observation instead of executing.
 
     Args:
         tool_uses: The turn's tool_use blocks.
-        spec: The validated job spec.
+        registry: The Job's posture-filtered registry.
+        context: The Job's tool context.
 
     Returns:
         The tool_result blocks to send back, and the terminal ``report_result``
@@ -125,32 +142,21 @@ def _run_tool_uses(tool_uses: list[dict], spec: JobSpec) -> tuple[list[dict], di
         tool_use_id = block.get("id")
         value = block.get("input")
 
-        tool = TOOLS_BY_NAME.get(name)
-        if tool is None:
-            results.append(
-                _error_result(
-                    tool_use_id,
-                    f"unknown tool {name!r}; available tools: "
-                    f"{', '.join(TOOLS_BY_NAME)}",
-                )
-            )
-            continue
-        problem = validate_input(tool["input_schema"], value)
-        if problem is not None:
-            results.append(_error_result(tool_use_id, f"invalid input for {name!r}: {problem}"))
+        if name == REPORT_RESULT:
+            problem = registry.validate(name, value)
+            if problem is not None:
+                results.append(_error_result(tool_use_id, problem))
+            elif payload is None:
+                # The terminal block is deliberately left unanswered: it IS the terminus.
+                payload = value
             continue
 
-        if name == REPORT_RESULT:
-            # The terminal block is deliberately left unanswered: it IS the terminus.
-            if payload is None:
-                payload = value
-        elif name == BASH:
+        content, is_error = registry.dispatch(name, value, context)
+        if is_error:
+            results.append(_error_result(tool_use_id, content))
+        else:
             results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content": format_bash_result(run_bash(value["command"], spec.workspace)),
-                }
+                {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
             )
     return results, payload
 

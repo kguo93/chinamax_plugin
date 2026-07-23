@@ -1,7 +1,10 @@
 # repo-map — src/chinamax/tools/
 
-The tool registry the Runtime advertises to the provider. This slice ships two tools; the rich set (read_file, write_file, str_replace_edit, list_dir, grep, glob, apply_patch) arrives in slice 02.
+The nine tools the Runtime advertises, and the single boundary that dispatches them. Each tool is a small class carrying a `spec` (the advertised JSON schema), a `writes` flag (what the read-only posture filters on) and, except for the terminus, an `execute(value, context)`.
 
-- `__init__.py` — the registry itself: `TOOLS` (the advertised list, in order), `TOOLS_BY_NAME`, the `BASH`/`REPORT_RESULT` name constants, and `validate_input()`, the shared `input_schema` checker every tool_use passes through.
-- `bash.py` — `BASH_TOOL` (schema), `run_bash()` (cwd-pinned `bash -c` with both pipes drained concurrently), `format_bash_result()` (the tool_result rendering), and `TailBuffer`, the bounded ~50 KB tail capture the later tools reuse.
-- `report_result.py` — `REPORT_RESULT_TOOL`: the seven-field completion schema (`outcome` enum and `summary` required) and the `REPORT_RESULT` name constant. The tool has no executor — it is the loop's terminus.
+- `__init__.py` — the registry and its dispatch boundary: `ALL_TOOLS` (every tool, in advertised order), `build_registry(write)` (the posture filter), `Registry` (`.schemas`/`.names`/`.validate()`/`.dispatch()` — one object feeding both the advertised schema and the executable dispatch table, and owning input validation, output truncation and `Exception` normalization), the `REPORT_RESULT` name constant, and `validate_input()`, the shared `input_schema` checker.
+- `bash.py` — `BashTool` (denylist and read-only checks, then execution), `run_bash()` (cwd-pinned `bash -c`, own process group, both pipes drained concurrently, timeout → SIGTERM/grace/SIGKILL of the whole group), `format_bash_result()`, `truncate_tail()` (the boundary's output bound) and `TailBuffer` (the streaming ~50 KB tail capture).
+- `files.py` — `ReadFile` (1-based `offset`/`limit`), `WriteFile` (create/overwrite, `mkdir -p` inside the workspace), `StrReplaceEdit` (literal, exactly-one-occurrence), `ListDir` (single level, entries re-validated), their schemas, and `read_text()` (strict UTF-8).
+- `search.py` — `Grep` (regex or `fixed`, `path`/`include` filters, capped files and matches) and `Glob`, plus `walk_files()` (the shared `os.walk(followlinks=False)` traversal that re-validates every entry) and `matches_glob()`.
+- `patch.py` — `ApplyPatch` (resolve-all, dry-run-all, then stage-and-rename), `parse_patch()` → `FileEdit`/`Hunk`, and `_apply_hunks()`'s strict no-fuzz context matching.
+- `report_result.py` — `REPORT_RESULT_TOOL` (the seven-field completion schema, `outcome` enum and `summary` required), the `REPORT_RESULT` name constant, and `ReportResult`, which carries no executor because it is the loop's terminus.

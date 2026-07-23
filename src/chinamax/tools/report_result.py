@@ -30,3 +30,16 @@ REPORT_RESULT_TOOL = {
         "required": ["outcome", "summary"],
     },
 }
+
+
+class ReportResult:
+    """The terminal tool: advertised like any other, but deliberately not executable.
+
+    It carries no ``execute``, because there is nothing to execute — the loop
+    recognizes the name, takes the payload as the Job's result and stops. Giving
+    it an executor would imply the Runtime does something to the payload, and
+    ADR 0007 says it does not.
+    """
+
+    spec = REPORT_RESULT_TOOL
+    writes = False

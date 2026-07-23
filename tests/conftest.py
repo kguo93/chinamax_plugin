@@ -8,12 +8,14 @@ endpoint-clean by default rather than by opting in.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from chinamax.__main__ import main
+from chinamax.transcript import read_messages
 from fake_provider import FakeProvider, text_block, tool_use_block, turn
 
 PROFILE = "deepseek"
@@ -54,6 +56,34 @@ def bash_then_report_script() -> list[dict]:
 def report_turn() -> dict:
     """Script the terminal report_result turn."""
     return turn([tool_use_block(REPORT_TOOL_USE_ID, "report_result", REPORT_PAYLOAD)])
+
+
+def tool_script(*calls: tuple[str, dict]) -> list[dict]:
+    """Script one turn per ``(tool name, input)`` call, then the terminal turn.
+
+    One call per turn, so a test can assert that the loop carried on to the NEXT
+    turn after an observation — which is the whole point of tools that fail
+    without ending the Job.
+    """
+    return [
+        turn([tool_use_block(f"toolu_{index}", name, value)])
+        for index, (name, value) in enumerate(calls)
+    ] + [report_turn()]
+
+
+def bash_script(*commands: str) -> list[dict]:
+    """Script one bash turn per command, then the terminal turn."""
+    return tool_script(*(("bash", {"command": command}) for command in commands))
+
+
+def tool_results(messages: list[dict]) -> list[dict]:
+    """Return every tool_result block in a message sequence, in order."""
+    return [
+        block
+        for message in messages
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
 
 
 def write_overlay(home: Path, rows: list[dict]) -> None:
@@ -109,6 +139,22 @@ class JobEnv:
     def result(self) -> dict:
         """Return the stored result, parsed."""
         return json.loads(self.result_path.read_text(encoding="utf-8"))
+
+    def observations(self) -> list[dict]:
+        """Return every tool_result the Job produced, from its durable Thread."""
+        return tool_results(read_messages(self.transcript_path))
+
+    def tree(self) -> list[str]:
+        """Return every path under the workspace, relative and sorted.
+
+        Walked with ``followlinks=False`` rather than ``rglob``, which follows
+        directory symlinks on Python 3.12 and would walk out of the workspace.
+        """
+        found = []
+        for directory, dirnames, filenames in os.walk(self.workspace, followlinks=False):
+            for name in dirnames + filenames:
+                found.append(os.path.relpath(os.path.join(directory, name), self.workspace))
+        return sorted(found)
 
 
 @pytest.fixture(autouse=True)
@@ -172,9 +218,12 @@ __all__ = [
     "REPORT_PAYLOAD",
     "REPORT_TOOL_USE_ID",
     "SYNTHETIC_KEYS",
+    "bash_script",
     "bash_then_report_script",
     "report_turn",
     "text_block",
+    "tool_results",
+    "tool_script",
     "tool_use_block",
     "turn",
     "write_keys",

@@ -1,6 +1,6 @@
 # repo-map
 
-Repository for the `chinamax` worker-model subagent plugin for Claude Code. The Runtime's walking skeleton (slice runtime-01) is implemented; the jobs and surface scopes are still design-only.
+Repository for the `chinamax` worker-model subagent plugin for Claude Code. The Runtime is implemented through slice runtime-02 — the walking skeleton plus the full tool registry with tool-layer confinement; the jobs and surface scopes are still design-only.
 
 - `pyproject.toml` — packaging for the `chinamax` Runtime: src layout, `anthropic` runtime dep, `[test]` extra, and the `data/*.json` package-data rule that ships the shipped Profiles.
 - `.gitignore` — the editable install's byproducts (`__pycache__/`, `*.pyc`, `*.egg-info/`), which are never committed.
