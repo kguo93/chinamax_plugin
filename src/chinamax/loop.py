@@ -10,17 +10,30 @@ after the stream completes — and only ever after an attempt COMPLETES, since
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from typing import Callable
 
 import anthropic
 
 from chinamax.confinement import ToolContext
-from chinamax.liveness import LoopConfig, stream_with_ladder
+from chinamax.liveness import LoopConfig, emit_event, stream_with_ladder
 from chinamax.profiles import Profile
 from chinamax.spec import JobSpec
 from chinamax.tools import REPORT_RESULT, Registry, build_registry
 from chinamax.transcript import Transcript
+
+#: The progress-phase vocabulary, CLOSED: a reporter is called with one of these
+#: verbatim, and the jobs scope stores it as the Job record's ``phase``.
+PHASE_STARTING = "starting"
+PHASE_CALLING_MODEL = "calling-model"
+PHASE_RUNNING_TOOL = "running-tool"
+PHASE_REPORTING = "reporting"
+PHASES = (PHASE_STARTING, PHASE_CALLING_MODEL, PHASE_RUNNING_TOOL, PHASE_REPORTING)
+
+#: How much of a tool's input a progress line quotes.
+_PREVIEW_LIMIT = 200
 
 SYSTEM_TEMPLATE = """You are a worker model executing one task inside the workspace {workspace}.
 
@@ -57,6 +70,7 @@ def run_loop(
     spec: JobSpec,
     transcript: Transcript,
     config: LoopConfig,
+    reporter: Callable[[str, str], None] | None = None,
 ) -> dict:
     """Drive one Job to its report_result.
 
@@ -70,6 +84,10 @@ def run_loop(
         spec: The validated job spec.
         transcript: The Job's open Thread transcript.
         config: The Job's supervision configuration.
+        reporter: Called ``(phase, message)`` at every turn boundary and around
+            each tool execution, with ``phase`` from `PHASES`. The jobs scope
+            mirrors it into the Job's log and record; a callback that raises is
+            logged and swallowed.
 
     Returns:
         The ``report_result`` payload, verbatim.
@@ -86,8 +104,16 @@ def run_loop(
         bash_timeout_s=spec.bash_timeout_s,
     )
     messages: list[dict] = []
+    _report(
+        reporter,
+        PHASE_STARTING,
+        f"job started on profile {profile.name} in {spec.workspace}",
+    )
     _append(transcript, messages, "user", [{"type": "text", "text": spec.prompt}])
+    turn_number = 0
     while True:
+        turn_number += 1
+        _report(reporter, PHASE_CALLING_MODEL, f"turn {turn_number}: calling {profile.model}")
         content = _stream_turn(client, profile, spec, registry, messages, config, transcript)
         _append(transcript, messages, "assistant", content)
 
@@ -96,10 +122,15 @@ def run_loop(
             # Keys on the absence of tool_use, never on stop_reason: end_turn,
             # max_tokens and stop_sequence all produce a tool-less turn, and
             # re-sending would repeat the same request forever.
+            _report(
+                reporter,
+                PHASE_CALLING_MODEL,
+                f"turn {turn_number}: no tool use; restating the report_result contract",
+            )
             _append(transcript, messages, "user", [{"type": "text", "text": NUDGE}])
             continue
 
-        results, payload = _run_tool_uses(tool_uses, registry, context)
+        results, payload = _run_tool_uses(tool_uses, registry, context, reporter)
         if payload is not None:
             # Siblings of the terminal report_result are still answered in the
             # durable record, even though no further request is sent.
@@ -138,7 +169,10 @@ def _stream_turn(
 
 
 def _run_tool_uses(
-    tool_uses: list[dict], registry: Registry, context: ToolContext
+    tool_uses: list[dict],
+    registry: Registry,
+    context: ToolContext,
+    reporter: Callable[[str, str], None] | None = None,
 ) -> tuple[list[dict], dict | None]:
     """Execute every tool_use block in arrival order.
 
@@ -150,6 +184,7 @@ def _run_tool_uses(
         tool_uses: The turn's tool_use blocks.
         registry: The Job's posture-filtered registry.
         context: The Job's tool context.
+        reporter: The progress reporter, called around each execution.
 
     Returns:
         The tool_result blocks to send back, and the terminal ``report_result``
@@ -169,9 +204,20 @@ def _run_tool_uses(
             elif payload is None:
                 # The terminal block is deliberately left unanswered: it IS the terminus.
                 payload = value
+                _report(
+                    reporter,
+                    PHASE_REPORTING,
+                    f"report_result: outcome={value.get('outcome')!r}",
+                )
             continue
 
+        _report(reporter, PHASE_RUNNING_TOOL, f"{name}: {_preview(value)}")
         content, is_error = registry.dispatch(name, value, context)
+        _report(
+            reporter,
+            PHASE_RUNNING_TOOL,
+            f"{name}: {'error' if is_error else 'ok'}, {len(content)} chars",
+        )
         if is_error:
             results.append(_error_result(tool_use_id, content))
         else:
@@ -179,6 +225,39 @@ def _run_tool_uses(
                 {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
             )
     return results, payload
+
+
+def _preview(value: object) -> str:
+    """Render a tool's input compactly for one progress line."""
+    try:
+        text = json.dumps(value, sort_keys=True)
+    except (TypeError, ValueError):
+        text = repr(value)
+    return text if len(text) <= _PREVIEW_LIMIT else text[:_PREVIEW_LIMIT] + "…"
+
+
+def _report(
+    reporter: Callable[[str, str], None] | None, phase: str, message: str
+) -> None:
+    """Deliver one progress event, swallowing a reporter failure.
+
+    An observability failure must never turn otherwise valid model work into a
+    Runtime failure, so a callback that raises is logged and dropped.
+
+    Args:
+        reporter: The progress reporter, or None when nobody is listening.
+        phase: One of `PHASES`.
+        message: The event text.
+    """
+    if reporter is None:
+        return
+    try:
+        reporter(phase, message)
+    except Exception as error:  # noqa: BLE001 - see the docstring
+        emit_event(
+            "warning",
+            {"message": f"progress reporter failed: {type(error).__name__}: {error}"},
+        )
 
 
 def _error_result(tool_use_id: str | None, message: str) -> dict:

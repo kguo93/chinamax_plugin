@@ -1,11 +1,11 @@
 # repo-map
 
-Repository for the `chinamax` worker-model subagent plugin for Claude Code. The Runtime is implemented through slice runtime-03 — the walking skeleton, the full tool registry with tool-layer confinement, and liveness-based supervision (inactivity watchdog, retry ladder, no caps); the jobs and surface scopes are still design-only.
+Repository for the `chinamax` worker-model subagent plugin for Claude Code. The Runtime is implemented through slice runtime-03 — the walking skeleton, the full tool registry with tool-layer confinement, and liveness-based supervision (inactivity watchdog, retry ladder, no caps) — and the jobs scope through slice jobs-01: durable detached dispatch, with the `task`/`task-worker`/`status`/`logs` verbs over a per-workspace Job store that nothing reaps. The rest of the jobs scope (result/cancel/resume/pruning, the steer queue) and the whole surface scope (Bridge Agent, commands, hooks, install) are still design-only.
 
 - `pyproject.toml` — packaging for the `chinamax` Runtime: src layout, `anthropic` and `httpx` runtime deps, `[test]` extra, and the `data/*.json` package-data rule that ships the shipped Profiles.
 - `.gitignore` — the editable install's byproducts (`__pycache__/`, `*.pyc`, `*.egg-info/`), which are never committed.
 - `src/` — the Runtime package (`chinamax`); see `src/repo-map.md`.
-- `tests/` — pytest suite driving the Runtime against the hermetic fake provider; see `tests/repo-map.md`.
+- `tests/` — pytest suite driving the Runtime and the Job supervisor against the hermetic fake provider, with real detached workers; see `tests/repo-map.md`.
 - `CONTEXT.md` — domain glossary (Bridge Agent, Runtime, Job, Thread, Profile, Steer, Pro).
 - `CLAUDE.md` — conventions and design-phase decisions (see `./repo-map.md` for inventory).
 - `AGENTS.md` — stub pointing agents at `CLAUDE.md`.

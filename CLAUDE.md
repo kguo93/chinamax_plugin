@@ -47,3 +47,10 @@ Runtime conventions added by slice runtime-02 (the tool registry and its confine
 - Read-only enforcement is a single posture-filtered registry serving both the advertised schema and the dispatch table — schema omission alone is not the enforcement point.
 - A bash timeout kills the child's whole process group and comes back as an observation; the Job continues (ADR 0002). `bash_timeout_s` is bounds-checked at spec validation.
 - ADR 0005's residual risks (read-only bash bypasses, network egress, substitution evasions) are documented, not defended. Do not expand the denylist to chase them.
+
+Jobs conventions added by slice jobs-01 (durable detached dispatch) — the working detail lives in `src/chinamax/CLAUDE.md` and `tests/CLAUDE.md`:
+- One CLI entrypoint is the seam for every verb, and the exit codes are shared across the Job verbs so the Bridge branches on a code rather than parsing prose: 0 = terminal, 2 = still active, 1 = usage or resolution error. The set is TOTAL — every non-terminal return is 2, including an early `--wait` wake-up on progress. Later scopes (jobs/02's derived `interrupted`, surface/01's Bridge) are pinned to it; do not add a fourth code.
+- Per-Job records are the source of truth and `state.json` is a derived id cache. Every record mutation goes through the one locked compare-and-swap updater in `state.py`, and every write is tmp+rename — never an ad-hoc write, never last-writer-wins.
+- Nothing anywhere reaps, kills, or deletes a Job at a session boundary, and no API or CLI selector is keyed on a session id (ADR 0004). `sessionId` is provenance only.
+- The Runtime is called IN-PROCESS by the worker through the same validated entry `exec` uses; a verb never subprocesses back into another verb.
+- The progress-phase vocabulary is closed (`starting`, `calling-model`, `running-tool`, `reporting`) and is the Job record's `phase` verbatim. Anything a Job logs is control-character-escaped so one event is always exactly one line.

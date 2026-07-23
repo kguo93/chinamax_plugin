@@ -7,13 +7,18 @@ endpoint-clean by default rather than by opting in.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
-from dataclasses import dataclass
+import signal
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
+from chinamax import state
 from chinamax.__main__ import main, run_exec
 from chinamax.liveness import LoopConfig
 from chinamax.transcript import read_messages
@@ -227,6 +232,159 @@ class JobEnv:
         return sorted(found)
 
 
+def wait_for(predicate, timeout_s: float = 60.0, interval_s: float = 0.05) -> bool:
+    """Poll a predicate until it holds or the bound expires.
+
+    Args:
+        predicate: Called repeatedly; the wait ends when it returns truthy.
+        timeout_s: The bound.
+        interval_s: The poll interval.
+
+    Returns:
+        Whether the predicate held before the bound.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval_s)
+    return bool(predicate())
+
+
+def wait_for_status(store, job_id: str, statuses, timeout_s: float = 90.0) -> dict:
+    """Wait until a Job's record reaches one of ``statuses`` and return it.
+
+    Returns an empty dict when the record never became readable, so a caller
+    reaping an unknown store does not fail on a Job it does not own.
+    """
+    wanted = set(statuses)
+    wait_for(lambda: (store.try_read(job_id) or {}).get("status") in wanted, timeout_s)
+    return store.try_read(job_id) or {}
+
+
+@dataclass
+class DispatchEnv:
+    """A workspace whose dispatches land in a temp state dir.
+
+    Every dispatch spawns the REAL detached worker against the fake provider —
+    no mocked process layer anywhere (the jobs PRD's testing decisions).
+    """
+
+    home: Path
+    workspace: Path
+    plugin_data: Path
+    state_dir: Path
+    start_provider: object
+    providers: dict = field(default_factory=dict)
+
+    def bind(self, script: list[dict], profile: str = PROFILE) -> FakeProvider:
+        """Start a fake provider and point one Profile at it through the overlay."""
+        provider = self.start_provider(script)
+        self.providers[profile] = provider
+        write_overlay(
+            self.home,
+            [
+                {"name": name, "base_url": bound.base_url}
+                for name, bound in self.providers.items()
+            ],
+        )
+        return provider
+
+    @property
+    def store(self):
+        """Return the store this workspace's dispatches land in."""
+        return state.JobStore(self.state_dir, workspace_root=self.workspace)
+
+    def dispatch(
+        self,
+        *extra: str,
+        prompt: str = "Do the task.",
+        profile: str = PROFILE,
+        workspace: Path | None = None,
+    ) -> tuple[int, str]:
+        """Run the ``task`` verb and return ``(exit code, printed job id)``."""
+        argv = [
+            "task",
+            "--profile",
+            profile,
+            "--workspace",
+            str(self.workspace if workspace is None else workspace),
+            *extra,
+            "--",
+            prompt,
+        ]
+        stream = io.StringIO()
+        with contextlib.redirect_stdout(stream):
+            code = main(argv)
+        return code, stream.getvalue().strip()
+
+    def reap(self) -> None:
+        """Let every worker this test started finish, then kill what is left.
+
+        Walks every store under the temp state root, so a dispatch aimed at
+        another workspace is reaped too. Runs BEFORE the fake provider is torn
+        down (fixture ordering), so a still-running worker never spends the
+        retry ladder on a dead endpoint.
+        """
+        for directory in sorted((self.plugin_data / "state").glob("*")):
+            if not directory.is_dir():
+                continue
+            store = state.JobStore(directory)
+            for job_id in store.job_ids():
+                record = store.try_read(job_id) or {}
+                if not self._is_our_live_worker(record):
+                    continue
+                record = wait_for_status(store, job_id, state.TERMINAL_STATUSES, 45.0)
+                if self._is_our_live_worker(record):
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.kill(record["pid"], signal.SIGKILL)
+
+    @staticmethod
+    def _is_our_live_worker(record: dict) -> bool:
+        """Report whether a record names a worker this test really started.
+
+        The recorded ``pidStartTime`` must still match the live process — the
+        same pid-reuse guard jobs/02 grades with, used here so teardown can
+        never signal an unrelated process that inherited the pid.
+        """
+        if record.get("status") in state.TERMINAL_STATUSES:
+            return False
+        pid, start = record.get("pid"), record.get("pidStartTime")
+        if not isinstance(pid, int) or start is None:
+            return False
+        return state.read_pid_start_time(pid) == start
+
+
+@pytest.fixture
+def dispatch_env(tmp_path, keyless_home, start_fake_provider, monkeypatch):
+    """Return a factory for a workspace whose state dir is under the temp tree."""
+    created: list[DispatchEnv] = []
+
+    def _make(script: list[dict] | None = None) -> DispatchEnv:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir(exist_ok=True)
+        plugin_data = tmp_path / "plugin-data"
+        monkeypatch.setenv("CLAUDE_PLUGIN_DATA", str(plugin_data))
+        monkeypatch.delenv(state.SESSION_ID_VARIABLE, raising=False)
+        monkeypatch.delenv(state.WORKER_PYTHON_VARIABLE, raising=False)
+        root = state.resolve_workspace_root(workspace)
+        env = DispatchEnv(
+            home=keyless_home,
+            workspace=workspace,
+            plugin_data=plugin_data,
+            state_dir=state.state_root() / state.workspace_key(root),
+            start_provider=start_fake_provider,
+        )
+        if script is not None:
+            env.bind(script)
+        created.append(env)
+        return env
+
+    yield _make
+    for env in created:
+        env.reap()
+
+
 @pytest.fixture(autouse=True)
 def keyless_home(tmp_path_factory, monkeypatch) -> Path:
     """Point HOME at a temporary dir with synthetic keys and no ambient endpoint."""
@@ -282,6 +440,7 @@ def job_env(tmp_path, keyless_home, start_fake_provider):
 __all__ = [
     "BASH_COMMAND",
     "BASH_TOOL_USE_ID",
+    "DispatchEnv",
     "JobEnv",
     "OMIT",
     "PROFILE",
@@ -302,6 +461,8 @@ __all__ = [
     "tool_script",
     "tool_use_block",
     "turn",
+    "wait_for",
+    "wait_for_status",
     "write_keys",
     "write_overlay",
 ]

@@ -16,6 +16,17 @@ Inventory lives in `./repo-map.md`. Run the suite with the command in the root `
 - **`JobEnv.tree()` walks with `followlinks=False`**, not `rglob`, for the same reason the Runtime does: on Python 3.12 `rglob` follows directory symlinks and a confinement test would walk out of its own workspace.
 - **The process-group test is only meaningful because an orphan normally survives.** `test_timeout_observation_continues` asserts a backgrounded descendant is dead; killing the child alone leaves it running, which is what makes the assertion bite.
 
+## Dispatch tests
+
+- **Real detached processes, never a mocked process layer** (the jobs PRD's testing decisions). `dispatch_env` points `CLAUDE_PLUGIN_DATA` at a temp dir so the real `task` verb spawns a real worker into a temp state root; the operator's own state dir is never touched. `test_spawn_failure_marks_failed` makes `Popen` raise for real by pointing `CHINAMAX_WORKER_PYTHON` at a non-executable file — that override exists FOR that test.
+- **`reap()` runs before the fake provider is torn down,** by fixture ordering, so a still-running worker never spends its retry ladder against a dead endpoint and stalls the suite. It waits every worker out first and only then SIGKILLs, and it guards the kill on the recorded `pidStartTime` still matching the live process, so teardown can never signal an unrelated process that inherited the pid. A new dispatch-spawning test must use `dispatch_env`, or its worker leaks past the run.
+- **Never SIGKILL a group without checking it is not pytest's own.** `kill_group` asserts `os.getpgid(shell.pid) != os.getpgid(0)` first. The background-execution test is only meaningful because the worker is in its OWN session and therefore outside the killed group — kill the dispatcher alone and the assertion proves nothing.
+- **Wait on the LOG, not on the record's phase, to observe a running Job.** Record writes are throttled to one per poll interval; the log is flushed per line and is the channel that is never behind.
+- **A `--wait` test that must prove it woke on the LOG has to hold status and phase still,** which a live worker will not do on cue — `running_job()` builds the record directly for exactly that reason. Conversely, `test_wait_returns_early` needs a real worker, because the thing under test is the lag between completion and return.
+- **Assert the index CONTENTS, not that `state.json` parses.** A lost index update leaves perfectly valid JSON that is simply missing a Job, which a parse-only assertion passes.
+- **`test_fast_worker_does_not_lose_pid_race` pins only the MOMENT the dispatcher reaches its bookkeeping write** — the worker, the store and the compare-and-swap are all genuine. Without that barrier the ordering the test exists to cover is a coin flip.
+- **A `logs`/preview escaping test must assert the line COUNT.** The point is that one event is exactly one line; asserting only that `\\x1b` appears passes against an implementation that also emitted the forged second line.
+
 ## Liveness tests
 
 - **Inject the supervision seams through `run()`, not by monkeypatching.** `JobEnv.run(spec, config=loop_config(sleeper))` hands a `LoopConfig` to the real `run_exec` entry, so backoff is deterministic (identity jitter) and instantaneous (the sleeper only records) while the test still drives the production path. Numbers like `inactivity_timeout_s` go through the JOB SPEC, because that is how a dispatch overrides them in production.

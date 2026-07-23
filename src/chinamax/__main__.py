@@ -1,34 +1,88 @@
-"""CLI seam for the Runtime. This slice ships one verb: ``exec``."""
+"""CLI seam for the Runtime and the Job supervisor.
+
+Verbs: ``exec`` (run one spec in the foreground), ``task`` (dispatch a durable
+detached Job and return its id), ``task-worker`` (the detached worker itself),
+``status`` and ``logs``. Exit codes are shared across the Job verbs so the
+Bridge branches on a code instead of parsing prose: 0 = the Job is terminal,
+2 = the Job is still active, 1 = a usage or resolution error. The set is TOTAL —
+every non-terminal return is 2, including an early wake-up on progress.
+
+Nothing here reaps state at a session boundary (ADR 0004).
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
-from chinamax import ChinamaxError, profiles, provider
+from chinamax import ChinamaxError, profiles, provider, state
 from chinamax.liveness import LoopConfig, RunFailure, build_config, emit_event
-from chinamax.loop import run_loop
-from chinamax.spec import load_spec
+from chinamax.loop import PHASE_REPORTING, PHASE_STARTING, run_loop
+from chinamax.spec import JobSpec, load_spec, parse_spec
 from chinamax.transcript import Transcript
+
+#: How many trailing log lines `status` shows as a Job's progress preview.
+PREVIEW_LINES = 4
+#: How many finished Jobs a bare `status` lists beside every active one.
+RECENT_LIMIT = 20
+
+EXIT_TERMINAL = 0
+EXIT_ACTIVE = 2
+EXIT_ERROR = 1
+
+
+def execute_spec(
+    spec: JobSpec,
+    config: LoopConfig | None = None,
+    reporter=None,
+) -> dict:
+    """Run one validated Job to its result.
+
+    The shared entry: sanitizing the environment lives here, not in a verb
+    handler, so the `exec` verb and the jobs scope's in-process task-worker both
+    get it. The worker calls this directly rather than subprocessing back into
+    `exec`, and never re-implements the loop.
+
+    Args:
+        spec: The validated job spec.
+        config: Supervision configuration to override the defaults with; the
+            spec's own overrides are applied on top.
+        reporter: The progress reporter handed to the loop.
+
+    Returns:
+        The ``report_result`` payload, verbatim.
+
+    Raises:
+        RunFailure: On ladder exhaustion or a permanent provider error.
+        ChinamaxError: On any configuration failure.
+    """
+    provider.sanitize_environment()
+    config = build_config(spec, config)
+    profile = profiles.resolve_profile(spec.profile)
+    client = provider.build_client(
+        profile, profiles.resolve_key(profile), config.inactivity_timeout_s
+    )
+    with Transcript(spec.transcript_path, clock=config.clock) as transcript:
+        payload = run_loop(client, profile, spec, transcript, config, reporter=reporter)
+    _write_result(spec.result_path, payload)
+    return payload
 
 
 def run_exec(spec_path: str | Path, config: LoopConfig | None = None) -> int:
     """Run one Job from a job-spec file.
 
-    The shared exec entry: sanitizing the environment lives here, not in the
-    argument parsing, so an in-process caller gets it too. It is also the
-    failure seam — the Runtime owns no state store, so ladder exhaustion and a
-    permanent provider error end the run here, as a nonzero exit plus one
-    structured JSON line through the progress reporter.
+    The Runtime owns no state store, so this is also the failure seam: ladder
+    exhaustion and a permanent provider error end the run here, as a nonzero
+    exit plus one structured JSON line through the progress reporter.
 
     Args:
         spec_path: Path to the job-spec JSON file.
-        config: Supervision configuration to override the defaults with; the
-            spec's own overrides are applied on top. In-process callers supply
-            one to inject the clock, sleeper and jitter seams.
+        config: Supervision configuration to override the defaults with.
 
     Returns:
         0 once the result has been written, 1 on a terminal provider failure.
@@ -36,21 +90,230 @@ def run_exec(spec_path: str | Path, config: LoopConfig | None = None) -> int:
     Raises:
         ChinamaxError: On any validation or configuration failure.
     """
-    provider.sanitize_environment()
-    spec = load_spec(spec_path)
-    config = build_config(spec, config)
-    profile = profiles.resolve_profile(spec.profile)
-    client = provider.build_client(
-        profile, profiles.resolve_key(profile), config.inactivity_timeout_s
-    )
     try:
-        with Transcript(spec.transcript_path, clock=config.clock) as transcript:
-            payload = run_loop(client, profile, spec, transcript, config)
+        execute_spec(load_spec(spec_path), config=config)
     except RunFailure as failure:
         emit_event("failure", failure.payload)
-        return 1
-    _write_result(spec.result_path, payload)
-    return 0
+        return EXIT_ERROR
+    return EXIT_TERMINAL
+
+
+def run_task(args: argparse.Namespace) -> int:
+    """Dispatch a durable Job and return its id immediately.
+
+    Everything that can fail fast — the workspace, the prompt, the Profile —
+    fails on stderr BEFORE the record is written, so an unknown Profile never
+    becomes a `failed` Job the operator has to go read.
+
+    Args:
+        args: The parsed ``task`` arguments.
+
+    Returns:
+        0 once the worker is spawned, 1 on a usage or dispatch failure.
+    """
+    prompt = _read_prompt(args.prompt)
+    store = state.open_store(args.workspace)
+    profile = profiles.resolve_profile(args.profile)
+
+    job_id = store.reserve_id()
+    store.create(
+        state.new_record(
+            job_id,
+            prompt=prompt,
+            profile=profile.name,
+            write=not args.read_only,
+            workspace_root=store.workspace_root,
+            log_file=store.log_path(job_id),
+            bash_timeout_s=args.bash_timeout_s,
+            originating_session=state.session_id(),
+        )
+    )
+    state.make_dir(store.steer_dir(job_id))
+    return _spawn_worker(store, job_id)
+
+
+def run_task_worker(job_id: str, state_dir: str) -> int:
+    """Claim a queued Job and run its Runtime loop in-process.
+
+    Args:
+        job_id: The Job to run.
+        state_dir: Its per-workspace state directory.
+
+    Returns:
+        0 when the Job completed (or was already claimed), 1 when it failed.
+    """
+    store = state.JobStore(Path(state_dir))
+    pid = os.getpid()
+    claimed = store.update(
+        job_id,
+        {
+            "status": state.STATUS_RUNNING,
+            "startedAt": state.utc_now(),
+            "phase": PHASE_STARTING,
+            "pid": pid,
+            "pidStartTime": state.read_pid_start_time(pid),
+        },
+        expect={state.STATUS_QUEUED},
+    )
+    if claimed is None:
+        # Already terminal means a cancel landed first; already running means
+        # another live claimant exists. Either way, exit without running rather
+        # than overwriting the record or double-executing the Job.
+        current = (store.try_read(job_id) or {}).get("status", "unreadable")
+        print(
+            f"chinamax: {job_id} is {current!r}, not queued; exiting without running",
+            file=sys.stderr,
+        )
+        return EXIT_TERMINAL
+
+    state.make_dir(store.steer_dir(job_id))
+    transcript_path = state.precreate(store.transcript_path(job_id))
+    result_path = state.precreate(store.result_path(job_id))
+    reporter = state.ProgressReporter(store, job_id)
+    heartbeat = state.Heartbeat(reporter)
+    heartbeat.start()
+    changes: dict = {}
+    try:
+        payload = execute_spec(
+            _worker_spec(job_id, claimed.get("request") or {}, transcript_path, result_path),
+            reporter=reporter,
+        )
+        changes = {
+            "status": state.STATUS_COMPLETED,
+            "result": _fold_result(result_path, payload),
+        }
+    except RunFailure as failure:
+        # The full JSON payload lands in the Job log; the record carries the
+        # compact rendering.
+        reporter(
+            PHASE_REPORTING,
+            json.dumps({"event": "failure", **failure.payload}, sort_keys=True),
+        )
+        changes = {
+            "status": state.STATUS_FAILED,
+            "errorMessage": state.render_failure(failure.payload),
+        }
+    except Exception as error:  # noqa: BLE001 - any escape ends the Job honestly
+        message = f"{type(error).__name__}: {error}"
+        reporter(PHASE_REPORTING, f"job failed: {message}")
+        changes = {"status": state.STATUS_FAILED, "errorMessage": message}
+    finally:
+        # Stopped AND JOINED before the terminal write, so a heartbeat in flight
+        # can never land after — and resurrect `running` over — a terminal record.
+        heartbeat.stop()
+        state.secure_file(result_path)
+        reporter.close()
+
+    changes["phase"] = PHASE_REPORTING
+    changes["completedAt"] = state.utc_now()
+    if store.update(job_id, changes, expect={state.STATUS_RUNNING}) is None:
+        print(
+            f"chinamax: {job_id} left `running` before its terminal write",
+            file=sys.stderr,
+        )
+    return EXIT_TERMINAL if changes["status"] == state.STATUS_COMPLETED else EXIT_ERROR
+
+
+def run_status(args: argparse.Namespace) -> int:
+    """Show running and recent Jobs, or one Job (optionally waiting on change).
+
+    Args:
+        args: The parsed ``status`` arguments.
+
+    Returns:
+        0 for a terminal Job or a bare listing, 2 while a named Job is active.
+    """
+    store = state.open_store(args.workspace)
+    if args.job is None:
+        return _status_list(store)
+    job_id = store.resolve_job(args.job)
+    if args.wait:
+        return _status_wait(store, job_id, args.timeout_ms)
+    record = store.read(job_id)
+    _print_job(store, record)
+    return _exit_code(record)
+
+
+def run_logs(args: argparse.Namespace) -> int:
+    """Print a Job's timestamped progress log, and its spawn log when empty.
+
+    The spawn log is keyed on the progress log being EMPTY, never on status
+    `failed`: the crash it exists for — a worker that dies on import, before it
+    can write anything — leaves the record `queued`.
+
+    Args:
+        args: The parsed ``logs`` arguments.
+
+    Returns:
+        0 for a terminal Job, 2 while it is active.
+    """
+    store = state.open_store(args.workspace)
+    job_id = store.resolve_job(args.job)
+
+    text = _read_text(store.log_path(job_id))
+    if text and args.tail is not None:
+        lines = text.splitlines()[-args.tail :] if args.tail > 0 else []
+        text = "".join(line + "\n" for line in lines)
+    if text.strip():
+        sys.stdout.write(text)
+    else:
+        spawn = _read_text(store.spawn_log_path(job_id))
+        if spawn:
+            print(f"--- spawn log: {store.spawn_log_path(job_id)} ---")
+            sys.stdout.write(spawn if spawn.endswith("\n") else spawn + "\n")
+    return _exit_code(store.read(job_id))
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser.
+
+    Deliberately exposed: it is the surface a test reads to prove no verb takes
+    a session id as a selector (ADR 0004).
+
+    Returns:
+        The parser for every verb.
+    """
+    parser = argparse.ArgumentParser(prog="chinamax", description=__doc__)
+    subcommands = parser.add_subparsers(dest="command", required=True)
+
+    exec_parser = subcommands.add_parser("exec", help="run one Job from a job spec")
+    exec_parser.add_argument("spec_path", help="path to the job-spec JSON file")
+
+    task_parser = subcommands.add_parser("task", help="dispatch a durable detached Job")
+    task_parser.add_argument("--profile", required=True, help="the Profile to run against")
+    task_parser.add_argument(
+        "--read-only", action="store_true", help="opt out of write-capable tools"
+    )
+    task_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+    task_parser.add_argument(
+        "--bash-timeout-s", type=float, default=None, help="per-command bash timeout"
+    )
+    task_parser.add_argument(
+        "prompt", nargs="*", help="the prompt; read from stdin when absent"
+    )
+
+    status_parser = subcommands.add_parser("status", help="show running and recent Jobs")
+    status_parser.add_argument("job", nargs="?", default=None, help="job id or prefix")
+    status_parser.add_argument(
+        "--wait", action="store_true", help="block until the Job changes"
+    )
+    status_parser.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=state.WAIT_TIMEOUT_MS,
+        help=f"wait bound in ms, clamped to {state.WAIT_TIMEOUT_MS}",
+    )
+    status_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+
+    logs_parser = subcommands.add_parser("logs", help="print a Job's progress log")
+    logs_parser.add_argument("job", help="job id or prefix")
+    logs_parser.add_argument("--tail", type=int, default=None, help="only the last N lines")
+    logs_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+
+    worker_parser = subcommands.add_parser("task-worker", help="run a dispatched Job (internal)")
+    worker_parser.add_argument("--job-id", required=True, help="the Job to run")
+    worker_parser.add_argument("--state-dir", required=True, help="its state directory")
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,20 +325,288 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The process exit code.
     """
-    parser = argparse.ArgumentParser(prog="chinamax", description=__doc__)
-    subcommands = parser.add_subparsers(dest="command", required=True)
-    exec_parser = subcommands.add_parser("exec", help="run one Job from a job spec")
-    exec_parser.add_argument("spec_path", help="path to the job-spec JSON file")
-    args = parser.parse_args(argv)
-
+    args = build_parser().parse_args(argv)
     try:
-        return run_exec(args.spec_path)
+        if args.command == "exec":
+            return run_exec(args.spec_path)
+        if args.command == "task":
+            return run_task(args)
+        if args.command == "task-worker":
+            return run_task_worker(args.job_id, args.state_dir)
+        if args.command == "status":
+            return run_status(args)
+        if args.command == "logs":
+            return run_logs(args)
+        raise ChinamaxError(f"unknown command {args.command!r}")
     except ChinamaxError as error:
         print(f"chinamax: {error}", file=sys.stderr)
-        return 1
+        return EXIT_ERROR
     except Exception as error:  # provider/tool failures end the Job non-zero
         print(f"chinamax: {type(error).__name__}: {error}", file=sys.stderr)
-        return 1
+        return EXIT_ERROR
+
+
+def _spawn_worker(store: state.JobStore, job_id: str) -> int:
+    """Spawn the detached worker and record its pid.
+
+    Failures BEFORE the child exists — opening the spawn log, building argv,
+    `Popen` itself — write status `failed` and exit non-zero. The pid write is
+    deliberately NOT in that class: it applies only while the record is still
+    `queued`, so a fast worker that already claimed (or finished) makes the
+    compare-and-swap fail harmlessly. Marking a Job failed because bookkeeping
+    lost a race would strand a live worker under a terminal record.
+
+    Args:
+        store: The Job's store.
+        job_id: The Job to run.
+
+    Returns:
+        0 once the child exists, 1 when the spawn itself failed.
+    """
+    try:
+        spawn_log = state.precreate(store.spawn_log_path(job_id))
+        handle = os.open(spawn_log, os.O_WRONLY | os.O_APPEND)
+        try:
+            child = subprocess.Popen(
+                [
+                    state.worker_python(),
+                    # -P and the neutral cwd stop a workspace that happens to
+                    # contain a `chinamax` module from shadowing the package.
+                    "-P",
+                    "-m",
+                    "chinamax",
+                    "task-worker",
+                    "--job-id",
+                    job_id,
+                    "--state-dir",
+                    str(store.path),
+                ],
+                cwd=str(store.path),
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=handle,
+                close_fds=True,
+            )
+        finally:
+            os.close(handle)
+    except Exception as error:  # noqa: BLE001 - no child exists, so the Job is dead
+        message = f"dispatch failed: {type(error).__name__}: {error}"
+        store.update(
+            job_id,
+            {
+                "status": state.STATUS_FAILED,
+                "errorMessage": message,
+                "completedAt": state.utc_now(),
+            },
+            expect={state.STATUS_QUEUED},
+        )
+        print(f"chinamax: {message}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if (
+        store.update(
+            job_id,
+            {"pid": child.pid, "pidStartTime": state.read_pid_start_time(child.pid)},
+            expect={state.STATUS_QUEUED},
+        )
+        is None
+    ):
+        print(
+            f"chinamax: worker for {job_id} claimed its record before the pid write",
+            file=sys.stderr,
+        )
+    print(job_id)
+    return EXIT_TERMINAL
+
+
+def _worker_spec(
+    job_id: str, request: dict, transcript_path: Path, result_path: Path
+) -> JobSpec:
+    """Rebuild runtime/01's frozen job spec from a Job record.
+
+    It goes through `spec.py` validation on this path too, so a record left
+    half-written by a crash fails with a named field rather than a confusing
+    crash inside the loop.
+
+    Args:
+        job_id: The Job (provenance only).
+        request: The record's ``request`` block.
+        transcript_path: The Job's Thread transcript.
+        result_path: The Job's result artifact.
+
+    Returns:
+        The validated spec.
+
+    Raises:
+        ChinamaxError: Naming the offending field.
+    """
+    data: dict = {
+        "workspace": request.get("workspaceRoot"),
+        "profile": request.get("profile"),
+        "prompt": request.get("prompt"),
+        "transcript_path": str(transcript_path),
+        "result_path": str(result_path),
+        "job_id": job_id,
+    }
+    # `write` is carried separately: False is meaningful and must not be dropped.
+    present = {key: value for key, value in data.items() if value is not None}
+    present["write"] = bool(request.get("write", True))
+    timeout = request.get("bashTimeoutSec")
+    if timeout is not None:
+        present["bash_timeout_s"] = timeout
+    return parse_spec(present)
+
+
+def _fold_result(result_path: Path, payload: dict) -> dict:
+    """Fold the Runtime's result artifact into the record.
+
+    After this the record is the authoritative copy and the file is only the
+    Runtime's write-side artifact; the in-memory payload is the fallback when
+    the file cannot be read back.
+    """
+    try:
+        stored = json.loads(result_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return payload
+    return stored if isinstance(stored, dict) else payload
+
+
+def _read_prompt(words: list[str]) -> str:
+    """Return the dispatch prompt from argv or stdin.
+
+    stdin is read ONLY when argv carries no text and stdin is not a TTY —
+    otherwise a bare ``task --profile x`` at a terminal would hang forever on a
+    read. An empty prompt is refused before any record is written.
+
+    Args:
+        words: The positional prompt words.
+
+    Returns:
+        The prompt.
+
+    Raises:
+        ChinamaxError: If no prompt was supplied.
+    """
+    text = " ".join(words).strip()
+    if not text and sys.stdin is not None and not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+    if not text:
+        raise ChinamaxError(
+            "task needs a prompt: pass it as arguments (after `--`) or on stdin"
+        )
+    return text
+
+
+def _status_list(store: state.JobStore) -> int:
+    """List every active Job plus the most recent finished ones, each once."""
+    records, malformed = store.load_records()
+    if malformed:
+        print(
+            f"chinamax: {len(malformed)} malformed Job record(s): {', '.join(malformed)}",
+            file=sys.stderr,
+        )
+    ordered = sorted(records, key=_updated_at, reverse=True)
+    shown = [record for record in ordered if record["status"] in state.ACTIVE_STATUSES]
+    seen = {record["id"] for record in shown}
+    for record in ordered[:RECENT_LIMIT]:
+        if record["id"] not in seen:
+            shown.append(record)
+            seen.add(record["id"])
+    for record in sorted(shown, key=_updated_at, reverse=True):
+        _print_job(store, record)
+    return EXIT_TERMINAL
+
+
+def _status_wait(store: state.JobStore, job_id: str, timeout_ms: int) -> int:
+    """Block until a Job's status, phase or log changes, or the bound expires.
+
+    The snapshot is ``(status, phase, log size + inode)``; polling is every
+    `state.POLL_INTERVAL_S` on a MONOTONIC clock. An already-terminal Job
+    returns immediately.
+    """
+    bound_s = min(max(timeout_ms, 0), state.WAIT_TIMEOUT_MS) / 1000.0
+    record = store.read(job_id)
+    if record["status"] not in state.TERMINAL_STATUSES:
+        log_path = store.log_path(job_id)
+        snapshot = (record["status"], record["phase"], state.log_signature(log_path))
+        deadline = time.monotonic() + bound_s
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(state.POLL_INTERVAL_S, remaining))
+            record = store.read(job_id)
+            if (
+                record["status"],
+                record["phase"],
+                state.log_signature(log_path),
+            ) != snapshot:
+                break
+    _print_job(store, record)
+    return _exit_code(record)
+
+
+def _print_job(store: state.JobStore, record: dict) -> None:
+    """Print one Job's summary line and its progress preview."""
+    print(
+        "  ".join(
+            [
+                str(record["id"]),
+                f"{record['status']:<9}",
+                f"{record['phase'] or '-':<14}",
+                f"{_elapsed(record):>8}",
+                str(record["profile"]),
+                str(record["title"]),
+            ]
+        )
+    )
+    if record.get("errorMessage"):
+        print(f"    error: {state.escape_control(record['errorMessage'])}")
+    for line in state.tail_lines(store.log_path(record["id"]), PREVIEW_LINES):
+        print(f"    | {line}")
+
+
+def _exit_code(record: dict) -> int:
+    """Map a Job's status onto the shared exit-code convention."""
+    return (
+        EXIT_TERMINAL if record["status"] in state.TERMINAL_STATUSES else EXIT_ACTIVE
+    )
+
+
+def _updated_at(record: dict) -> float:
+    """Sort key: a record's ``updatedAt`` as epoch seconds."""
+    return state.parse_timestamp(record.get("updatedAt")) or 0.0
+
+
+def _elapsed(record: dict) -> str:
+    """Render a Job's elapsed time.
+
+    Measured from ``startedAt`` once running and from ``createdAt`` while
+    queued, and frozen at ``completedAt`` once terminal.
+    """
+    start = state.parse_timestamp(record.get("startedAt")) or state.parse_timestamp(
+        record.get("createdAt")
+    )
+    if start is None:
+        return "-"
+    end = state.parse_timestamp(record.get("completedAt"))
+    if end is None:
+        end = time.time()
+    seconds = int(max(0.0, end - start))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
+def _read_text(path: Path) -> str:
+    """Read a log file, tolerating absence and arbitrary bytes."""
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
 
 
 def _write_result(path: Path, payload: dict) -> None:
