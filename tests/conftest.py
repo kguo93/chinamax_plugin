@@ -14,7 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from chinamax.__main__ import main
+from chinamax.__main__ import main, run_exec
+from chinamax.liveness import LoopConfig
 from chinamax.transcript import read_messages
 from fake_provider import FakeProvider, text_block, tool_use_block, turn
 
@@ -86,6 +87,66 @@ def tool_results(messages: list[dict]) -> list[dict]:
     ]
 
 
+class Sleeper:
+    """Records the ladder's backoff sleeps instead of performing them."""
+
+    def __init__(self) -> None:
+        self.sleeps: list[float] = []
+
+    def __call__(self, seconds: float) -> None:
+        """Record one sleep."""
+        self.sleeps.append(seconds)
+
+
+class SteppingClock:
+    """A clock that jumps a fixed simulated interval on every read."""
+
+    def __init__(self, start: float = 1_700_000_000.0, step: float = 0.0) -> None:
+        self.now = start
+        self.step = step
+
+    def __call__(self) -> float:
+        """Advance and return the simulated time."""
+        self.now += self.step
+        return self.now
+
+
+def identity(value: float) -> float:
+    """Jitter seam for tests: expectations never couple to a PRNG sequence."""
+    return value
+
+
+def loop_config(sleeper: Sleeper, clock: SteppingClock | None = None) -> LoopConfig:
+    """Build a supervision config whose backoff is deterministic and instant."""
+    return LoopConfig(
+        clock=SteppingClock() if clock is None else clock,
+        sleeper=sleeper,
+        jitter=identity,
+    )
+
+
+def reporter_events(err: str) -> list[dict]:
+    """Parse the structured JSON lines the reporter wrote to stderr.
+
+    Filters by shape rather than reading every line: prose errors and any
+    stdlib traceback share the stream, and neither is an event.
+    """
+    events = []
+    for line in err.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and "event" in record:
+            events.append(record)
+    return events
+
+
+def events_named(err: str, name: str) -> list[dict]:
+    """Return the reporter events of one kind, in order."""
+    return [event for event in reporter_events(err) if event["event"] == name]
+
+
 def write_overlay(home: Path, rows: list[dict]) -> None:
     """Write the user Profile overlay into a temporary HOME."""
     (home / ".claude" / "chinamax-profiles.json").write_text(
@@ -129,12 +190,21 @@ class JobEnv:
         fields.update(overrides)
         return {name: value for name, value in fields.items() if value is not OMIT}
 
-    def run(self, spec: dict | None = None) -> int:
-        """Run the Job through the CLI seam and return its exit code."""
+    def run(self, spec: dict | None = None, config: LoopConfig | None = None) -> int:
+        """Run the Job through the exec seam and return its exit code.
+
+        Args:
+            spec: The job spec to write; the default one when omitted.
+            config: Supervision seams (clock, sleeper, jitter) to inject. The
+                shared `run_exec` entry takes them, so a test that needs
+                deterministic backoff still runs the real entry point.
+        """
         self.spec_path.write_text(
             json.dumps(self.spec() if spec is None else spec), encoding="utf-8"
         )
-        return main(["exec", str(self.spec_path)])
+        if config is None:
+            return main(["exec", str(self.spec_path)])
+        return run_exec(self.spec_path, config=config)
 
     def result(self) -> dict:
         """Return the stored result, parsed."""
@@ -218,9 +288,15 @@ __all__ = [
     "REPORT_PAYLOAD",
     "REPORT_TOOL_USE_ID",
     "SYNTHETIC_KEYS",
+    "Sleeper",
+    "SteppingClock",
     "bash_script",
     "bash_then_report_script",
+    "events_named",
+    "identity",
+    "loop_config",
     "report_turn",
+    "reporter_events",
     "text_block",
     "tool_results",
     "tool_script",

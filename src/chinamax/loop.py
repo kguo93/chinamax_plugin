@@ -4,7 +4,8 @@ Every ``tool_use`` block in an assistant turn is executed in arrival order and
 answered by a ``tool_result`` carrying its ``tool_use_id``; the loop ends only
 when ``report_result`` arrives. The transcript is write-ahead: the outgoing
 delta is appended and flushed before the API call, the assembled assistant turn
-after the stream completes.
+after the stream completes — and only ever after an attempt COMPLETES, since
+`liveness` hands nothing back short of ``message_stop``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from pathlib import Path
 import anthropic
 
 from chinamax.confinement import ToolContext
+from chinamax.liveness import LoopConfig, stream_with_ladder
 from chinamax.profiles import Profile
 from chinamax.spec import JobSpec
 from chinamax.tools import REPORT_RESULT, Registry, build_registry
@@ -54,17 +56,26 @@ def run_loop(
     profile: Profile,
     spec: JobSpec,
     transcript: Transcript,
+    config: LoopConfig,
 ) -> dict:
     """Drive one Job to its report_result.
+
+    There is no wall-clock bound and no turn bound on this loop (ADR 0002):
+    ``report_result``, ladder exhaustion, a permanent provider error and the
+    jobs scope's cancel are its only exits.
 
     Args:
         client: The SDK client built for the Profile.
         profile: The resolved Profile.
         spec: The validated job spec.
         transcript: The Job's open Thread transcript.
+        config: The Job's supervision configuration.
 
     Returns:
         The ``report_result`` payload, verbatim.
+
+    Raises:
+        RunFailure: On ladder exhaustion or a permanent provider error.
     """
     registry = build_registry(spec.write)
     # The workspace realpath is resolved once per Job: every later containment
@@ -77,7 +88,7 @@ def run_loop(
     messages: list[dict] = []
     _append(transcript, messages, "user", [{"type": "text", "text": spec.prompt}])
     while True:
-        content = _stream_turn(client, profile, spec, registry, messages)
+        content = _stream_turn(client, profile, spec, registry, messages, config, transcript)
         _append(transcript, messages, "assistant", content)
 
         tool_uses = [block for block in content if block.get("type") == "tool_use"]
@@ -104,16 +115,25 @@ def _stream_turn(
     spec: JobSpec,
     registry: Registry,
     messages: list[dict],
+    config: LoopConfig,
+    transcript: Transcript,
 ) -> list[dict]:
-    """Stream one assistant turn and return its content blocks as plain dicts."""
-    with client.messages.stream(
+    """Stream one assistant turn through the supervision ladder.
+
+    The ladder replays a snapshot of ``messages`` on every attempt and returns
+    only a turn that reached ``message_stop``, so a retried attempt contributes
+    nothing here — and nothing to the canonical history the caller appends to.
+    """
+    message = stream_with_ladder(
+        client,
         model=profile.model,
         max_tokens=profile.max_tokens,
         system=_system_prompt(spec),
         tools=registry.schemas,
         messages=messages,
-    ) as stream:
-        message = stream.get_final_message()
+        config=config,
+        on_retry=transcript.append_retry,
+    )
     return [_block_to_dict(block) for block in message.content]
 
 

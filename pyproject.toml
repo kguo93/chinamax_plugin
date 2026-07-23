@@ -7,7 +7,10 @@ name = "chinamax"
 version = "0.1.0"
 description = "Runtime for the chinamax worker-model subagent plugin"
 requires-python = ">=3.12"
-dependencies = ["anthropic>=0.37,<1"]
+# httpx is already the SDK's transport, but the Runtime imports it directly —
+# for the structured request timeout, and to classify the raw transport errors
+# that escape mid-stream without SDK wrapping — so it is declared, not assumed.
+dependencies = ["anthropic>=0.37,<1", "httpx>=0.25,<1"]
 
 [project.optional-dependencies]
 test = ["pytest"]

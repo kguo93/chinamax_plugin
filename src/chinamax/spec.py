@@ -16,12 +16,24 @@ from pathlib import Path
 from chinamax import ChinamaxError, profiles
 
 REQUIRED_FIELDS = ("workspace", "profile", "prompt", "transcript_path", "result_path")
-OPTIONAL_FIELDS = ("write", "job_id", "bash_timeout_s")
+OPTIONAL_FIELDS = (
+    "write",
+    "job_id",
+    "bash_timeout_s",
+    "inactivity_timeout_s",
+    "ladder_attempts",
+    "backoff_base_s",
+    "backoff_cap_s",
+)
 _ABSOLUTE_PATH_FIELDS = ("workspace", "transcript_path", "result_path")
 
 #: Per-command bash timeout when the spec does not override it (ADR 0002's ten
 #: minutes). It bounds one command, never the Job: expiry is an observation.
 DEFAULT_BASH_TIMEOUT_S = 600.0
+
+#: The supervision knobs a dispatch may override. None means "not overridden":
+#: `liveness.build_config` leaves the Runtime's default in place.
+_SUPERVISION_NUMBERS = ("inactivity_timeout_s", "backoff_base_s", "backoff_cap_s")
 
 
 @dataclass(frozen=True)
@@ -36,6 +48,10 @@ class JobSpec:
     write: bool = True
     job_id: str | None = None
     bash_timeout_s: float = DEFAULT_BASH_TIMEOUT_S
+    inactivity_timeout_s: float | None = None
+    ladder_attempts: int | None = None
+    backoff_base_s: float | None = None
+    backoff_cap_s: float | None = None
 
 
 def load_spec(path: str | Path) -> JobSpec:
@@ -117,6 +133,7 @@ def parse_spec(data: object) -> JobSpec:
     if job_id is not None and not isinstance(job_id, str):
         raise ChinamaxError("job spec field 'job_id' must be a string")
 
+    bash_timeout_s = data.get("bash_timeout_s")
     return JobSpec(
         workspace=workspace,
         profile=data["profile"],
@@ -125,30 +142,39 @@ def parse_spec(data: object) -> JobSpec:
         result_path=result_path,
         write=write,
         job_id=job_id,
-        bash_timeout_s=_parse_bash_timeout(data.get("bash_timeout_s")),
+        bash_timeout_s=(
+            DEFAULT_BASH_TIMEOUT_S
+            if bash_timeout_s is None
+            else _positive_number(bash_timeout_s, "bash_timeout_s")
+        ),
+        ladder_attempts=_optional_ladder_attempts(data.get("ladder_attempts")),
+        **{
+            field: _optional_positive_number(data.get(field), field)
+            for field in _SUPERVISION_NUMBERS
+        },
     )
 
 
-def _parse_bash_timeout(value: object) -> float:
-    """Validate the optional per-command bash timeout.
+def _positive_number(value: object, field: str) -> float:
+    """Validate one finite, strictly positive numeric field.
 
-    A bad value here would kill every command the Job runs, so it fails spec
-    validation rather than degrading silently. ``bool`` is rejected explicitly:
-    it subclasses ``int``, so a bare ``true`` would otherwise sail through an
+    A bad value here would kill every command the Job runs, or leave it with an
+    instantly-tripping watchdog, so it fails spec validation rather than
+    degrading silently. ``bool`` is rejected explicitly: it subclasses ``int``,
+    so a bare ``true`` would otherwise sail through an
     ``isinstance(value, (int, float))`` check as a one-second timeout.
 
     Args:
-        value: The spec's ``bash_timeout_s``, or None when it was omitted.
+        value: The supplied value.
+        field: The job-spec field name, for the error message.
 
     Returns:
-        The timeout in seconds, defaulting to `DEFAULT_BASH_TIMEOUT_S`.
+        The value as a float.
 
     Raises:
         ChinamaxError: If the value is boolean, non-numeric, non-finite, or not
             strictly positive.
     """
-    if value is None:
-        return DEFAULT_BASH_TIMEOUT_S
     if (
         isinstance(value, bool)
         or not isinstance(value, (int, float))
@@ -156,7 +182,39 @@ def _parse_bash_timeout(value: object) -> float:
         or value <= 0
     ):
         raise ChinamaxError(
-            "job spec field 'bash_timeout_s' must be a finite positive number of "
+            f"job spec field {field!r} must be a finite positive number of "
             f"seconds, not {value!r}"
         )
     return float(value)
+
+
+def _optional_positive_number(value: object, field: str) -> float | None:
+    """Validate an optional supervision number, or pass None through."""
+    return None if value is None else _positive_number(value, field)
+
+
+def _optional_ladder_attempts(value: object) -> int | None:
+    """Validate the optional retry-ladder size.
+
+    A ladder of zero attempts would never call the provider at all, so a
+    violation fails validation here rather than producing a Job that fails
+    without ever having tried. ``bool`` is rejected for the same reason it is
+    above.
+
+    Args:
+        value: The spec's ``ladder_attempts``, or None when it was omitted.
+
+    Returns:
+        The ladder size, or None when the Runtime's default stands.
+
+    Raises:
+        ChinamaxError: If the value is boolean, non-integer, or below 1.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ChinamaxError(
+            "job spec field 'ladder_attempts' must be an integer of at least 1, "
+            f"not {value!r}"
+        )
+    return value
