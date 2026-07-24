@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "deepseek-plugin",
+  "owner": {
+    "name": "Kevin Guo"
+  },
+  "plugins": [
+    {
+      "name": "chinamax",
+      "description": "Dispatch non-Claude worker models (deepseek, mimo, glm, minimax, kimi) as a durable, detached Bridge Agent through Claude Code.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Kevin Guo"
+      },
+      "source": "./"
+    }
+  ]
+}
