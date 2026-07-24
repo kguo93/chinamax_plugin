@@ -26,10 +26,10 @@ def test_required_stanzas_present():
     text = re.sub(r"\s+", " ", CONTRACT)
     lower = text.lower()
 
-    # Frontmatter: Bash-only tools, model sonnet, and a description (what makes
+    # Frontmatter: Bash-only tools, model haiku, and a description (what makes
     # the agent selectable through the Agent tool).
     assert "tools: Bash" in text
-    assert "model: sonnet" in text
+    assert "model: haiku" in text
     assert "description:" in text
 
     # Profile-required refusal, naming all five shipped Profiles and pointing at

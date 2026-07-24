@@ -18,6 +18,16 @@ real provider endpoints. The hermetic pytest suite (181 tests) was green before 
   `CLAUDE_PLUGIN_DATA` pinned, so the dispatch context and the evidence shell resolve the **same**
   state root by construction (the split the plan guards against cannot arise).
 
+### Operator acceptance (2026-07-24)
+
+During the 2026-07-24 nine-plan verification pass, the operator reviewed the four method
+substitutions this section discloses — (a) runs 1–3 dispatched through the CLI seam rather than the
+installed plugin surface, (b) the Run 2 steer sent via the `steer` CLI verb rather than by messaging
+the busy Bridge, (c) the Run 3 session restart reproduced by invoking the real `session_start_hook`
+script rather than an actual Claude-session restart, and (d) the state-root agreement read in one
+pinned shell context rather than two independent readings — and ratified this report as accepted
+evidence. No live re-run was required.
+
 ## Environment
 
 - Workspace: `~/chinamax-verification` (clean dir, `git init`, seeded `app.py` + `slow_check.sh`).
