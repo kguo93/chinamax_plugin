@@ -12,8 +12,10 @@ import io
 import json
 import os
 import signal
+import subprocess
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -230,6 +232,128 @@ class JobEnv:
             for name in dirnames + filenames:
                 found.append(os.path.relpath(os.path.join(directory, name), self.workspace))
         return sorted(found)
+
+
+def aged(seconds: float) -> str:
+    """Return an ISO-8601 UTC timestamp ``seconds`` in the past.
+
+    Stale detection is graded by AGEING a record's heartbeat rather than by
+    sleeping the grace out, so a 60 s window costs a test nothing.
+    """
+    return datetime.fromtimestamp(time.time() - seconds, timezone.utc).isoformat()
+
+
+def dead_pid() -> int:
+    """Return the pid of a process that has definitively exited and been reaped."""
+    finished = subprocess.Popen(["sleep", "0"])
+    finished.wait()
+    return finished.pid
+
+
+def build_record(
+    store,
+    *,
+    workspace: Path,
+    status: str = state.STATUS_QUEUED,
+    prompt: str = "Do the task.",
+    profile: str = PROFILE,
+    write: bool = True,
+    pid: int | None = None,
+    pid_start_time: int | None = None,
+    updated_at: str | None = None,
+    completed_at: str | None = None,
+    result: dict | None = None,
+) -> str:
+    """Publish one Job record directly, with no dispatcher and no worker.
+
+    For the states a live worker will not hold still in — an aged heartbeat, a
+    dead recorded pid, a `queued` record nobody ever claimed. Every write still
+    goes through the store's own locked compare-and-swap updater.
+    """
+    store.ensure()
+    job_id = store.reserve_id()
+    store.create(
+        state.new_record(
+            job_id,
+            prompt=prompt,
+            profile=profile,
+            write=write,
+            workspace_root=workspace,
+            log_file=store.log_path(job_id),
+        )
+    )
+    changes: dict = {"status": status}
+    if status != state.STATUS_QUEUED:
+        changes["startedAt"] = state.utc_now()
+    for name, value in (
+        ("pid", pid),
+        ("pidStartTime", pid_start_time),
+        ("completedAt", completed_at),
+        ("result", result),
+    ):
+        if value is not None:
+            changes[name] = value
+    store.update(job_id, changes, expect={state.STATUS_QUEUED})
+    if updated_at is not None:
+        store.update(job_id, {"updatedAt": updated_at}, touch=False)
+    return job_id
+
+
+def job_artifacts(store, job_id: str) -> list[Path]:
+    """Return all SIX per-Job artifacts of the authoritative state layout."""
+    return [
+        store.record_path(job_id),
+        store.log_path(job_id),
+        store.spawn_log_path(job_id),
+        store.transcript_path(job_id),
+        store.result_path(job_id),
+        store.steer_dir(job_id),
+    ]
+
+
+def write_artifacts(store, job_id: str) -> None:
+    """Create every per-Job artifact, steer queue and nested consumed/ included."""
+    for path in job_artifacts(store, job_id)[1:-1]:
+        state.precreate(path).write_text("{}\n", encoding="utf-8")
+    consumed = store.steer_dir(job_id) / "consumed"
+    state.make_dir(consumed)
+    (consumed / "0000000000-0000-aaaaaa.md").write_text("drained", encoding="utf-8")
+    (store.steer_dir(job_id) / "0000000001-0000-bbbbbb.md").write_text(
+        "queued", encoding="utf-8"
+    )
+
+
+def job_leftovers(store, job_id: str) -> list[str]:
+    """Return every entry under ``jobs/`` still belonging to one Job.
+
+    Matched by NAME PREFIX rather than against a fixed list, so a seventh
+    artifact added to the layout fails a pruning assertion loudly instead of
+    quietly leaking orphans.
+    """
+    try:
+        entries = list(os.scandir(store.jobs_dir))
+    except OSError:
+        return []
+    return sorted(entry.name for entry in entries if entry.name.startswith(job_id))
+
+
+def assert_wire_shape(messages: list[dict]) -> None:
+    """Assert a request's history is one a strict endpoint would accept.
+
+    No two consecutive same-role messages — the Profiles target third-party
+    endpoints whose tolerance for those is not guaranteed — and every
+    ``tool_use`` answered by a ``tool_result`` carrying its id.
+    """
+    roles = [message["role"] for message in messages]
+    assert all(one != other for one, other in zip(roles, roles[1:])), roles
+    used = {
+        block["id"]
+        for message in messages
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "tool_use"
+    }
+    answered = {block["tool_use_id"] for block in tool_results(messages)}
+    assert not used - answered, sorted(used - answered)
 
 
 def wait_for(predicate, timeout_s: float = 60.0, interval_s: float = 0.05) -> bool:
@@ -449,10 +573,16 @@ __all__ = [
     "SYNTHETIC_KEYS",
     "Sleeper",
     "SteppingClock",
+    "aged",
+    "assert_wire_shape",
     "bash_script",
     "bash_then_report_script",
+    "build_record",
+    "dead_pid",
     "events_named",
     "identity",
+    "job_artifacts",
+    "job_leftovers",
     "loop_config",
     "report_turn",
     "reporter_events",
@@ -463,6 +593,7 @@ __all__ = [
     "turn",
     "wait_for",
     "wait_for_status",
+    "write_artifacts",
     "write_keys",
     "write_overlay",
 ]

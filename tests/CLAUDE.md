@@ -27,6 +27,17 @@ Inventory lives in `./repo-map.md`. Run the suite with the command in the root `
 - **`test_fast_worker_does_not_lose_pid_race` pins only the MOMENT the dispatcher reaches its bookkeeping write** — the worker, the store and the compare-and-swap are all genuine. Without that barrier the ordering the test exists to cover is a coin flip.
 - **A `logs`/preview escaping test must assert the line COUNT.** The point is that one event is exactly one line; asserting only that `\\x1b` appears passes against an implementation that also emitted the forged second line.
 
+## Lifecycle tests
+
+- **Age the heartbeat, never sleep the grace out.** `aged()` writes an `updatedAt` in the past through the store's own updater with `touch=False`; a test that slept 60 s to make a Job stale would add a minute to every run for nothing.
+- **A record the test builds is the only way to observe several of these states.** `build_record()` publishes a `queued`/`running`/finished record with a chosen pid and timestamps, because a live worker will not hold still on a dead pid, a stale heartbeat, or two simultaneously-active Jobs. Every write still goes through the real locked compare-and-swap.
+- **Kill a worker only once it is INSIDE the API call.** The transcript is write-ahead, so a SIGKILL fired the moment the record turns `running` lands before the outgoing user turn is flushed and leaves an EMPTY Thread — which resume then refuses, failing the test for the wrong reason. Wait on the fake provider having received the request.
+- **A SIGKILLed worker is a ZOMBIE here, not in production.** pytest is its parent and never reaps it, so `worker_gone` sees state `Z` rather than ESRCH — which is worth asserting, and then clearing with `os.waitpid` so the `reap()` teardown does not spend 45 s waiting on a corpse it believes is live.
+- **`test_cancel_kills_tree` is only meaningful because of the OWN-SESSION child.** `own_session_children()` asserts the descendant's pgid differs from the worker's before the cancel; a child sharing the worker's group would pass under a single `killpg` and let the real defect through. Zombies count as dead in the after-check — the worker is pytest's child.
+- **A resume test needs a SECOND provider.** The source Job exhausted the first script, and a request past the end returns the marked 500, so `env.bind()` a fresh script before resuming or the continued Job fails instead of continuing.
+- **Waiting on a pruned COUNT alone passes at the wrong prune.** Dispatch prunes and so does the worker's terminal transition; the count hits 50 after the first one, before the new Job has finished, so the wait must also require the fresh id to be present.
+- **Assert pruned artifacts BOTH ways** — the six named paths (so the layout list is pinned) and `job_leftovers()`'s name-prefix sweep (so a seventh artifact added later fails loudly instead of leaking orphans).
+
 ## Liveness tests
 
 - **Inject the supervision seams through `run()`, not by monkeypatching.** `JobEnv.run(spec, config=loop_config(sleeper))` hands a `LoopConfig` to the real `run_exec` entry, so backoff is deterministic (identity jitter) and instantaneous (the sleeper only records) while the test still drives the production path. Numbers like `inactivity_timeout_s` go through the JOB SPEC, because that is how a dispatch overrides them in production.

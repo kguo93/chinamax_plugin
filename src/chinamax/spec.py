@@ -3,6 +3,10 @@
 The spec names the workspace, the Profile, the prompt, and the two paths the
 Runtime writes (the Thread transcript and the verbatim result). The caller owns
 those paths, because the durable state layout belongs to the jobs scope.
+
+``seed_transcript`` is how a Thread survives: with it set, a non-empty
+transcript is read into the loop's history and appended to, rather than
+truncated by the fresh-run default. Resume and worker relaunch both stand on it.
 """
 
 from __future__ import annotations
@@ -19,6 +23,7 @@ REQUIRED_FIELDS = ("workspace", "profile", "prompt", "transcript_path", "result_
 OPTIONAL_FIELDS = (
     "write",
     "job_id",
+    "seed_transcript",
     "bash_timeout_s",
     "inactivity_timeout_s",
     "ladder_attempts",
@@ -47,6 +52,7 @@ class JobSpec:
     result_path: Path
     write: bool = True
     job_id: str | None = None
+    seed_transcript: bool = False
     bash_timeout_s: float = DEFAULT_BASH_TIMEOUT_S
     inactivity_timeout_s: float | None = None
     ladder_attempts: int | None = None
@@ -129,6 +135,9 @@ def parse_spec(data: object) -> JobSpec:
     write = data.get("write", True)
     if not isinstance(write, bool):
         raise ChinamaxError("job spec field 'write' must be a boolean")
+    seed_transcript = data.get("seed_transcript", False)
+    if not isinstance(seed_transcript, bool):
+        raise ChinamaxError("job spec field 'seed_transcript' must be a boolean")
     job_id = data.get("job_id")
     if job_id is not None and not isinstance(job_id, str):
         raise ChinamaxError("job spec field 'job_id' must be a string")
@@ -142,6 +151,7 @@ def parse_spec(data: object) -> JobSpec:
         result_path=result_path,
         write=write,
         job_id=job_id,
+        seed_transcript=seed_transcript,
         bash_timeout_s=(
             DEFAULT_BASH_TIMEOUT_S
             if bash_timeout_s is None

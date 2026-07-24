@@ -2,10 +2,12 @@
 
 Verbs: ``exec`` (run one spec in the foreground), ``task`` (dispatch a durable
 detached Job and return its id), ``task-worker`` (the detached worker itself),
-``status`` and ``logs``. Exit codes are shared across the Job verbs so the
-Bridge branches on a code instead of parsing prose: 0 = the Job is terminal,
-2 = the Job is still active, 1 = a usage or resolution error. The set is TOTAL —
-every non-terminal return is 2, including an early wake-up on progress.
+``status``, ``logs``, ``result``, ``cancel`` and ``resume``. Exit codes are
+shared across the Job verbs so the Bridge branches on a code instead of parsing
+prose: 0 = the Job is terminal, 2 = the Job is still active, 1 = a usage or
+resolution error. The set is TOTAL — every non-terminal return is 2, including
+an early wake-up on progress, and a derived-`interrupted` Job returns 0 with the
+distinction carried in the OUTPUT rather than in a fourth code.
 
 Nothing here reaps state at a session boundary (ADR 0004).
 """
@@ -34,6 +36,25 @@ RECENT_LIMIT = 20
 EXIT_TERMINAL = 0
 EXIT_ACTIVE = 2
 EXIT_ERROR = 1
+
+#: The `report_result` payload's seven fields, in schema order — the order the
+#: default `result` rendering walks them in.
+RESULT_FIELDS = (
+    "outcome",
+    "summary",
+    "changed_files",
+    "commands_run",
+    "tests",
+    "failures",
+    "concerns",
+)
+#: What `cancel` records as a cancelled Job's reason.
+CANCEL_REASON = "Cancelled by user."
+#: What `resume` sends when the operator supplied no follow-up.
+DEFAULT_RESUME_PROMPT = "Continue the previous task."
+#: A resume target named on argv is recognised by the Job-id prefix; anything
+#: else in first position is the start of the prompt.
+JOB_ID_PREFIX = "task-"
 
 
 def execute_spec(
@@ -67,7 +88,9 @@ def execute_spec(
     client = provider.build_client(
         profile, profiles.resolve_key(profile), config.inactivity_timeout_s
     )
-    with Transcript(spec.transcript_path, clock=config.clock) as transcript:
+    with Transcript(
+        spec.transcript_path, clock=config.clock, append=spec.seed_transcript
+    ) as transcript:
         payload = run_loop(client, profile, spec, transcript, config, reporter=reporter)
     _write_result(spec.result_path, payload)
     return payload
@@ -129,7 +152,11 @@ def run_task(args: argparse.Namespace) -> int:
         )
     )
     state.make_dir(store.steer_dir(job_id))
-    return _spawn_worker(store, job_id)
+    code = _spawn_worker(store, job_id)
+    # Pruning runs on dispatch and on terminal transitions only — never on a
+    # throttled progress update, which would scan-and-unlink constantly.
+    store.prune()
+    return code
 
 
 def run_task_worker(job_id: str, state_dir: str) -> int:
@@ -211,6 +238,7 @@ def run_task_worker(job_id: str, state_dir: str) -> int:
             f"chinamax: {job_id} left `running` before its terminal write",
             file=sys.stderr,
         )
+    store.prune()
     return EXIT_TERMINAL if changes["status"] == state.STATUS_COMPLETED else EXIT_ERROR
 
 
@@ -264,6 +292,116 @@ def run_logs(args: argparse.Namespace) -> int:
     return _exit_code(store.read(job_id))
 
 
+def run_result(args: argparse.Namespace) -> int:
+    """Print a finished Job's stored result, refusing an active one.
+
+    Only `completed` carries a payload: every `report_result` ends a Job as
+    `completed` with the payload stored verbatim, even when its own ``outcome``
+    is ``failed`` or ``blocked``, while status `failed` is reserved for Runtime
+    errors that carry only an ``errorMessage``. So this reports honestly per
+    state rather than inventing an empty payload.
+
+    Args:
+        args: The parsed ``result`` arguments.
+
+    Returns:
+        0 for any terminal Job — with or without a payload, the difference lives
+        in the output — 2 while it is still active.
+    """
+    store = state.open_store(args.workspace)
+    record = _result_target(store, args.job)
+    status = state.effective_status(record)
+    if status in state.ACTIVE_STATUSES:
+        print(
+            f"chinamax: {record['id']} is {status}, not finished; "
+            f"follow it with `status {record['id']}`",
+            file=sys.stderr,
+        )
+        return EXIT_ACTIVE
+    if args.json:
+        sys.stdout.write(_result_json(store, record, status))
+    else:
+        _print_result(record, status)
+    return EXIT_TERMINAL
+
+
+def run_cancel(args: argparse.Namespace) -> int:
+    """Stop a Job's whole process tree and mark the record cancelled.
+
+    The status write goes through the single locked compare-and-swap updater and
+    applies only while the record is still non-terminal, so a worker that
+    completed during the kill KEEPS its result. A not-yet-started Job is marked
+    cancelled directly, which is safe because the worker's own claim is the SAME
+    locked CAS: the two compete for one lock and the loser exits.
+
+    Args:
+        args: The parsed ``cancel`` arguments.
+
+    Returns:
+        0 once the Job is terminal, 1 when nothing could be resolved or when a
+        targeted process outlived the SIGKILL sweep.
+    """
+    store = state.open_store(args.workspace)
+    record = _cancel_target(store, args.job)
+    job_id = record["id"]
+    if record["status"] in state.TERMINAL_STATUSES:
+        print(f"{job_id}  {record['status']}  (already terminal; nothing to cancel)")
+        return EXIT_TERMINAL
+
+    pid = state.usable_pid(record)
+    if pid is not None:
+        survivors = state.terminate_tree(pid, record.get("pidStartTime"))
+        if survivors:
+            # Never write `cancelled` over a Job that was not actually stopped.
+            print(
+                f"chinamax: {job_id} NOT cancelled: still alive after SIGKILL: "
+                f"{', '.join(str(one) for one in survivors)}",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+
+    cancelled = store.update(
+        job_id,
+        {
+            "status": state.STATUS_CANCELLED,
+            "errorMessage": CANCEL_REASON,
+            # Keeps a cancelled Job orderable by the shared "latest" key and
+            # freezes its elapsed time in `status`.
+            "completedAt": state.utc_now(),
+        },
+        expect=state.ACTIVE_STATUSES,
+    )
+    if cancelled is None:
+        current = store.read(job_id)
+        print(f"{job_id}  {current['status']}  (finished before the cancel landed)")
+        return EXIT_TERMINAL
+    store.prune()
+    print(f"{job_id}  {state.STATUS_CANCELLED}  {CANCEL_REASON}")
+    return EXIT_TERMINAL
+
+
+def run_resume(args: argparse.Namespace) -> int:
+    """Dispatch a new Job continuing a finished Job's Thread.
+
+    Args:
+        args: The parsed ``resume`` arguments.
+
+    Returns:
+        0 once the worker is spawned, 1 on a refusal or a dispatch failure.
+    """
+    store = state.open_store(args.workspace)
+    selector, words = _split_resume_args(args.args)
+    prompt = _read_prompt(words, default=DEFAULT_RESUME_PROMPT)
+    record = store.create_resume(
+        selector, prompt, originating_session=state.session_id()
+    )
+    job_id = record["id"]
+    state.make_dir(store.steer_dir(job_id))
+    code = _spawn_worker(store, job_id)
+    store.prune()
+    return code
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser.
 
@@ -310,6 +448,32 @@ def build_parser() -> argparse.ArgumentParser:
     logs_parser.add_argument("--tail", type=int, default=None, help="only the last N lines")
     logs_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
 
+    result_parser = subcommands.add_parser("result", help="print a finished Job's result")
+    result_parser.add_argument(
+        "job", nargs="?", default=None, help="job id or prefix (default: latest completed)"
+    )
+    result_parser.add_argument(
+        "--json", action="store_true", help="emit the stored result artifact as JSON"
+    )
+    result_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+
+    cancel_parser = subcommands.add_parser("cancel", help="stop a Job's process tree")
+    cancel_parser.add_argument(
+        "job", nargs="?", default=None, help="job id or prefix (default: the active Job)"
+    )
+    cancel_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+
+    resume_parser = subcommands.add_parser("resume", help="continue a finished Job's Thread")
+    resume_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+    resume_parser.add_argument(
+        "args",
+        nargs="*",
+        help=(
+            "an optional job id or prefix, then the follow-up prompt; the prompt "
+            "is read from stdin when argv carries none"
+        ),
+    )
+
     worker_parser = subcommands.add_parser("task-worker", help="run a dispatched Job (internal)")
     worker_parser.add_argument("--job-id", required=True, help="the Job to run")
     worker_parser.add_argument("--state-dir", required=True, help="its state directory")
@@ -337,6 +501,12 @@ def main(argv: list[str] | None = None) -> int:
             return run_status(args)
         if args.command == "logs":
             return run_logs(args)
+        if args.command == "result":
+            return run_result(args)
+        if args.command == "cancel":
+            return run_cancel(args)
+        if args.command == "resume":
+            return run_resume(args)
         raise ChinamaxError(f"unknown command {args.command!r}")
     except ChinamaxError as error:
         print(f"chinamax: {error}", file=sys.stderr)
@@ -452,6 +622,10 @@ def _worker_spec(
     # `write` is carried separately: False is meaningful and must not be dropped.
     present = {key: value for key, value in data.items() if value is not None}
     present["write"] = bool(request.get("write", True))
+    # Set on EVERY worker spec: a pre-populated transcript — a resume copy, or a
+    # relaunch on a crashed Job — is seeded rather than truncated by the
+    # fresh-run default. An empty transcript seeds to nothing and runs fresh.
+    present["seed_transcript"] = True
     timeout = request.get("bashTimeoutSec")
     if timeout is not None:
         present["bash_timeout_s"] = timeout
@@ -472,30 +646,148 @@ def _fold_result(result_path: Path, payload: dict) -> dict:
     return stored if isinstance(stored, dict) else payload
 
 
-def _read_prompt(words: list[str]) -> str:
+def _read_prompt(words: list[str], default: str | None = None) -> str:
     """Return the dispatch prompt from argv or stdin.
 
     stdin is read ONLY when argv carries no text and stdin is not a TTY —
     otherwise a bare ``task --profile x`` at a terminal would hang forever on a
-    read. An empty prompt is refused before any record is written.
+    read. An empty prompt is refused before any record is written, unless the
+    verb has a default (`resume` does).
 
     Args:
         words: The positional prompt words.
+        default: What an omitted prompt means, or None to refuse one.
 
     Returns:
         The prompt.
 
     Raises:
-        ChinamaxError: If no prompt was supplied.
+        ChinamaxError: If no prompt was supplied and the verb has no default.
     """
     text = " ".join(words).strip()
     if not text and sys.stdin is not None and not sys.stdin.isatty():
-        text = sys.stdin.read().strip()
-    if not text:
+        try:
+            text = sys.stdin.read().strip()
+        except OSError:
+            # An unreadable stdin carries no prompt; it is not a distinct error.
+            text = ""
+    if text:
+        return text
+    if default is not None:
+        return default
+    raise ChinamaxError(
+        "task needs a prompt: pass it as arguments (after `--`) or on stdin"
+    )
+
+
+def _split_resume_args(tokens: list[str]) -> tuple[str | None, list[str]]:
+    """Split ``resume``'s positionals into an optional target and the prompt.
+
+    A first token beginning ``task-`` is the target; anything else in first
+    position starts the prompt, and the target then defaults to the most recent
+    non-active Job with a Thread.
+
+    Args:
+        tokens: The positional arguments.
+
+    Returns:
+        The selector (or None) and the prompt words.
+    """
+    if tokens and tokens[0].startswith(JOB_ID_PREFIX):
+        return tokens[0], tokens[1:]
+    return None, list(tokens)
+
+
+def _result_target(store: state.JobStore, selector: str | None) -> dict:
+    """Resolve which Job `result` reports on.
+
+    An explicit id or prefix resolves across ALL records through the shared
+    resolver; with no id the latest `completed` Job wins.
+
+    Raises:
+        ChinamaxError: On a resolution failure, or when nothing has completed.
+    """
+    if selector is not None:
+        return store.read(store.resolve_job(selector))
+    records, _ = store.load_records()
+    completed = [
+        record for record in records if record["status"] == state.STATUS_COMPLETED
+    ]
+    if not completed:
         raise ChinamaxError(
-            "task needs a prompt: pass it as arguments (after `--`) or on stdin"
+            "no completed Job in this workspace; name one, or run `status`"
         )
-    return text
+    return max(completed, key=state.latest_key)
+
+
+def _cancel_target(store: state.JobStore, selector: str | None) -> dict:
+    """Resolve which Job `cancel` stops.
+
+    An explicit id or prefix resolves across ALL records; with no id the single
+    active Job wins, and several active Jobs are a refusal listing them rather
+    than a guess.
+
+    Raises:
+        ChinamaxError: On a resolution failure, no active Job, or an ambiguity.
+    """
+    if selector is not None:
+        return store.read(store.resolve_job(selector))
+    records, _ = store.load_records()
+    active = sorted(
+        (record for record in records if state.is_active(record)),
+        key=lambda record: record["id"],
+    )
+    if not active:
+        raise ChinamaxError("no active Job to cancel in this workspace")
+    if len(active) > 1:
+        listed = ", ".join(record["id"] for record in active)
+        raise ChinamaxError(f"several Jobs are active; name the one to cancel: {listed}")
+    return active[0]
+
+
+def _result_json(store: state.JobStore, record: dict, status: str) -> str:
+    """Return the bytes `result --json` emits.
+
+    The stored ``jobs/<id>.result.json`` is emitted AS STORED rather than
+    re-serialized from a parsed value; a terminal Job with no payload gets the
+    status and errorMessage instead.
+    """
+    if status == state.STATUS_COMPLETED:
+        stored = _read_text(store.result_path(record["id"]))
+        if stored.strip():
+            return stored if stored.endswith("\n") else stored + "\n"
+        payload = record.get("result")
+        if isinstance(payload, dict):
+            return json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    document = {"status": status, "errorMessage": record.get("errorMessage")}
+    return json.dumps(document, sort_keys=True, indent=2) + "\n"
+
+
+def _print_result(record: dict, status: str) -> None:
+    """Render a terminal Job's result: the payload, or the status and reason."""
+    print(f"{record['id']}  {status}")
+    payload = record.get("result") if status == state.STATUS_COMPLETED else None
+    if isinstance(payload, dict):
+        for field in RESULT_FIELDS:
+            if field not in payload:
+                continue
+            value = payload[field]
+            if not isinstance(value, list):
+                print(f"{field}: {value}")
+            elif not value:
+                print(f"{field}: (none)")
+            else:
+                print(f"{field}:")
+                for item in value:
+                    print(f"  - {item}")
+        return
+    if record.get("errorMessage"):
+        print(f"error: {state.escape_control(record['errorMessage'])}")
+    if status == state.STATUS_INTERRUPTED:
+        print(
+            "hint: the worker is gone and this Job will not progress; continue "
+            f"its Thread with `resume {record['id']} <prompt>`"
+        )
 
 
 def _status_list(store: state.JobStore) -> int:
@@ -507,7 +799,7 @@ def _status_list(store: state.JobStore) -> int:
             file=sys.stderr,
         )
     ordered = sorted(records, key=_updated_at, reverse=True)
-    shown = [record for record in ordered if record["status"] in state.ACTIVE_STATUSES]
+    shown = [record for record in ordered if state.is_active(record)]
     seen = {record["id"] for record in shown}
     for record in ordered[:RECENT_LIMIT]:
         if record["id"] not in seen:
@@ -523,11 +815,13 @@ def _status_wait(store: state.JobStore, job_id: str, timeout_ms: int) -> int:
 
     The snapshot is ``(status, phase, log size + inode)``; polling is every
     `state.POLL_INTERVAL_S` on a MONOTONIC clock. An already-terminal Job
-    returns immediately.
+    returns immediately — and so does an effectively-`interrupted` one, which
+    will never leave that state on its own, so a poll-relay that kept waiting
+    would hang for the life of the Bridge.
     """
     bound_s = min(max(timeout_ms, 0), state.WAIT_TIMEOUT_MS) / 1000.0
     record = store.read(job_id)
-    if record["status"] not in state.TERMINAL_STATUSES:
+    if state.is_active(record):
         log_path = store.log_path(job_id)
         snapshot = (record["status"], record["phase"], state.log_signature(log_path))
         deadline = time.monotonic() + bound_s
@@ -541,19 +835,24 @@ def _status_wait(store: state.JobStore, job_id: str, timeout_ms: int) -> int:
                 record["status"],
                 record["phase"],
                 state.log_signature(log_path),
-            ) != snapshot:
+            ) != snapshot or not state.is_active(record):
                 break
     _print_job(store, record)
     return _exit_code(record)
 
 
 def _print_job(store: state.JobStore, record: dict) -> None:
-    """Print one Job's summary line and its progress preview."""
+    """Print one Job's summary line and its progress preview.
+
+    The rendered status is the EFFECTIVE one, so a crashed worker's Job reads
+    `interrupted` while the record itself still says `running` — stale detection
+    never rewrites a record behind a worker.
+    """
     print(
         "  ".join(
             [
                 str(record["id"]),
-                f"{record['status']:<9}",
+                f"{state.effective_status(record):<11}",
                 f"{record['phase'] or '-':<14}",
                 f"{_elapsed(record):>8}",
                 str(record["profile"]),
@@ -568,10 +867,12 @@ def _print_job(store: state.JobStore, record: dict) -> None:
 
 
 def _exit_code(record: dict) -> int:
-    """Map a Job's status onto the shared exit-code convention."""
-    return (
-        EXIT_TERMINAL if record["status"] in state.TERMINAL_STATUSES else EXIT_ACTIVE
-    )
+    """Map a Job's status onto the shared exit-code convention.
+
+    An `interrupted` Job returns 0, not 2: it will never leave that state on its
+    own, and a Bridge told 2 would poll a dead worker until the operator gave up.
+    """
+    return EXIT_ACTIVE if state.is_active(record) else EXIT_TERMINAL
 
 
 def _updated_at(record: dict) -> float:

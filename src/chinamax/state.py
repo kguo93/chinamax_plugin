@@ -8,8 +8,15 @@ write. The lock is a dedicated ``state.lock`` sidecar and never ``state.json``
 itself: renaming over a locked file leaves the holder locking an unlinked inode
 and silently voids mutual exclusion.
 
-Nothing here deletes or kills a Job (ADR 0004): there is no session-keyed API of
-any kind, and no session boundary touches this store.
+Selection and liveness live here too, in ONE place: the shared id resolver, the
+"latest" ordering key, the provably-gone predicate and the `effective_status`
+that derives `interrupted` from it. Every verb reads them rather than deriving
+its own, so `result`/`cancel`/`resume` cannot drift from `status`/`logs`.
+
+Nothing here is keyed on a Claude session (ADR 0004): there is no
+session-boundary API of any kind. Pruning removes only FINISHED Jobs beyond the
+cap and cancellation is an explicit operator verb — no session ending, and no
+reaper, ever touches a live Job.
 """
 
 from __future__ import annotations
@@ -20,6 +27,8 @@ import json
 import os
 import random
 import re
+import shutil
+import signal
 import string
 import subprocess
 import sys
@@ -27,11 +36,13 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator
+from typing import Callable, Iterable, Iterator
 
 from chinamax import ChinamaxError
+from chinamax.transcript import merge_follow_up, read_repaired_messages, write_messages
 
 #: Bumped only for a breaking record change; the schema is additive otherwise —
 #: readers ignore unknown fields and default missing optional ones, so an old
@@ -44,9 +55,18 @@ STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 
+#: DERIVED, never stored: a non-terminal Job whose worker is provably gone and
+#: whose heartbeat has aged past the grace. Nothing ever writes it onto a record
+#: — stale detection is read-side only, so a Thread stays resumable.
+STATUS_INTERRUPTED = "interrupted"
+
 #: A Job in one of these will never move again on its own.
 TERMINAL_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED})
 ACTIVE_STATUSES = frozenset({STATUS_QUEUED, STATUS_RUNNING})
+#: The stored statuses pruning grades as finished. `interrupted` is deliberately
+#: absent: its Thread is still resumable, so pruning it would destroy exactly the
+#: crash recovery it exists for.
+FINISHED_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED})
 
 #: Record writes are throttled to one per this interval, matching the
 #: `status --wait` poll so a caller cannot outrun the record it polls.
@@ -55,6 +75,22 @@ RECORD_THROTTLE_S = 2.0
 #: number and the throttle above move together with jobs/02's stale grace (twice
 #: this interval) — drifting one apart breaks stale detection.
 HEARTBEAT_INTERVAL_S = 30.0
+#: How stale `updatedAt` must be before a provably-gone worker's Job reads as
+#: `interrupted`. TWICE `HEARTBEAT_INTERVAL_S` — these two numbers move together
+#: or stale detection breaks. The grace covers a single missed or delayed beat
+#: around a crash, never a pid gap: the dispatcher records the pid immediately
+#: after `Popen` and the worker's claim is an atomic locked CAS.
+STALE_GRACE_S = 60.0
+#: Newest finished Jobs kept per workspace. Active and `interrupted` Jobs are
+#: never pruned and never counted toward it.
+PRUNE_KEEP = 50
+#: How long `cancel` waits after SIGTERM before escalating to SIGKILL.
+TERMINATE_GRACE_S = 10.0
+#: How long the SIGKILL sweep waits for its targets to actually disappear.
+_TERMINATE_CONFIRM_S = 5.0
+#: Poll interval while waiting on a signalled process to go away.
+_TERMINATE_POLL_S = 0.05
+
 #: `status --wait` poll interval, on a monotonic clock.
 POLL_INTERVAL_S = 2.0
 #: The PRD's bounded polling window (~4 min). A larger `--timeout-ms` clamps to
@@ -172,13 +208,31 @@ def render_failure(payload: dict) -> str:
     return f"{rendered}: {escape_control(exception_text)}" if exception_text else rendered
 
 
-def parse_pid_start_time(stat_text: str) -> int | None:
-    """Return field 22 (``starttime``) of a ``/proc/<pid>/stat`` line.
+def parse_stat_fields(stat_text: str) -> list[str] | None:
+    """Return a ``/proc/<pid>/stat`` line's fields from field 3 onward.
 
     The split is taken AFTER THE LAST ``)``: field 2 is the parenthesized comm,
     which may itself contain spaces and parentheses. A naive whitespace split
     ships green through every test but the one that pins this, then feeds a
-    wrong start-time into jobs/02's kill decision.
+    wrong start-time into a kill decision. Every reader of this file — the
+    start-time guard, the zombie test, and the process-tree walk — goes through
+    this one split so none of them can index a different field set.
+
+    Args:
+        stat_text: The raw contents of ``/proc/<pid>/stat``.
+
+    Returns:
+        The fields after the comm (so field 3 is at index 0), or None.
+    """
+    close = stat_text.rfind(")")
+    if close < 0:
+        return None
+    fields = stat_text[close + 1 :].split()
+    return fields or None
+
+
+def parse_pid_start_time(stat_text: str) -> int | None:
+    """Return field 22 (``starttime``) of a ``/proc/<pid>/stat`` line.
 
     Args:
         stat_text: The raw contents of ``/proc/<pid>/stat``.
@@ -186,25 +240,25 @@ def parse_pid_start_time(stat_text: str) -> int | None:
     Returns:
         The start time in clock ticks, or None when the line is unusable.
     """
-    close = stat_text.rfind(")")
-    if close < 0:
-        return None
-    # After the comm come fields 3 onward, so field 22 sits at index 19.
-    fields = stat_text[close + 1 :].split()
-    if len(fields) < 20:
-        return None
+    fields = parse_stat_fields(stat_text)
+    return None if fields is None else _stat_start_time(fields)
+
+
+def read_proc_stat(pid: int) -> list[str] | None:
+    """Read one process's stat fields, or None when it cannot be read."""
     try:
-        return int(fields[19])
-    except ValueError:
+        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
+    except OSError:
         return None
+    return parse_stat_fields(text)
 
 
 def read_pid_start_time(pid: int) -> int | None:
     """Read a process's start time, or None where ``/proc`` is unreadable.
 
     A non-Linux dev machine, or a child that exited before the dispatcher got to
-    it, yields None rather than failing the dispatch — which leaves jobs/02 the
-    ``kill(pid, 0)`` half of its liveness test.
+    it, yields None rather than failing the dispatch — which leaves the
+    ``kill(pid, 0)`` half of `worker_gone`'s liveness test.
 
     Args:
         pid: The process to inspect.
@@ -212,11 +266,257 @@ def read_pid_start_time(pid: int) -> int | None:
     Returns:
         The start time in clock ticks, or None.
     """
-    try:
-        text = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    fields = read_proc_stat(pid)
+    return None if fields is None else _stat_start_time(fields)
+
+
+@dataclass(frozen=True)
+class ProcessInfo:
+    """One process as ``/proc/<pid>/stat`` describes it, as far as it parses."""
+
+    pid: int
+    ppid: int
+    pgid: int
+    start_time: int | None
+    zombie: bool
+
+
+def read_process(pid: int) -> ProcessInfo | None:
+    """Return one process's identity and links, or None when it is gone."""
+    fields = read_proc_stat(pid)
+    if fields is None or len(fields) < 3:
         return None
-    return parse_pid_start_time(text)
+    try:
+        ppid, pgid = int(fields[1]), int(fields[2])
+    except ValueError:
+        return None
+    return ProcessInfo(
+        pid=pid,
+        ppid=ppid,
+        pgid=pgid,
+        start_time=_stat_start_time(fields),
+        zombie=fields[0] == "Z",
+    )
+
+
+def process_table() -> dict[int, ProcessInfo]:
+    """Snapshot every readable process, keyed by pid."""
+    table: dict[int, ProcessInfo] = {}
+    try:
+        entries = list(os.scandir("/proc"))
+    except OSError:
+        return table
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        info = read_process(int(entry.name))
+        if info is not None:
+            table[info.pid] = info
+    return table
+
+
+def descendants(
+    root_pid: int, table: dict[int, ProcessInfo] | None = None
+) -> dict[int, ProcessInfo]:
+    """Return ``root_pid`` plus every process reachable from it by ppid links.
+
+    This snapshot must be taken BEFORE anything is signalled: orphans reparent
+    to init the instant their parent dies, so a walk afterwards finds nothing
+    left to stop. Its reach is also its limit — a descendant that fully
+    daemonized before the snapshot has already been reparented away and cannot
+    be found here. The confined bash tool does not do that.
+
+    Args:
+        root_pid: The process to walk from.
+        table: A pre-taken process table, or None to take one.
+
+    Returns:
+        The reachable processes, keyed by pid; empty when the root is gone.
+    """
+    table = process_table() if table is None else table
+    children: dict[int, list[int]] = {}
+    for info in table.values():
+        children.setdefault(info.ppid, []).append(info.pid)
+    found: dict[int, ProcessInfo] = {}
+    queue = [root_pid]
+    while queue:
+        pid = queue.pop()
+        if pid in found or pid not in table:
+            continue
+        found[pid] = table[pid]
+        queue.extend(children.get(pid, ()))
+    return found
+
+
+def usable_pid(record: dict) -> int | None:
+    """Return a record's pid when it may safely be probed and signalled.
+
+    A record with no usable pid is NEVER probed and never signalled: pid 0
+    addresses the caller's own process group, a negative pid addresses a group
+    outright, and 1 is init — none of them can ever be a worker.
+
+    Args:
+        record: The Job record.
+
+    Returns:
+        The pid, or None.
+    """
+    pid = record.get("pid")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        return None
+    return pid
+
+
+def worker_gone(record: dict) -> bool:
+    """Report whether a record's worker is PROVABLY gone.
+
+    The liveness half of `effective_status`, exposed on its own because a
+    relaunch reclaim needs it WITHOUT the stale grace — an explicit relaunch
+    verifies liveness directly rather than guarding against a delayed heartbeat.
+
+    "Provably" is deliberately narrow, and the degradations are pinned rather
+    than left to judgement:
+
+    * ``ProcessLookupError`` (ESRCH) is the only signal that means gone. A
+      ``PermissionError`` (EPERM) means the process EXISTS and is treated as
+      alive.
+    * A zombie still answers signal 0 and would otherwise read as alive forever,
+      so ``/proc`` state ``Z`` counts as gone.
+    * A ``pidStartTime`` that no longer matches is the pid-reuse case: the pid
+      is alive, but it is somebody else's.
+    * A record missing ``pidStartTime`` skips the reuse comparison and falls
+      back to the ESRCH test alone.
+    * A ``/proc`` read that fails after signal 0 succeeded means the process
+      died mid-check, which counts as gone rather than as an error. That rule
+      assumes the Linux deployment target the store already assumes: the
+      dispatcher writes ``pidStartTime`` from the same ``/proc``.
+
+    Args:
+        record: The Job record.
+
+    Returns:
+        Whether the recorded worker is provably no longer running.
+    """
+    pid = usable_pid(record)
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        # EPERM and anything else: the process answered, so it exists.
+        return False
+    info = read_process(pid)
+    if info is None:
+        return True
+    if info.zombie:
+        return True
+    recorded = record.get("pidStartTime")
+    if recorded is None or info.start_time is None:
+        return False
+    return info.start_time != recorded
+
+
+def effective_status(record: dict, now: float | None = None) -> str:
+    """Grade one record's status, deriving `interrupted` for a dead worker.
+
+    Both non-terminal statuses are graded, not just ``running``: the dispatcher
+    writes the child pid immediately after `Popen`, so a worker that died before
+    claiming leaves a ``queued`` record whose recorded pid is dead — grading only
+    ``running`` would strand that Job active forever.
+
+    The test is conjunctive — provably gone AND a heartbeat older than the grace
+    — so a live-but-quiet worker is never misreported.
+
+    Args:
+        record: The Job record.
+        now: Epoch seconds to grade against; the current time when omitted.
+
+    Returns:
+        The stored status, or `STATUS_INTERRUPTED`.
+    """
+    status = record.get("status")
+    if status not in ACTIVE_STATUSES or not worker_gone(record):
+        return status
+    updated = parse_timestamp(record.get("updatedAt"))
+    reference = time.time() if now is None else now
+    if updated is not None and reference - updated <= STALE_GRACE_S:
+        return status
+    return STATUS_INTERRUPTED
+
+
+def is_active(record: dict, now: float | None = None) -> bool:
+    """Report whether a Job may still make progress.
+
+    An effectively-`interrupted` Job is NOT active to any verb, and no verb
+    re-derives liveness for itself.
+    """
+    return effective_status(record, now) in ACTIVE_STATUSES
+
+
+def latest_key(record: dict) -> tuple[float, float, str]:
+    """Sort key for "latest", shared by every verb's default selection.
+
+    ``completedAt`` first, falling back to ``updatedAt`` for records that have
+    none — which `interrupted` records never do, since their stored status is
+    still ``running``/``queued`` — then ``createdAt``, then the id. Callers sort
+    with ``reverse=True``.
+    """
+    primary = (
+        parse_timestamp(record.get("completedAt"))
+        or parse_timestamp(record.get("updatedAt"))
+        or 0.0
+    )
+    return (primary, parse_timestamp(record.get("createdAt")) or 0.0, str(record.get("id") or ""))
+
+
+def terminate_tree(
+    pid: int, start_time: int | None = None, grace_s: float = TERMINATE_GRACE_S
+) -> list[int]:
+    """Stop a worker's whole process TREE, and report what survived.
+
+    The group is NOT the tree: the Runtime's bash tool starts every command in
+    its OWN session, so a single ``killpg`` on the worker's group leaves those
+    children running. The sweep therefore snapshots the descendants FIRST (an
+    orphan reparents the instant its parent dies), SIGTERMs every distinct
+    process group in that set, waits out the grace, RE-SCANS for descendants
+    that appeared after the snapshot, and only then SIGKILLs what is left.
+
+    A pid whose start time no longer matches where it was seen is skipped rather
+    than signalled, so a recycled pid or pgid is never the target.
+
+    Args:
+        pid: The recorded worker pid.
+        start_time: Its recorded ``pidStartTime``, when the record carries one.
+        grace_s: How long to wait between SIGTERM and SIGKILL.
+
+    Returns:
+        The pids still alive after the sweep — empty when everything targeted is
+        confirmed gone.
+    """
+    if pid == os.getpid():
+        # Only reachable from a fabricated or wildly recycled record, and the
+        # one target that would take the caller down with it.
+        return []
+    snapshot = descendants(pid)
+    rooted = snapshot.get(pid)
+    if rooted is None:
+        return []
+    if (
+        start_time is not None
+        and rooted.start_time is not None
+        and rooted.start_time != start_time
+    ):
+        return []
+    _signal_processes(snapshot, signal.SIGTERM)
+    _await_exit(snapshot, grace_s)
+    remaining = _rescan(snapshot)
+    if not remaining:
+        return []
+    _signal_processes(remaining, signal.SIGKILL)
+    _await_exit(remaining, _TERMINATE_CONFIRM_S)
+    return sorted(_alive_targets(remaining))
 
 
 def worker_python() -> str:
@@ -438,6 +738,39 @@ def new_record(
     return record
 
 
+def resolve_selector(selector: str, known: Iterable[str]) -> str:
+    """Resolve an exact id or an unambiguous prefix against a known id set.
+
+    THE shared resolver: `JobStore.resolve_job` is a thin wrapper around it and
+    every verb goes through one of the two, so `result`/`cancel`/`resume` can
+    never drift from `status`/`logs`.
+
+    Args:
+        selector: The id or prefix the operator named.
+        known: Every known Job id.
+
+    Returns:
+        The matching Job id.
+
+    Raises:
+        ChinamaxError: On no match or an ambiguous prefix — including an
+            explicit id against an empty store, which is never answered with a
+            silent success.
+    """
+    candidates = sorted(known)
+    if selector in candidates:
+        return selector
+    matches = [job_id for job_id in candidates if job_id.startswith(selector)]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise ChinamaxError(
+            f"ambiguous Job selector {selector!r}; candidates: {', '.join(matches)}"
+        )
+    listed = ", ".join(candidates) if candidates else "(none)"
+    raise ChinamaxError(f"no Job matching {selector!r}; known Jobs: {listed}")
+
+
 def normalize_record(record: dict) -> dict:
     """Fill in missing optional fields, keeping every unknown one.
 
@@ -656,7 +989,7 @@ class JobStore:
         return records, malformed
 
     def resolve_job(self, selector: str) -> str:
-        """Resolve an exact id or an unambiguous prefix.
+        """Resolve an exact id or an unambiguous prefix against this store.
 
         Args:
             selector: The id or prefix the operator named.
@@ -665,22 +998,88 @@ class JobStore:
             The matching Job id.
 
         Raises:
-            ChinamaxError: On no match or an ambiguous prefix — including an
-                explicit id against an empty store, which is never answered with
-                a silent success.
+            ChinamaxError: On no match or an ambiguous prefix.
         """
-        known = self.job_ids()
-        if selector in known:
-            return selector
-        matches = [job_id for job_id in known if job_id.startswith(selector)]
-        if len(matches) == 1:
-            return matches[0]
-        if matches:
-            raise ChinamaxError(
-                f"ambiguous Job selector {selector!r}; candidates: {', '.join(matches)}"
+        return resolve_selector(selector, self.job_ids())
+
+    def prune(self, keep: int = PRUNE_KEEP) -> list[str]:
+        """Drop the oldest finished Jobs beyond ``keep``, artifacts and all.
+
+        Called on dispatch and on terminal transitions only — never on a
+        throttled progress update or a steer write, which would scan-and-unlink
+        constantly and widen the window where a concurrent `logs`/`result` read
+        hits a half-removed Job.
+
+        Args:
+            keep: How many finished Jobs to keep.
+
+        Returns:
+            The ids that were dropped.
+        """
+        with self._locked():
+            return self._prune_locked(keep)
+
+    def create_resume(
+        self, selector: str | None, prompt: str, *, originating_session: str | None = None
+    ) -> dict:
+        """Create a Job continuing a finished Job's Thread.
+
+        The guard, the source resolution, the transcript copy and the new
+        record's creation all happen inside ONE critical section: creating the
+        record under the lock but copying after it would let a concurrent prune
+        drop the source in between, and two concurrent resumes could otherwise
+        both observe "nothing active" and both dispatch.
+
+        The DISPATCHER writes the copy, never the worker — a worker only ever
+        reads its own transcript, so nothing can pull the source out from under
+        a rehydrating Job. The new Job inherits the source's Profile, write
+        posture, workspace root and bash timeout: a resume must not silently
+        change posture or provider. Pending steers are deliberately NOT carried
+        forward — the new Job has its own empty queue.
+
+        Args:
+            selector: The source id or prefix, or None for the most recent
+                non-active Job with a Thread.
+            prompt: The follow-up, already resolved (never empty).
+            originating_session: The CURRENT session id — provenance only.
+
+        Returns:
+            The new Job's record.
+
+        Raises:
+            ChinamaxError: If a Job is still active, the source cannot be
+                resolved, or its Thread is absent, empty or unusable.
+        """
+        with self._locked():
+            records = self._load_locked()
+            running = sorted(record["id"] for record in records if is_active(record))
+            if running:
+                raise ChinamaxError(
+                    "a Job is still running — use `status` to follow it or `cancel` "
+                    f"to stop it first: {', '.join(running)}"
+                )
+            source = self._resume_source(selector, records)
+            messages = merge_follow_up(self._resume_thread(source["id"]), prompt)
+            request = source.get("request") or {}
+            job_id = self.reserve_id()
+            record = new_record(
+                job_id,
+                prompt=prompt,
+                profile=request.get("profile") or source.get("profile"),
+                write=bool(request.get("write", source.get("write", True))),
+                workspace_root=Path(
+                    request.get("workspaceRoot")
+                    or source.get("workspaceRoot")
+                    or self.workspace_root
+                ),
+                log_file=self.log_path(job_id),
+                bash_timeout_s=request.get("bashTimeoutSec"),
+                originating_session=originating_session,
             )
-        listed = ", ".join(known) if known else "(none)"
-        raise ChinamaxError(f"no Job matching {selector!r}; known Jobs: {listed}")
+            write_messages(precreate(self.transcript_path(job_id)), messages)
+            self._publish(record)
+            self._sync_index()
+            return normalize_record(record)
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -754,6 +1153,97 @@ class JobStore:
                 + "\n",
             )
         return derived
+
+    def _load_locked(self) -> list[dict]:
+        """Return every readable record. The caller holds the lock.
+
+        Deliberately not `load_records`: that one takes the lock through
+        `job_ids`, and `flock` on a second descriptor from the same process
+        blocks rather than nesting.
+        """
+        records = []
+        for job_id in sorted(self._derived_ids()):
+            raw = self._read(job_id)
+            if raw is not None:
+                records.append(normalize_record(raw))
+        return records
+
+    def _resume_source(self, selector: str | None, records: list[dict]) -> dict:
+        """Pick the Job whose Thread a resume continues. The caller holds the lock."""
+        by_id = {record["id"]: record for record in records}
+        if selector is not None:
+            return by_id[resolve_selector(selector, by_id)]
+        with_thread = [
+            record
+            for record in records
+            if not is_active(record) and self._thread_size(record["id"]) > 0
+        ]
+        if not with_thread:
+            raise ChinamaxError(
+                "no finished Job with a Thread to resume in this workspace"
+            )
+        return max(with_thread, key=latest_key)
+
+    def _resume_thread(self, job_id: str) -> list[dict]:
+        """Read and repair one Job's Thread for a resume. The caller holds the lock."""
+        path = self.transcript_path(job_id)
+        if self._thread_size(job_id) <= 0:
+            raise ChinamaxError(
+                f"{job_id} has no Thread to resume: {path} is absent or empty"
+            )
+        try:
+            messages = read_repaired_messages(path)
+        except (OSError, ValueError) as error:
+            raise ChinamaxError(f"{job_id}'s Thread is unreadable: {error}") from error
+        if not messages:
+            raise ChinamaxError(
+                f"{job_id}'s Thread yields no usable turn after normalization: {path}"
+            )
+        return messages
+
+    def _thread_size(self, job_id: str) -> int:
+        """Return a Job's transcript size, or 0 when it is absent."""
+        try:
+            return self.transcript_path(job_id).stat().st_size
+        except OSError:
+            return 0
+
+    def _prune_locked(self, keep: int) -> list[str]:
+        """Drop the oldest finished Jobs beyond ``keep``. The caller holds the lock."""
+        finished = [
+            record
+            for record in self._load_locked()
+            if effective_status(record) in FINISHED_STATUSES
+        ]
+        finished.sort(key=latest_key, reverse=True)
+        dropped = [record["id"] for record in finished[keep:]]
+        for job_id in dropped:
+            self._drop_job(job_id)
+        if dropped:
+            self._sync_index()
+        return dropped
+
+    def _drop_job(self, job_id: str) -> None:
+        """Remove every artifact of one Job. The caller holds the lock.
+
+        The record `.json` goes FIRST: it is what makes a Job resolvable, so a
+        concurrent `logs`/`result` either resolved the Job before this began or
+        cannot see it at all, instead of resolving it and then reading a
+        half-removed set. All SIX artifacts of the authoritative layout are
+        covered — the `.steer/` queue recursively, since a consumed/
+        subdirectory nests inside it and a flat unlink loop leaves it behind.
+        Missing files are tolerated so this is idempotent after a crash, and
+        symlinks are never followed.
+        """
+        _unlink(self.record_path(job_id))
+        for path in (
+            self.log_path(job_id),
+            self.spawn_log_path(job_id),
+            self.transcript_path(job_id),
+            self.result_path(job_id),
+        ):
+            _unlink(path)
+        _unlink_tree(self.steer_dir(job_id))
 
 
 class ProgressReporter:
@@ -880,6 +1370,111 @@ class Heartbeat:
                 self._reporter.touch()
             except Exception:  # noqa: BLE001 - a heartbeat failure must stay silent
                 return
+
+
+def _stat_start_time(fields: list[str]) -> int | None:
+    """Return field 22 from a stat line's post-comm fields."""
+    # After the comm come fields 3 onward, so field 22 sits at index 19.
+    if len(fields) < 20:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+def _identity_holds(target: ProcessInfo, live: ProcessInfo) -> bool:
+    """Report whether a live process is still the one that was snapshotted."""
+    if target.start_time is None or live.start_time is None:
+        return True
+    return target.start_time == live.start_time
+
+
+def _alive_targets(targets: dict[int, ProcessInfo]) -> list[int]:
+    """Return the snapshotted pids that are still their original selves."""
+    alive = []
+    for pid, target in targets.items():
+        live = read_process(pid)
+        if live is None or live.zombie or not _identity_holds(target, live):
+            continue
+        alive.append(pid)
+    return alive
+
+
+def _await_exit(targets: dict[int, ProcessInfo], bound_s: float) -> None:
+    """Poll until every target is gone, or the bound expires."""
+    deadline = time.monotonic() + bound_s
+    while _alive_targets(targets) and time.monotonic() < deadline:
+        time.sleep(_TERMINATE_POLL_S)
+
+
+def _rescan(snapshot: dict[int, ProcessInfo]) -> dict[int, ProcessInfo]:
+    """Re-walk from the survivors, catching descendants born after the snapshot.
+
+    Only the still-live members can be walked from: a dead parent's children
+    have already reparented to init and are no longer reachable by ppid.
+    """
+    alive = _alive_targets(snapshot)
+    if not alive:
+        return {}
+    table = process_table()
+    found: dict[int, ProcessInfo] = {}
+    for pid in alive:
+        found.update(descendants(pid, table))
+    return {
+        pid: info
+        for pid, info in found.items()
+        if pid not in snapshot or _identity_holds(snapshot[pid], info)
+    }
+
+
+def _signal_processes(targets: dict[int, ProcessInfo], number: int) -> None:
+    """Signal every distinct process GROUP in a target set.
+
+    Signalling groups rather than pids is what reaches the children the bash
+    tool started in their own sessions. A pid whose start time no longer matches
+    is skipped rather than signalled, so a recycled pid or pgid is never the
+    target, and the caller's OWN group is never signalled.
+    """
+    own_group = os.getpgid(0)
+    groups: set[int] = set()
+    for pid, target in targets.items():
+        live = read_process(pid)
+        if live is None or not _identity_holds(target, live):
+            continue
+        if live.pgid > 1 and live.pgid != own_group:
+            groups.add(live.pgid)
+        else:
+            _signal_pid(pid, number)
+    for group in sorted(groups):
+        try:
+            os.killpg(group, number)
+        except OSError:
+            pass
+
+
+def _signal_pid(pid: int, number: int) -> None:
+    """Signal one process, tolerating a race with its exit."""
+    try:
+        os.kill(pid, number)
+    except OSError:
+        pass
+
+
+def _unlink(path: Path) -> None:
+    """Remove one file, tolerating absence and never following a symlink."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _unlink_tree(path: Path) -> None:
+    """Remove a directory tree, tolerating absence and never following links."""
+    if path.is_symlink():
+        _unlink(path)
+        return
+    shutil.rmtree(path, ignore_errors=True)
 
 
 def _base36(value: int) -> str:

@@ -22,7 +22,7 @@ from chinamax.liveness import LoopConfig, emit_event, stream_with_ladder
 from chinamax.profiles import Profile
 from chinamax.spec import JobSpec
 from chinamax.tools import REPORT_RESULT, Registry, build_registry
-from chinamax.transcript import Transcript
+from chinamax.transcript import Transcript, read_repaired_messages
 
 #: The progress-phase vocabulary, CLOSED: a reporter is called with one of these
 #: verbatim, and the jobs scope stores it as the Job record's ``phase``.
@@ -103,13 +103,20 @@ def run_loop(
         write=spec.write,
         bash_timeout_s=spec.bash_timeout_s,
     )
-    messages: list[dict] = []
+    messages = _seed_history(spec)
     _report(
         reporter,
         PHASE_STARTING,
-        f"job started on profile {profile.name} in {spec.workspace}",
+        f"job started on profile {profile.name} in {spec.workspace}"
+        + (f", seeded with {len(messages)} prior turn(s)" if messages else ""),
     )
-    _append(transcript, messages, "user", [{"type": "text", "text": spec.prompt}])
+    if not messages:
+        _append(transcript, messages, "user", [{"type": "text", "text": spec.prompt}])
+    # A seeded history always ENDS in an unsent user turn — the resume
+    # normalization folds the follow-up into it — so the first request sends
+    # that turn without re-appending it to the transcript, and the spec's prompt
+    # is never appended as a second user message. Appending both would deliver
+    # the follow-up twice.
     turn_number = 0
     while True:
         turn_number += 1
@@ -138,6 +145,31 @@ def run_loop(
                 _append(transcript, messages, "user", results)
             return payload
         _append(transcript, messages, "user", results)
+
+
+def _seed_history(spec: JobSpec) -> list[dict]:
+    """Rehydrate a Thread the caller pre-populated, or start empty.
+
+    Only ``seed_transcript`` opens this path: without it an existing transcript
+    is truncated (the fresh-run default), which is what stops a re-run from
+    grafting a new conversation onto stale history. The read goes through the
+    same tolerant REPAIRING reader a resume uses, because this runs in exactly
+    the crash-recovery case where a torn trailing line is expected.
+
+    Args:
+        spec: The validated job spec.
+
+    Returns:
+        The prior turns, or an empty list for a fresh run.
+    """
+    if not spec.seed_transcript:
+        return []
+    try:
+        if spec.transcript_path.stat().st_size <= 0:
+            return []
+        return read_repaired_messages(spec.transcript_path)
+    except OSError:
+        return []
 
 
 def _stream_turn(
