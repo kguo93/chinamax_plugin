@@ -107,11 +107,23 @@ SESSION_ID_VARIABLE = "CLAUDE_SESSION_ID"
 #: Overrides the interpreter the detached worker runs under. Tests point it at a
 #: non-executable path to make a spawn fail for real, with no mocked process layer.
 WORKER_PYTHON_VARIABLE = "CHINAMAX_WORKER_PYTHON"
+#: Pins the epoch-ms a `steer` write stamps into its queue-file name. Test-only:
+#: it lets two writers be forced into one millisecond so the random suffix — not
+#: the millisecond — is what keeps their names distinct.
+STEER_CLOCK_VARIABLE = "CHINAMAX_STEER_NOW_MS"
+#: The subdirectory a drained steer is moved into, beside the still-queued files.
+STEER_CONSUMED_DIRNAME = "consumed"
 
 _ID_ALPHABET = string.digits + string.ascii_lowercase
 #: The record scan matches this and NOT the bare glob ``jobs/*.json``, which
 #: would swallow ``<id>.result.json`` and register phantom Jobs.
 _RECORD_RE = re.compile(r"^(task-[0-9a-z]+-[0-9a-z]{6})\.json$")
+
+#: A per-process counter ordering a same-process burst of steers landing inside
+#: one millisecond. Zero-padded ``%04d`` in the filename so it sorts lexically —
+#: unpadded, ``-10`` would sort before ``-2``.
+_steer_seq_lock = threading.Lock()
+_steer_seq_counter = 0
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 #: How far back `tail_lines` seeks: a 70-minute log is never read whole.
 _TAIL_WINDOW_BYTES = 65536
@@ -680,6 +692,106 @@ def new_job_id(clock: Callable[[], float] = time.time) -> str:
     return f"task-{_base36(int(clock() * 1000))}-{suffix}"
 
 
+def steer_now_ms() -> int:
+    """Return the epoch-ms a steer write stamps into its queue-file name.
+
+    Honours `STEER_CLOCK_VARIABLE` when set, so a test can pin two writes to one
+    millisecond; falls back to the wall clock otherwise.
+    """
+    override = os.environ.get(STEER_CLOCK_VARIABLE, "").strip()
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            pass
+    return int(time.time() * 1000)
+
+
+def _next_steer_seq() -> int:
+    """Return the next per-process steer sequence number."""
+    global _steer_seq_counter
+    with _steer_seq_lock:
+        value = _steer_seq_counter
+        _steer_seq_counter += 1
+        return value
+
+
+def _steer_filename(now_ms: int, seq: int) -> str:
+    """Build a steer's queue-file name ``<epoch-ms>-<seq>-<6 random>.md``.
+
+    Every component earns its place: ``epoch-ms`` is fixed-width and orders
+    writes across processes, ``seq`` (zero-padded ``%04d``) orders a same-process
+    burst inside one millisecond, and the random suffix makes the name unique
+    outright — two `steer` processes landing in the same millisecond cannot
+    collide, which is what lets the write stay a plain atomic tmp+rename.
+    """
+    suffix = "".join(random.choices(_ID_ALPHABET, k=6))
+    return f"{now_ms}-{seq:04d}-{suffix}.md"
+
+
+def write_steer(steer_dir: Path, message: str) -> str:
+    """Enqueue one steer as an ordered, uniquely-named file, and return its id.
+
+    The name is unique by construction, so the write is a plain atomic tmp+rename
+    through `_write_file` — NO exclusive-create dance (``os.link`` strands the tmp
+    inode; an in-place ``O_CREAT|O_EXCL`` exposes a half-written file to a
+    concurrent drain) and NO name derived by re-listing the directory (which can
+    reuse an id whose same-millisecond predecessor already moved to ``consumed/``,
+    so the drain's dedupe would silently swallow the NEW steer). ``_write_file``'s
+    temporary is ``.<name>.<rand>.tmp`` — no ``.md`` suffix, so the drain's glob
+    skips it.
+
+    Args:
+        steer_dir: The Job's steer queue directory.
+        message: The steer text, stored verbatim (the marker is added at drain).
+
+    Returns:
+        The steer id: the queue-file name.
+    """
+    make_dir(steer_dir)
+    name = _steer_filename(steer_now_ms(), _next_steer_seq())
+    _write_file(steer_dir / name, message)
+    return name
+
+
+def list_steer_files(steer_dir: Path) -> list[Path]:
+    """Return the queued (undrained) steer files, in filename order.
+
+    Lists ``*.md`` files only: the ``consumed/`` subdirectory and the drain's
+    own ``.tmp`` temporaries are both skipped without a special case.
+
+    Args:
+        steer_dir: The Job's steer queue directory.
+
+    Returns:
+        The queued steer files, sorted by name (write order).
+    """
+    try:
+        entries = list(os.scandir(steer_dir))
+    except OSError:
+        return []
+    files = [
+        Path(entry.path)
+        for entry in entries
+        if entry.is_file() and entry.name.endswith(".md")
+    ]
+    return sorted(files, key=lambda path: path.name)
+
+
+def steer_enqueued_at(steer_id: str) -> str:
+    """Recover a steer's enqueue timestamp from its id's leading epoch-ms.
+
+    The id's first component IS the enqueue millisecond, so the timestamp needs
+    no separate storage. A malformed id falls back to the current time rather
+    than failing a drain.
+    """
+    head = steer_id.split("-", 1)[0]
+    try:
+        return datetime.fromtimestamp(int(head) / 1000, timezone.utc).isoformat()
+    except (ValueError, OSError, OverflowError):
+        return utc_now()
+
+
 def new_record(
     job_id: str,
     *,
@@ -840,6 +952,10 @@ class JobStore:
         """Return a Job's steer queue directory (drained in jobs/03)."""
         return self.jobs_dir / f"{job_id}.steer"
 
+    def enqueue_steer(self, job_id: str, message: str) -> str:
+        """Append one steer to a Job's queue and return its id (the file name)."""
+        return write_steer(self.steer_dir(job_id), message)
+
     def ensure(self) -> "JobStore":
         """Create the store's directories 0700."""
         make_dir(self.path)
@@ -923,6 +1039,43 @@ class JobStore:
                 record.update(changes)
             if touch:
                 record["updatedAt"] = utc_now()
+            self._publish(record)
+            self._sync_index()
+            return normalize_record(record)
+
+    def claim(self, job_id: str, changes: dict) -> dict | None:
+        """Claim a queued record, or RECLAIM a crashed worker's non-terminal one.
+
+        The one edit jobs/03 makes to jobs/01's claim CAS, and the only caller is
+        ``task-worker`` startup — no verb path reaches it. A ``queued`` record is
+        claimed as before. The reclaim arm additionally admits a NON-terminal
+        record (``queued`` or ``running``) whose recorded worker is PROVABLY GONE
+        by `worker_gone` — deliberately WITHOUT `effective_status`'s 60 s stale
+        grace, since an explicit relaunch verifies liveness directly rather than
+        guarding against a delayed heartbeat. A live claimant, or a terminal
+        record (a cancel that landed first), still yields None and exit-without-
+        running. Runs inside the one locked compare-and-swap, so a second worker
+        racing the same record cannot both win.
+
+        Args:
+            job_id: The Job to claim.
+            changes: The claim's fields (status/pid/pidStartTime/startedAt/phase).
+
+        Returns:
+            The published record, or None when the record is terminal, held by a
+            live claimant, or unreadable.
+        """
+        with self._locked():
+            record = self._read(job_id)
+            if record is None:
+                return None
+            status = record.get("status")
+            if status != STATUS_QUEUED and not (
+                status in ACTIVE_STATUSES and worker_gone(normalize_record(record))
+            ):
+                return None
+            record.update(changes)
+            record["updatedAt"] = utc_now()
             self._publish(record)
             self._sync_index()
             return normalize_record(record)

@@ -135,6 +135,10 @@ class FakeProvider:
         self.closing = threading.Event()
         self._lock = threading.Lock()
         self._cursor = 0
+        #: turn index -> (reached, release): a gated turn records its request,
+        #: sets ``reached``, and blocks BEFORE serving until ``release`` is set —
+        #: the seam a steer test uses to write into the window between two turns.
+        self._gates: dict[int, tuple[threading.Event, threading.Event]] = {}
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), partial(_Handler, provider=self))
         self._thread = threading.Thread(target=self._server.serve_forever)
 
@@ -154,6 +158,25 @@ class FakeProvider:
         self._server.server_close()
         self._thread.join()
 
+    def gate(self, index: int) -> tuple[threading.Event, threading.Event]:
+        """Arm a gate before the turn at ``index`` and return its two events.
+
+        The handler serving that turn records the request, sets the first event
+        (``reached``) and blocks until the caller sets the second (``release``).
+        A test waits on ``reached``, does its work in the between-turns window
+        (writing a steer), then sets ``release``.
+
+        Args:
+            index: The 0-based turn index to hold before serving.
+
+        Returns:
+            ``(reached, release)`` — wait the first, set the second.
+        """
+        reached, release = threading.Event(), threading.Event()
+        with self._lock:
+            self._gates[index] = (reached, release)
+        return reached, release
+
     def take_turn(self, body: dict, headers: dict) -> dict | None:
         """Record a request and hand back the next scripted turn.
 
@@ -165,6 +188,7 @@ class FakeProvider:
             The next scripted turn, or None once the script is exhausted.
         """
         with self._lock:
+            index = self._cursor
             self.requests.append(
                 {
                     "body": body,
@@ -172,11 +196,28 @@ class FakeProvider:
                     "transcript_snapshot": self._snapshot(),
                 }
             )
+            gate = self._gates.get(index)
             if self._cursor >= len(self.script):
-                return None
-            scripted = self.script[self._cursor]
-            self._cursor += 1
-            return scripted
+                scripted = None
+            else:
+                scripted = self.script[self._cursor]
+                self._cursor += 1
+        # Block AFTER releasing the lock so a concurrent read of `requests` (the
+        # arriving request is already recorded) never waits on the gate.
+        self._await_gate(gate)
+        return scripted
+
+    def _await_gate(
+        self, gate: tuple[threading.Event, threading.Event] | None
+    ) -> None:
+        """Signal a gate is reached and block until it is released or teardown."""
+        if gate is None:
+            return
+        reached, release = gate
+        reached.set()
+        while not release.wait(PING_INTERVAL_S):
+            if self.closing.is_set():
+                return
 
     def _snapshot(self) -> str:
         if self.snapshot_path is None or not self.snapshot_path.exists():

@@ -35,6 +35,11 @@ REPORTED_RESULT = (
 )
 _REPORT_RESULT = "report_result"
 
+#: The fixed prefix a drained steer's text carries into the user turn. Fixed, not
+#: illustrative: it is what a model sees marking an out-of-band instruction, and
+#: the tests assert on it verbatim.
+STEER_MARKER = "[steer] "
+
 
 class Transcript:
     """Write-ahead JSONL writer for one Job's Thread.
@@ -87,6 +92,32 @@ class Transcript:
                 "kind": "message",
                 "role": role,
                 "content": content,
+            }
+        )
+
+    def append_steer(self, text: str, steer_id: str, enqueued_at: str) -> None:
+        """Append one drained steer as a replayable user turn plus audit metadata.
+
+        The steer's marked text is a content block, so a replay reconstructs the
+        exact user turn the provider saw (the drain rides it onto the outgoing
+        user message, and `read_repaired_messages` coalesces it back). The steer
+        id and enqueue timestamp ride as metadata FIELDS beside ``v``/``ts``/
+        ``kind`` — audit fields a replay skips, not content blocks of their own.
+
+        Args:
+            text: The steer text, already carrying `STEER_MARKER`.
+            steer_id: The steer's queue-file name — the drain's dedupe key.
+            enqueued_at: The steer's enqueue timestamp, ISO-8601 UTC.
+        """
+        self._append(
+            {
+                "v": SCHEMA_VERSION,
+                "ts": self._now(),
+                "kind": "message",
+                "role": "user",
+                "content": [{"type": "text", "text": text}],
+                "steer_id": steer_id,
+                "steer_ts": enqueued_at,
             }
         )
 
@@ -157,13 +188,79 @@ def read_repaired_messages(path: str | Path) -> list[dict]:
     answered synthetically, and a trailing user turn is left alone for
     `merge_follow_up` to fold the follow-up into.
 
+    Consecutive user turns are coalesced last: a drained steer is recorded as
+    its OWN user ``message`` record following the turn it rode onto, so a replay
+    that did not merge them would reconstruct two consecutive user messages the
+    provider never saw — and third-party endpoints do not reliably tolerate that.
+    Merging is a no-op for a steer-free Thread, whose turns already alternate.
+
     Args:
         path: The transcript path.
 
     Returns:
-        A message sequence in which every ``tool_use`` is answered.
+        A message sequence in which every ``tool_use`` is answered and no two
+        user turns are adjacent.
     """
-    return repair_messages(read_messages(path))
+    return coalesce_user_turns(repair_messages(read_messages(path)))
+
+
+def coalesce_user_turns(messages: list[dict]) -> list[dict]:
+    """Merge each run of consecutive user turns into one, concatenating blocks.
+
+    A drained steer lands in the transcript as a separate user ``message`` record
+    right after the user turn it was injected onto; this folds it back so the
+    replayed history matches the single merged turn the provider actually saw. It
+    only ever fires on that steer case — an ordinary Thread alternates roles.
+
+    Args:
+        messages: The replayed, repaired message sequence.
+
+    Returns:
+        A new sequence; the input is not mutated.
+    """
+    merged: list[dict] = []
+    for message in messages:
+        if merged and message.get("role") == "user" and merged[-1].get("role") == "user":
+            last = merged[-1]
+            merged[-1] = {**last, "content": [*_blocks(last), *_blocks(message)]}
+        else:
+            merged.append(message)
+    return merged
+
+
+def read_steer_ids(path: str | Path) -> set[str]:
+    """Collect the steer ids a Thread transcript already records.
+
+    The drain's dedupe set is seeded from this once at worker startup: a steer
+    whose id already appears here was injected by a prior run and must not be
+    injected again, only acknowledged into ``consumed/``. Tolerant like the
+    replay readers — a torn trailing line is a half-written append, not a turn.
+
+    Args:
+        path: The transcript path.
+
+    Returns:
+        Every ``steer_id`` recorded on a ``message`` record, deduplicated.
+    """
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set()
+    ids: set[str] = set()
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            if index == len(lines) - 1:
+                break
+            raise
+        if isinstance(record, dict) and record.get("kind") == "message":
+            steer_id = record.get("steer_id")
+            if isinstance(steer_id, str):
+                ids.add(steer_id)
+    return ids
 
 
 def repair_messages(messages: list[dict]) -> list[dict]:

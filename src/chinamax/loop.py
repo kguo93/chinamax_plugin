@@ -17,12 +17,18 @@ from typing import Callable
 
 import anthropic
 
+from chinamax import state
 from chinamax.confinement import ToolContext
 from chinamax.liveness import LoopConfig, emit_event, stream_with_ladder
 from chinamax.profiles import Profile
 from chinamax.spec import JobSpec
 from chinamax.tools import REPORT_RESULT, Registry, build_registry
-from chinamax.transcript import Transcript, read_repaired_messages
+from chinamax.transcript import (
+    STEER_MARKER,
+    Transcript,
+    read_repaired_messages,
+    read_steer_ids,
+)
 
 #: The progress-phase vocabulary, CLOSED: a reporter is called with one of these
 #: verbatim, and the jobs scope stores it as the Job record's ``phase``.
@@ -34,6 +40,12 @@ PHASES = (PHASE_STARTING, PHASE_CALLING_MODEL, PHASE_RUNNING_TOOL, PHASE_REPORTI
 
 #: How much of a tool's input a progress line quotes.
 _PREVIEW_LIMIT = 200
+#: How much of a steer a drain's log line quotes.
+_STEER_EXCERPT_LIMIT = 120
+#: Test seam: when set, the drain hard-exits between the transcript flush and the
+#: rename, reproducing a crash in that exact window with the steer flushed to the
+#: Thread but still queued. Test-only; nothing production reads it.
+STEER_ABORT_VARIABLE = "CHINAMAX_STEER_ABORT"
 
 SYSTEM_TEMPLATE = """You are a worker model executing one task inside the workspace {workspace}.
 
@@ -71,6 +83,7 @@ def run_loop(
     transcript: Transcript,
     config: LoopConfig,
     reporter: Callable[[str, str], None] | None = None,
+    steer_dir: Path | None = None,
 ) -> dict:
     """Drive one Job to its report_result.
 
@@ -88,6 +101,8 @@ def run_loop(
             each tool execution, with ``phase`` from `PHASES`. The jobs scope
             mirrors it into the Job's log and record; a callback that raises is
             logged and swallowed.
+        steer_dir: The Job's steer queue, drained at each iteration boundary;
+            None (the ``exec`` path) disables steering entirely.
 
     Returns:
         The ``report_result`` payload, verbatim.
@@ -104,6 +119,13 @@ def run_loop(
         bash_timeout_s=spec.bash_timeout_s,
     )
     messages = _seed_history(spec)
+    # The dedupe set is read ONCE at startup and updated as the loop drains, so a
+    # long Job never re-parses a growing JSONL at every boundary. Seeding it from
+    # the transcript is what makes the drain's skip sound: on a relaunch the ids
+    # of steers a prior run already injected are here, so they are acknowledged
+    # rather than delivered twice — and the worker's transcript seeding is what
+    # keeps a skipped-but-not-yet-consumed steer at exactly one delivery.
+    consumed = read_steer_ids(spec.transcript_path) if steer_dir is not None else set()
     _report(
         reporter,
         PHASE_STARTING,
@@ -118,33 +140,41 @@ def run_loop(
     # is never appended as a second user message. Appending both would deliver
     # the follow-up twice.
     turn_number = 0
-    while True:
-        turn_number += 1
-        _report(reporter, PHASE_CALLING_MODEL, f"turn {turn_number}: calling {profile.model}")
-        content = _stream_turn(client, profile, spec, registry, messages, config, transcript)
-        _append(transcript, messages, "assistant", content)
+    try:
+        while True:
+            # Drain at the top of EVERY iteration, including the first, so a steer
+            # written before the worker started lands before the first API call.
+            _drain_steers(steer_dir, consumed, transcript, messages, reporter)
+            turn_number += 1
+            _report(reporter, PHASE_CALLING_MODEL, f"turn {turn_number}: calling {profile.model}")
+            content = _stream_turn(client, profile, spec, registry, messages, config, transcript)
+            _append(transcript, messages, "assistant", content)
 
-        tool_uses = [block for block in content if block.get("type") == "tool_use"]
-        if not tool_uses:
-            # Keys on the absence of tool_use, never on stop_reason: end_turn,
-            # max_tokens and stop_sequence all produce a tool-less turn, and
-            # re-sending would repeat the same request forever.
-            _report(
-                reporter,
-                PHASE_CALLING_MODEL,
-                f"turn {turn_number}: no tool use; restating the report_result contract",
-            )
-            _append(transcript, messages, "user", [{"type": "text", "text": NUDGE}])
-            continue
+            tool_uses = [block for block in content if block.get("type") == "tool_use"]
+            if not tool_uses:
+                # Keys on the absence of tool_use, never on stop_reason: end_turn,
+                # max_tokens and stop_sequence all produce a tool-less turn, and
+                # re-sending would repeat the same request forever.
+                _report(
+                    reporter,
+                    PHASE_CALLING_MODEL,
+                    f"turn {turn_number}: no tool use; restating the report_result contract",
+                )
+                _append(transcript, messages, "user", [{"type": "text", "text": NUDGE}])
+                continue
 
-        results, payload = _run_tool_uses(tool_uses, registry, context, reporter)
-        if payload is not None:
-            # Siblings of the terminal report_result are still answered in the
-            # durable record, even though no further request is sent.
-            if results:
-                _append(transcript, messages, "user", results)
-            return payload
-        _append(transcript, messages, "user", results)
+            results, payload = _run_tool_uses(tool_uses, registry, context, reporter)
+            if payload is not None:
+                # Siblings of the terminal report_result are still answered in the
+                # durable record, even though no further request is sent.
+                if results:
+                    _append(transcript, messages, "user", results)
+                return payload
+            _append(transcript, messages, "user", results)
+    finally:
+        # At the terminal transition, log any steer that lost the accept-versus-
+        # terminate race as undelivered — an auditable trace, no delivery change.
+        _sweep_undelivered(steer_dir, reporter)
 
 
 def _seed_history(spec: JobSpec) -> list[dict]:
@@ -170,6 +200,104 @@ def _seed_history(spec: JobSpec) -> list[dict]:
         return read_repaired_messages(spec.transcript_path)
     except OSError:
         return []
+
+
+def _drain_steers(
+    steer_dir: Path | None,
+    consumed: set[str],
+    transcript: Transcript,
+    messages: list[dict],
+    reporter: Callable[[str, str], None] | None,
+) -> None:
+    """Inject every queued steer into the outgoing user turn, in write order.
+
+    The order is load-bearing: commit the steer to the transcript FIRST (batch
+    flushed), acknowledge it into ``consumed/`` SECOND. Renaming first would lose
+    the steer outright to a crash in the gap — it would then be in neither the
+    queue nor the transcript. A steer whose id already appears in the transcript
+    (a crash after the flush but before the rename) is skipped and only
+    acknowledged, never injected twice.
+
+    Args:
+        steer_dir: The Job's steer queue, or None when steering is disabled.
+        consumed: The in-memory set of already-injected steer ids; updated here.
+        transcript: The Job's open Thread transcript.
+        messages: The in-memory history; the steer rides onto its outgoing turn.
+        reporter: The progress reporter, for the drain's log line.
+    """
+    if steer_dir is None:
+        return
+    consumed_subdir = steer_dir / state.STEER_CONSUMED_DIRNAME
+    for path in state.list_steer_files(steer_dir):
+        steer_id = path.name
+        if steer_id in consumed:
+            _consume_steer(path, consumed_subdir)
+            continue
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        marked = STEER_MARKER + raw
+        # An additional text block on the user message already carrying this
+        # turn's tool_results, never a second consecutive user message — third-
+        # party endpoints may 400 on those. On the first iteration that message
+        # is the original prompt, and the steer rides it the same way.
+        _attach_steer(messages, {"type": "text", "text": marked})
+        transcript.append_steer(marked, steer_id, state.steer_enqueued_at(steer_id))
+        consumed.add(steer_id)
+        _report(reporter, PHASE_CALLING_MODEL, f"steer {steer_id} drained: {_steer_excerpt(raw)}")
+        _steer_abort_point()
+        _consume_steer(path, consumed_subdir)
+
+
+def _sweep_undelivered(
+    steer_dir: Path | None, reporter: Callable[[str, str], None] | None
+) -> None:
+    """Log the ids of any steers still queued at the terminal transition."""
+    if steer_dir is None:
+        return
+    for path in state.list_steer_files(steer_dir):
+        _report(
+            reporter,
+            PHASE_REPORTING,
+            f"steer {path.name} undelivered: the job ended before it was drained",
+        )
+
+
+def _attach_steer(messages: list[dict], block: dict) -> None:
+    """Ride a steer text block onto the outgoing user turn, or start one."""
+    if messages and messages[-1].get("role") == "user":
+        messages[-1]["content"].append(block)
+    else:
+        messages.append({"role": "user", "content": [block]})
+
+
+def _consume_steer(path: Path, consumed_subdir: Path) -> None:
+    """Move one drained steer into ``consumed/`` (created if absent)."""
+    try:
+        state.make_dir(consumed_subdir)
+        os.replace(path, consumed_subdir / path.name)
+    except OSError:
+        pass
+
+
+def _steer_abort_point() -> None:
+    """Hard-exit between the transcript flush and the rename, when armed (test)."""
+    if os.environ.get(STEER_ABORT_VARIABLE, "").strip():
+        os._exit(137)
+
+
+#: Unicode line and paragraph separators, outside `escape_control`'s C0/C1 range;
+#: stripped so no separator a renderer honours can forge or split a log line.
+_UNICODE_LINE_SEPARATORS = {0x2028: " ", 0x2029: " "}
+
+
+def _steer_excerpt(text: str) -> str:
+    """Render a steer's text for one log line: control-clean and truncated."""
+    cleaned = state.escape_control(text.translate(_UNICODE_LINE_SEPARATORS))
+    if len(cleaned) <= _STEER_EXCERPT_LIMIT:
+        return cleaned
+    return cleaned[: _STEER_EXCERPT_LIMIT - 1] + "…"
 
 
 def _stream_turn(

@@ -55,12 +55,16 @@ DEFAULT_RESUME_PROMPT = "Continue the previous task."
 #: A resume target named on argv is recognised by the Job-id prefix; anything
 #: else in first position is the start of the prompt.
 JOB_ID_PREFIX = "task-"
+#: The largest steer message that is queued rather than refused. Beyond this a
+#: steer would only trip a provider 400 no drain could recover from.
+STEER_MAX_BYTES = 256 * 1024
 
 
 def execute_spec(
     spec: JobSpec,
     config: LoopConfig | None = None,
     reporter=None,
+    steer_dir: Path | None = None,
 ) -> dict:
     """Run one validated Job to its result.
 
@@ -74,6 +78,8 @@ def execute_spec(
         config: Supervision configuration to override the defaults with; the
             spec's own overrides are applied on top.
         reporter: The progress reporter handed to the loop.
+        steer_dir: The Job's steer queue, drained at each loop boundary; None
+            (the `exec` path) disables steering.
 
     Returns:
         The ``report_result`` payload, verbatim.
@@ -91,7 +97,9 @@ def execute_spec(
     with Transcript(
         spec.transcript_path, clock=config.clock, append=spec.seed_transcript
     ) as transcript:
-        payload = run_loop(client, profile, spec, transcript, config, reporter=reporter)
+        payload = run_loop(
+            client, profile, spec, transcript, config, reporter=reporter, steer_dir=steer_dir
+        )
     _write_result(spec.result_path, payload)
     return payload
 
@@ -171,7 +179,7 @@ def run_task_worker(job_id: str, state_dir: str) -> int:
     """
     store = state.JobStore(Path(state_dir))
     pid = os.getpid()
-    claimed = store.update(
+    claimed = store.claim(
         job_id,
         {
             "status": state.STATUS_RUNNING,
@@ -180,15 +188,21 @@ def run_task_worker(job_id: str, state_dir: str) -> int:
             "pid": pid,
             "pidStartTime": state.read_pid_start_time(pid),
         },
-        expect={state.STATUS_QUEUED},
     )
     if claimed is None:
-        # Already terminal means a cancel landed first; already running means
-        # another live claimant exists. Either way, exit without running rather
-        # than overwriting the record or double-executing the Job.
+        # Two arms, distinguished for an honest log: a TERMINAL record means a
+        # cancel landed first, while a non-terminal record `claim` would not
+        # reclaim means a LIVE claimant already owns it (a crashed claimant's
+        # record IS reclaimed). Either way, exit without running rather than
+        # overwriting the record or double-executing the Job.
         current = (store.try_read(job_id) or {}).get("status", "unreadable")
+        reason = (
+            f"is already {current!r}"
+            if current in state.TERMINAL_STATUSES
+            else f"is {current!r} with a live worker"
+        )
         print(
-            f"chinamax: {job_id} is {current!r}, not queued; exiting without running",
+            f"chinamax: {job_id} {reason}; exiting without running",
             file=sys.stderr,
         )
         return EXIT_TERMINAL
@@ -204,6 +218,7 @@ def run_task_worker(job_id: str, state_dir: str) -> int:
         payload = execute_spec(
             _worker_spec(job_id, claimed.get("request") or {}, transcript_path, result_path),
             reporter=reporter,
+            steer_dir=store.steer_dir(job_id),
         )
         changes = {
             "status": state.STATUS_COMPLETED,
@@ -402,6 +417,47 @@ def run_resume(args: argparse.Namespace) -> int:
     return code
 
 
+def run_steer(args: argparse.Namespace) -> int:
+    """Queue a mid-run steer for a running Job, refusing a finished one.
+
+    Leans entirely on jobs/02's `effective_status`: a `queued` or effectively-
+    `running` Job is steerable; the three terminal states AND an effectively-
+    `interrupted` Job are refused with a pointer to resume, since the only thing
+    that would ever drain an interrupted Job's queue is an internal relaunch,
+    and resume deliberately does not carry pending steers forward.
+
+    Enqueue and the worker's terminal transition are not synchronized, so after
+    the file lands the record is re-read: a Job that went terminal meanwhile is
+    reported as NOT delivered rather than a false success. This narrows the race
+    the worker's terminal sweep leaves an auditable trace for; it cannot close it.
+
+    Args:
+        args: The parsed ``steer`` arguments.
+
+    Returns:
+        0 once the steer is queued and the Job is still steerable, 1 on a refusal
+        (unknown/ambiguous id, a finished Job, an empty or oversize message, or a
+        Job that finished before the steer could be delivered).
+    """
+    store = state.open_store(args.workspace)
+    job_id = store.resolve_job(args.job)
+    status = state.effective_status(store.read(job_id))
+    if status not in state.ACTIVE_STATUSES:
+        raise ChinamaxError(_steer_refusal(job_id, status))
+
+    message = _read_steer_message(args.message)
+    steer_id = store.enqueue_steer(job_id, message)
+
+    after = state.effective_status(store.read(job_id))
+    if after not in state.ACTIVE_STATUSES:
+        raise ChinamaxError(
+            f"{job_id} went {after} before the steer {steer_id} could be delivered; "
+            f"it was NOT applied — continue its Thread with `resume {job_id} <prompt>`"
+        )
+    print(f"{job_id}  steer queued  {steer_id}")
+    return EXIT_TERMINAL
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser.
 
@@ -474,6 +530,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    steer_parser = subcommands.add_parser("steer", help="queue a mid-run message for a running Job")
+    steer_parser.add_argument("job", help="job id or prefix")
+    steer_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+    steer_parser.add_argument(
+        "message", nargs="*", help="the steer message; read from stdin when absent"
+    )
+
     worker_parser = subcommands.add_parser("task-worker", help="run a dispatched Job (internal)")
     worker_parser.add_argument("--job-id", required=True, help="the Job to run")
     worker_parser.add_argument("--state-dir", required=True, help="its state directory")
@@ -507,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_cancel(args)
         if args.command == "resume":
             return run_resume(args)
+        if args.command == "steer":
+            return run_steer(args)
         raise ChinamaxError(f"unknown command {args.command!r}")
     except ChinamaxError as error:
         print(f"chinamax: {error}", file=sys.stderr)
@@ -646,37 +711,83 @@ def _fold_result(result_path: Path, payload: dict) -> dict:
     return stored if isinstance(stored, dict) else payload
 
 
-def _read_prompt(words: list[str], default: str | None = None) -> str:
-    """Return the dispatch prompt from argv or stdin.
+def _read_prompt(
+    words: list[str],
+    default: str | None = None,
+    subject: str = "task",
+    noun: str = "prompt",
+) -> str:
+    """Return a verb's argv-or-stdin text.
 
     stdin is read ONLY when argv carries no text and stdin is not a TTY —
     otherwise a bare ``task --profile x`` at a terminal would hang forever on a
-    read. An empty prompt is refused before any record is written, unless the
-    verb has a default (`resume` does).
+    read. Empty text is refused before any record or file is written, unless the
+    verb has a default (`resume` does). `steer` reuses this exact shape.
 
     Args:
-        words: The positional prompt words.
-        default: What an omitted prompt means, or None to refuse one.
+        words: The positional words.
+        default: What omitted text means, or None to refuse it.
+        subject: The verb name, for the empty-input error.
+        noun: What the text is called, for the empty-input error.
 
     Returns:
-        The prompt.
+        The text.
 
     Raises:
-        ChinamaxError: If no prompt was supplied and the verb has no default.
+        ChinamaxError: If nothing was supplied and the verb has no default.
     """
     text = " ".join(words).strip()
     if not text and sys.stdin is not None and not sys.stdin.isatty():
         try:
             text = sys.stdin.read().strip()
         except OSError:
-            # An unreadable stdin carries no prompt; it is not a distinct error.
+            # An unreadable stdin carries no text; it is not a distinct error.
             text = ""
     if text:
         return text
     if default is not None:
         return default
     raise ChinamaxError(
-        "task needs a prompt: pass it as arguments (after `--`) or on stdin"
+        f"{subject} needs a {noun}: pass it as arguments (after `--`) or on stdin"
+    )
+
+
+def _read_steer_message(words: list[str]) -> str:
+    """Return the steer text from argv or stdin, refusing empty or oversize.
+
+    Empty or whitespace-only input, and a message beyond `STEER_MAX_BYTES`, are
+    both refused BEFORE any file is written — an oversize steer would otherwise
+    be queued only to trip a provider 400 no drain could recover from.
+
+    Args:
+        words: The positional message words.
+
+    Returns:
+        The steer text.
+
+    Raises:
+        ChinamaxError: On empty or oversize input.
+    """
+    message = _read_prompt(words, subject="steer", noun="message")
+    size = len(message.encode("utf-8"))
+    if size > STEER_MAX_BYTES:
+        raise ChinamaxError(
+            f"steer message is too large ({size} bytes > {STEER_MAX_BYTES}-byte cap); "
+            f"shorten it, or use `resume` with the full context once the Job finishes"
+        )
+    return message
+
+
+def _steer_refusal(job_id: str, status: str) -> str:
+    """Build the refusal for steering a Job that is not steerable."""
+    reason = (
+        "its worker is gone"
+        if status == state.STATUS_INTERRUPTED
+        else f"it is {status}, not running"
+    )
+    return (
+        f"{job_id} cannot be steered ({reason}) — continue its Thread with "
+        f"`resume {job_id} <prompt>`"
     )
 
 
