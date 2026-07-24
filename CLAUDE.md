@@ -22,9 +22,9 @@ Design/implementation decisions:
 - Runtime is a custom agent loop modeled on the OpenAI Codex plugin's orchestration, written in Python 3 in a dedicated fresh conda env (not `py_automation`).
 - Runtime speaks the providers' Anthropic-compatible Messages API, reusing the proven `/anthropic` base URLs, model strings, and keys from the implement-handoff skill verbatim.
 - Plugin and Bridge Agent are both named `chinamax` (agent type `chinamax:chinamax`); providers are config Profiles — pro tiers only: deepseek, mimo, glm, minimax, kimi (flash/ultraspeed rows of implement-handoff are excluded). No default Profile: every dispatch names one explicitly.
-- Commands: /chinamax:task, status, result, cancel, resume, setup, logs, profiles.
+- Commands: /chinamax:task, status, result, cancel, resume, steer, setup, logs, profiles.
 - Jobs have no wall-clock or turn caps; liveness-based supervision only (API inactivity → retried as transient failure ~6x backoff; bash per-command timeout default 10 min feeds back as an observation). Jobs die only on exhausted API retries or explicit cancel.
-- Every dispatch detaches immediately (durable Job, no SessionEnd reaping); the Bridge Agent poll-relays progress and forwards mid-run messages into a steer queue drained each loop iteration.
+- Every dispatch detaches immediately (durable Job, no SessionEnd reaping); exactly one named haiku Bridge long-polls it (`status --wait --timeout-ms 900000` default, per-dispatch `poll=<seconds>` override, Bash timeout kept above the seam bound), relays errors and the terminal result ONLY (no progress messages; a successful steer is silent), and forwards mid-run messages into a steer queue drained each loop iteration. A direct `/chinamax:steer` enqueues the same steer in-turn.
 - Write-capable by default (--read-only opt-out); confinement is tool-layer (realpath-confined file tools, cwd-pinned bash + denylist + timeouts).
 - Duplication guard: bridge/skill contract language + non-blocking Stop-hook notice of running Jobs.
 - Durable state under ${CLAUDE_PLUGIN_DATA}/state/<repo-slug>-<hash>/, falling back to $XDG_STATE_HOME/chinamax when unset (Codex layout, minus its SessionEnd cleanup).
@@ -36,4 +36,5 @@ Design/implementation decisions:
 - Live verification: full 3-part run on deepseek (simple dispatch; mid-run steer; 70+ min survival job) + one-shot smoke dispatch on mimo, glm, minimax, kimi — all in a throwaway repo at ~/chinamax-verification/.
 - Keys: all five profiles resolve from ~/.claude/model-keys.env (GLM_API_KEY and MINIMAX_API_KEY appended from the implement-handoff literals).
 - See docs/adr/ (0001–0011) for the recorded design decisions and their rejected alternatives.
+- 2026-07-24 relay redesign (implemented in relay-01; recorded in amended ADRs 0003/0007/0008/0010): exactly one named haiku Bridge teammate per dispatch — explicit `model: haiku` override in the Agent call and the full contract in the spawn prompt (named spawns ignore agent frontmatter), Bridge forbidden to spawn subagents; long-poll default 900 s, per-dispatch `poll=<seconds>` (the `status --wait` `--timeout-ms` ceiling was lifted to 900 s while its 240 s default stayed put); mid-run relay errors only, terminal result with envelope stripped and worker prose untouched; new `/chinamax:steer` command for in-turn steering.
 - API keys resolve via `~/.claude/model-keys.env`.

@@ -13,8 +13,9 @@ Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md
 
 - **Bridge Agent** — the Claude-facing named subagent, registered as `chinamax`
   (agent type `chinamax:chinamax`). It forwards one dispatch to the runtime, then
-  poll-relays progress and forwards mid-run messages. It never inspects the repo,
-  edits files, or does the task itself.
+  long-polls it — relaying errors and the terminal result — and forwards mid-run
+  messages as steers. Exactly one named Bridge serves a dispatch; it never inspects
+  the repo, edits files, spawns another agent, or does the task itself.
 - **Runtime** — the custom agent-loop process that owns the provider API
   conversation, tool execution, and safety controls for one task.
 - **Profile** — a named provider configuration (base URL, model string, API-key
@@ -26,9 +27,9 @@ Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md
   it.
 - **Thread** — the persistent worker-model transcript belonging to a Job. Resuming
   carries the Thread forward; a Job's steers and follow-ups land in it.
-- **Steer** — a message sent to the Bridge Agent while its Job is still running. It
-  lands in the Job's steer queue and is injected into the Thread as a user message
-  at the runtime's next loop iteration.
+- **Steer** — a message sent to a running Job, relayed by the Bridge Agent or
+  enqueued directly with `/chinamax:steer`. It lands in the Job's steer queue and is
+  injected into the Thread as a user message at the runtime's next loop iteration.
 
 ## Install
 
@@ -121,6 +122,7 @@ spellings are on the left; the Bridge maps them onto the CLI seam argv on the ri
 | `profile=<name>`          | `--profile <name>`         | **Required** on a fresh dispatch. No default — a profile-less dispatch is refused. |
 | `--read-only`             | `--read-only`              | Opt out of write-capable tools. Write-capable is the default.      |
 | `bash_timeout=<seconds>`  | `--bash-timeout-s <seconds>` | Per-command bash timeout override (a non-numeric value is refused). |
+| `poll=<seconds>`          | *(poll loop, not a task flag)* | The Bridge's long-poll bound: `status --wait --timeout-ms <seconds×1000>` (default 900 s), with the Bash timeout kept above it. A non-numeric value is refused. |
 | `--resume` / `--fresh`    | *(routing, not passed through)* | Bridge-level routing: `--fresh` (or a first dispatch) routes to `task`; `--resume` (or a natural-language follow-up) routes to `resume`. |
 
 `--resume` and `--fresh` are Bridge-level **routing controls**, never seam flags —
@@ -130,18 +132,20 @@ the Bridge picks the `task` or `resume` verb and never forwards them as argument
 
 ## Commands
 
-Eight slash commands, each a thin wrapper over the same CLI seam
-(`scripts/chinamax`, i.e. `python -m chinamax`). Every command returns the seam
-output verbatim.
+Nine slash commands. `/chinamax:task` dispatches the Bridge Agent; the other
+eight are thin wrappers over the same CLI seam (`scripts/chinamax`, i.e. `python
+-m chinamax`) and return the seam output verbatim.
 
 ### `/chinamax:task`
-`profile=<name> [--read-only] [--resume|--fresh] [bash_timeout=<seconds>] <what the worker model should do>`
+`profile=<name> [--read-only] [--resume|--fresh] [bash_timeout=<seconds>] [poll=<seconds>] <what the worker model should do>`
 
-Dispatch a task through the Bridge Agent. The Bridge detaches a durable Job, relays
-its id immediately, poll-relays progress, and forwards any mid-run message you send
-as a Steer. The task text is delivered to the runtime on stdin, so quotes, newlines,
-and leading dashes arrive byte-identical. The final response is the worker's result,
-verbatim.
+Dispatch a task through the Bridge Agent. Exactly one named haiku Bridge detaches a
+durable Job, relays its id immediately, then long-polls it (900 s default, or your
+`poll=<seconds>`) — relaying errors and the terminal result only, with no progress
+chatter — and forwards any mid-run message you send as a Steer. The task text is
+delivered to the runtime on stdin, so quotes, newlines, and leading dashes arrive
+byte-identical. The final response is the worker's result with its `report_result`
+envelope stripped and the worker's own prose left untouched.
 
 ### `/chinamax:status`
 `[job-id] [--wait] [--timeout-ms <ms>] [--workspace <dir>]`
@@ -149,7 +153,8 @@ verbatim.
 With no id, list every active Job in this workspace plus the recent finished ones.
 With an id (or unambiguous prefix), show that one Job with a short progress preview.
 `--wait` blocks until the Job's status, phase, or log advances, or the bound expires
-(`--timeout-ms`, clamped to 240000 ms). Exit codes: `0` terminal, `2` still active.
+(`--timeout-ms`, default 240000 ms, clamped to a 900000 ms ceiling so the Bridge's
+long-poll is honored rather than capped). Exit codes: `0` terminal, `2` still active.
 
 ### `/chinamax:result`
 `[job-id] [--json] [--workspace <dir>]`
@@ -174,6 +179,16 @@ Continue a finished Job's Thread with a follow-up — a new Job that inherits th
 source's Profile and write posture. Name the source Job id first (else the most
 recent non-active Job with a Thread is used). It refuses while any Job in the
 workspace is still active. Takes no `profile=`.
+
+### `/chinamax:steer`
+`[job-id] <steer message>`
+
+Enqueue a mid-run message onto a running Job — it lands in the Thread as a user
+message at the runtime's next loop boundary. With no id the single active Job is
+targeted; several active Jobs are listed rather than guessed. A finished or
+interrupted Job is refused with a pointer to `resume`. This is the same Steer the
+Bridge forwards, enqueued directly from the main context with none of the long
+poll's latency.
 
 ### `/chinamax:logs`
 `<job-id> [--tail <n>] [--workspace <dir>]`
@@ -222,10 +237,11 @@ holds a `state.json` index, a `state.lock`, and a `jobs/` subdirectory with, per
 `<id>.spawn.log`, `<id>.thread.jsonl` (the Thread), `<id>.result.json`, and an
 `<id>.steer/` queue directory.
 
-**Steer.** A message to the busy Bridge becomes a Steer: it is written to the Job's
-`<id>.steer/` queue and drained into the Thread as a `[steer]` user message at the
-runtime's next loop boundary — exactly once, even across a worker relaunch. A steer
-to a finished Job is refused and re-routed to `resume`.
+**Steer.** A message to the busy Bridge — or a direct `/chinamax:steer` — becomes a
+Steer: it is written to the Job's `<id>.steer/` queue and drained into the Thread as
+a `[steer]` user message at the runtime's next loop boundary — exactly once, even
+across a worker relaunch. A steer to a finished Job is refused and re-routed to
+`resume`.
 
 **Resume.** `resume` dispatches a new Job that continues a finished Job's Thread,
 inheriting its Profile and write posture. It refuses while any Job in the workspace

@@ -28,6 +28,7 @@ SAMPLE_ARGS = {
     "result": "task-abc-000001 --json",
     "cancel": "task-abc-000001",
     "resume": "task-abc-000001 keep going with the plan",
+    "steer": "task-abc-000001 stop touching module X",
     "logs": "task-abc-000001 --tail 20",
     "profiles": "",
     "setup": "--json",
@@ -82,6 +83,15 @@ def test_argument_normalization():
     # are never touched even with a single tail element (a spec path with a space).
     assert normalize_argv(["exec", "/tmp/a b/spec.json"]) == ["exec", "/tmp/a b/spec.json"]
     assert normalize_argv(["status", "task-x", "--wait"]) == ["status", "task-x", "--wait"]
+
+    # `steer` mirrors resume's transport: a leading `task-` selector is peeled and
+    # the message is kept intact after `--`; a bare steer keeps the whole message.
+    assert normalize_argv(["steer", "task-abc-000001 stop touching X"]) == [
+        "steer", "task-abc-000001", "--", "stop touching X",
+    ]
+    assert normalize_argv(["steer", "stop touching X"]) == ["steer", "--", "stop touching X"]
+    # A blank steer collapses to no args (the bare active Job, message via stdin).
+    assert normalize_argv(["steer", "  "]) == ["steer"]
 
     # A resume prompt with spaces, quotes, a leading dash, and a newline survives
     # byte-identical through the `--`/stdin path.

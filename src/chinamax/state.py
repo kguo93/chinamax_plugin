@@ -93,9 +93,13 @@ _TERMINATE_POLL_S = 0.05
 
 #: `status --wait` poll interval, on a monotonic clock.
 POLL_INTERVAL_S = 2.0
-#: The PRD's bounded polling window (~4 min). A larger `--timeout-ms` clamps to
-#: it rather than turning a bounded poll into an unbounded block.
-WAIT_TIMEOUT_MS = 240_000
+#: The default `status --wait` bound (~4 min) applied when no `--timeout-ms` is
+#: given — the seam default a direct `/chinamax:status --wait` call inherits.
+WAIT_TIMEOUT_DEFAULT_MS = 240_000
+#: The ceiling a larger `--timeout-ms` clamps to, lifted to the Bridge's 900 s
+#: long-poll (ADR 0003) so that default poll is honored rather than capped, while
+#: an unbounded value still cannot turn a bounded poll into an endless block.
+WAIT_TIMEOUT_MS = 900_000
 
 #: Records hold prompt text and results, so the store is owner-only throughout.
 DIR_MODE = 0o700

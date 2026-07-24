@@ -5,7 +5,7 @@ A Claude Code plugin that exposes non-Claude worker models (DeepSeek, MiMo, GLM,
 ## Language
 
 **Bridge Agent**:
-The Claude-facing named subagent — registered as `chinamax` (agent type `chinamax:chinamax`) — that accepts a task, forwards it to the Runtime, and relays progress and results. It never edits files or runs the task itself.
+The Claude-facing named subagent — registered as `chinamax` (agent type `chinamax:chinamax`) — that accepts a task, forwards it to the Runtime, and relays errors and the final result. Exactly one Bridge serves a dispatch; it never edits files, runs the task itself, or spawns another agent.
 _Avoid_: wrapper agent, proxy, "the deepseek agent" (DeepSeek is one Profile among many)
 
 **Runtime**:
@@ -25,7 +25,7 @@ A persistent worker-model conversation transcript belonging to a Job. Resuming c
 _Avoid_: session, chat
 
 **Steer**:
-A message sent to the Bridge Agent while its Job is still running. Steers land in the Job's steer queue; the Runtime drains the queue at its next loop iteration and injects each steer into the Thread as a user message.
+A message sent to a running Job — relayed by the Bridge Agent or enqueued directly. Steers land in the Job's steer queue; the Runtime drains the queue at its next loop iteration and injects each steer into the Thread as a user message.
 _Avoid_: interrupt (cancellation is a different action), follow-up (a follow-up starts a new turn on a finished Thread)
 
 **Pro**:

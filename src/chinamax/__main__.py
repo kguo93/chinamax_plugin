@@ -358,7 +358,7 @@ def run_cancel(args: argparse.Namespace) -> int:
         targeted process outlived the SIGKILL sweep.
     """
     store = state.open_store(args.workspace)
-    record = _cancel_target(store, args.job)
+    record = _active_target(store, args.job, "cancel")
     job_id = record["id"]
     if record["status"] in state.TERMINAL_STATUSES:
         print(f"{job_id}  {record['status']}  (already terminal; nothing to cancel)")
@@ -427,6 +427,11 @@ def run_steer(args: argparse.Namespace) -> int:
     that would ever drain an interrupted Job's queue is an internal relaunch,
     and resume deliberately does not carry pending steers forward.
 
+    The id is optional (transport mirrors `resume`): a leading ``task-`` selector
+    is peeled off the argv and the remainder is the message; with no id the single
+    active Job is targeted and several active Jobs are listed rather than guessed,
+    exactly like `cancel`.
+
     Enqueue and the worker's terminal transition are not synchronized, so after
     the file lands the record is re-read: a Job that went terminal meanwhile is
     reported as NOT delivered rather than a false success. This narrows the race
@@ -437,16 +442,19 @@ def run_steer(args: argparse.Namespace) -> int:
 
     Returns:
         0 once the steer is queued and the Job is still steerable, 1 on a refusal
-        (unknown/ambiguous id, a finished Job, an empty or oversize message, or a
-        Job that finished before the steer could be delivered).
+        (unknown/ambiguous id, no or several active Jobs for a bare steer, a
+        finished Job, an empty or oversize message, or a Job that finished before
+        the steer could be delivered).
     """
     store = state.open_store(args.workspace)
-    job_id = store.resolve_job(args.job)
-    status = state.effective_status(store.read(job_id))
+    selector, words = _split_resume_args(args.args)
+    record = _active_target(store, selector, "steer")
+    job_id = record["id"]
+    status = state.effective_status(record)
     if status not in state.ACTIVE_STATUSES:
         raise ChinamaxError(_steer_refusal(job_id, status))
 
-    message = _read_steer_message(args.message)
+    message = _read_steer_message(words)
     steer_id = store.enqueue_steer(job_id, message)
 
     after = state.effective_status(store.read(job_id))
@@ -489,8 +497,12 @@ def run_profiles(args: argparse.Namespace) -> int:
 #: verbs (`exec`/`task`/`task-worker`/`steer`) take real argv and are left alone,
 #: so a spec path carrying a space is never shlex-split out from under `exec`.
 _ARGUMENT_VERBS = frozenset(
-    {"status", "result", "cancel", "resume", "logs", "profiles", "setup"}
+    {"status", "result", "cancel", "resume", "steer", "logs", "profiles", "setup"}
 )
+#: Verbs whose single ``"$ARGUMENTS"`` element carries a free-text prompt after
+#: an optional leading ``task-`` selector — kept intact after ``--`` rather than
+#: `shlex.split`. `steer` mirrors `resume`'s transport (ADR 0008).
+_PROMPT_VERBS = frozenset({"resume", "steer"})
 
 
 def normalize_argv(argv: list[str]) -> list[str]:
@@ -504,12 +516,12 @@ def normalize_argv(argv: list[str]) -> list[str]:
     becomes no arguments at all, and a lone raw string is `shlex.split` so its
     flags reach argparse as separate tokens.
 
-    ``resume`` is the case splitting would corrupt — its free-text follow-up
-    carries quotes, leading dashes and newlines. Its prompt is kept intact after
-    a ``--`` terminator (so a leading dash is not read as a flag), with an
-    optional leading ``task-`` selector peeled off first; quoting ``"$ARGUMENTS"``
-    already delivers the exact bytes into argv, so the ``--`` path preserves them
-    byte-identically without a second transport.
+    ``resume`` and ``steer`` are the cases splitting would corrupt — their
+    free-text prompt/message carries quotes, leading dashes and newlines. That
+    text is kept intact after a ``--`` terminator (so a leading dash is not read
+    as a flag), with an optional leading ``task-`` selector peeled off first;
+    quoting ``"$ARGUMENTS"`` already delivers the exact bytes into argv, so the
+    ``--`` path preserves them byte-identically without a second transport.
 
     An argv that is not exactly ``[verb, one-element]`` for an operator command
     verb is returned unchanged, so every internal and multi-token call is inert.
@@ -525,17 +537,17 @@ def normalize_argv(argv: list[str]) -> list[str]:
     verb, raw = argv[0], argv[1]
     if not raw.strip():
         return [verb]
-    if verb == "resume":
+    if verb in _PROMPT_VERBS:
         return [verb, *_normalize_resume(raw)]
     return [verb, *shlex.split(raw)]
 
 
 def _normalize_resume(raw: str) -> list[str]:
-    """Split ``resume``'s single ``"$ARGUMENTS"`` element into argv, prompt intact.
+    """Split a ``resume``/``steer`` ``"$ARGUMENTS"`` element into argv, text intact.
 
     A leading ``task-`` token is the target Job; the remainder is the follow-up
-    prompt, passed after ``--`` byte-for-byte. With no selector the whole string
-    is the prompt.
+    prompt (or steer message), passed after ``--`` byte-for-byte. With no
+    selector the whole string is the prompt/message.
     """
     head = raw.strip().split(None, 1)
     if head and head[0].startswith(JOB_ID_PREFIX):
@@ -581,8 +593,9 @@ def build_parser() -> argparse.ArgumentParser:
     status_parser.add_argument(
         "--timeout-ms",
         type=int,
-        default=state.WAIT_TIMEOUT_MS,
-        help=f"wait bound in ms, clamped to {state.WAIT_TIMEOUT_MS}",
+        default=state.WAIT_TIMEOUT_DEFAULT_MS,
+        help=f"wait bound in ms (default {state.WAIT_TIMEOUT_DEFAULT_MS}), "
+        f"clamped to {state.WAIT_TIMEOUT_MS}",
     )
     status_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
 
@@ -618,10 +631,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     steer_parser = subcommands.add_parser("steer", help="queue a mid-run message for a running Job")
-    steer_parser.add_argument("job", help="job id or prefix")
     steer_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
     steer_parser.add_argument(
-        "message", nargs="*", help="the steer message; read from stdin when absent"
+        "args",
+        nargs="*",
+        help=(
+            "an optional job id or prefix, then the steer message; the message "
+            "is read from stdin when argv carries none. With no id the single "
+            "active Job is targeted"
+        ),
     )
 
     profiles_parser = subcommands.add_parser(
@@ -898,11 +916,11 @@ def _steer_refusal(job_id: str, status: str) -> str:
 
 
 def _split_resume_args(tokens: list[str]) -> tuple[str | None, list[str]]:
-    """Split ``resume``'s positionals into an optional target and the prompt.
+    """Split a ``resume``/``steer`` positional list into a target and the text.
 
     A first token beginning ``task-`` is the target; anything else in first
-    position starts the prompt, and the target then defaults to the most recent
-    non-active Job with a Thread.
+    position starts the prompt/message, and the target then defaults to the
+    verb's bare selection (resume's latest Thread, steer's single active Job).
 
     Args:
         tokens: The positional arguments.
@@ -937,12 +955,17 @@ def _result_target(store: state.JobStore, selector: str | None) -> dict:
     return max(completed, key=state.latest_key)
 
 
-def _cancel_target(store: state.JobStore, selector: str | None) -> dict:
-    """Resolve which Job `cancel` stops.
+def _active_target(store: state.JobStore, selector: str | None, action: str) -> dict:
+    """Resolve which Job an id-optional verb (`cancel`, `steer`) acts on.
 
     An explicit id or prefix resolves across ALL records; with no id the single
     active Job wins, and several active Jobs are a refusal listing them rather
-    than a guess.
+    than a guess. `steer` reuses this so a bare `/chinamax:steer` mirrors cancel.
+
+    Args:
+        store: The workspace's Job store.
+        selector: The id or prefix named, or None for the bare form.
+        action: The verb, woven into the no-active and ambiguous error text.
 
     Raises:
         ChinamaxError: On a resolution failure, no active Job, or an ambiguity.
@@ -955,10 +978,10 @@ def _cancel_target(store: state.JobStore, selector: str | None) -> dict:
         key=lambda record: record["id"],
     )
     if not active:
-        raise ChinamaxError("no active Job to cancel in this workspace")
+        raise ChinamaxError(f"no active Job to {action} in this workspace")
     if len(active) > 1:
         listed = ", ".join(record["id"] for record in active)
-        raise ChinamaxError(f"several Jobs are active; name the one to cancel: {listed}")
+        raise ChinamaxError(f"several Jobs are active; name the one to {action}: {listed}")
     return active[0]
 
 

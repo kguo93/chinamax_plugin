@@ -34,11 +34,18 @@ from conftest import (
 STEER_MSG = "stop touching module X"
 
 
-def steer(env, job_id: str, message: str, workspace=None) -> tuple[int, str, str]:
-    """Invoke the `steer` verb in-process; return ``(code, stdout, stderr)``."""
+def steer(env, job_id, message, workspace=None) -> tuple[int, str, str]:
+    """Invoke the `steer` verb in-process; return ``(code, stdout, stderr)``.
+
+    ``--workspace`` leads, mirroring `resume`'s CLI shape, so the single ``args``
+    positional collects the id and the post-``--`` message across it. ``job_id``
+    of None is a BARE steer that resolves the workspace's single active Job.
+    """
     ws = str(env.workspace if workspace is None else workspace)
     out, err = io.StringIO(), io.StringIO()
-    argv = ["steer", job_id, "--workspace", ws]
+    argv = ["steer", "--workspace", ws]
+    if job_id is not None:
+        argv.append(job_id)
     if message is not None:
         argv += ["--", message]
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -255,8 +262,8 @@ def test_same_millisecond_writers_both_survive(dispatch_env):
     ids = []
     for message in ("alpha steer", "beta steer"):
         finished = subprocess.run(
-            [sys.executable, "-m", "chinamax", "steer", job_id,
-             "--workspace", str(env.workspace), "--", message],
+            [sys.executable, "-m", "chinamax", "steer",
+             "--workspace", str(env.workspace), job_id, "--", message],
             env=pinned, capture_output=True, text=True, timeout=30,
         )
         assert finished.returncode == 0, finished.stderr
@@ -355,6 +362,52 @@ def test_finished_refused_unknown_errors(dispatch_env):
     code, out, err = steer(env, steerable, "   ")
     assert code == 1
     assert queued_steer_files(store, steerable) == []
+
+
+def test_bare_steer_targets_single_active(dispatch_env):
+    """With no id a bare steer targets the workspace's single active Job.
+
+    The `/chinamax:steer` command form (decision 6) mirrors `cancel`: an id is
+    optional, and the lone active Job is resolved rather than guessed.
+    """
+    env = dispatch_env()
+    provider, job_id, release = gated_dispatch(env, bash_then_report_script(), 0)
+    store = env.store
+
+    code, out, err = steer(env, None, STEER_MSG)
+    assert code == 0, err
+    assert job_id in out, "the queued line names the resolved active Job"
+    release.set()
+
+    record = wait_for_status(store, job_id, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    assert STEER_MARKER + STEER_MSG in json.dumps(provider.requests[1]["body"]["messages"])
+
+
+def test_bare_steer_lists_several_active(dispatch_env):
+    """Several active Jobs make a bare steer a refusal listing them, not a guess."""
+    env = dispatch_env()
+    store = env.store
+    first = build_record(store, workspace=env.workspace, status=state.STATUS_RUNNING,
+                         pid=os.getpid())
+    second = build_record(store, workspace=env.workspace, status=state.STATUS_RUNNING,
+                          pid=os.getpid())
+
+    code, out, err = steer(env, None, STEER_MSG)
+    assert code == 1
+    assert "several" in err.lower()
+    assert first in err and second in err
+    # A refusal writes no file to either Job.
+    assert queued_steer_files(store, first) == []
+    assert queued_steer_files(store, second) == []
+
+
+def test_bare_steer_with_nothing_active_refused(dispatch_env):
+    """A bare steer with no active Job is a clean refusal, never a crash."""
+    env = dispatch_env()
+    code, out, err = steer(env, None, STEER_MSG)
+    assert code == 1
+    assert "no active Job" in err
 
 
 def test_undelivered_steer_swept_at_exit(dispatch_env):
