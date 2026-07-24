@@ -483,6 +483,35 @@ def latest_key(record: dict) -> tuple[float, float, str]:
     return (primary, parse_timestamp(record.get("createdAt")) or 0.0, str(record.get("id") or ""))
 
 
+def elapsed(record: dict) -> str:
+    """Render a Job's elapsed time as ``<h>h<mm>m`` / ``<m>m<ss>s`` / ``<s>s``.
+
+    Measured from ``startedAt`` once running and from ``createdAt`` while queued,
+    and frozen at ``completedAt`` once terminal. Shared by ``status``'s per-Job
+    line and the SessionStart digest so the two never render duration differently.
+
+    Args:
+        record: The Job record.
+
+    Returns:
+        The elapsed rendering, or ``-`` when no start time is known.
+    """
+    start = parse_timestamp(record.get("startedAt")) or parse_timestamp(
+        record.get("createdAt")
+    )
+    if start is None:
+        return "-"
+    end = parse_timestamp(record.get("completedAt"))
+    if end is None:
+        end = time.time()
+    seconds = int(max(0.0, end - start))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+
+
 def terminate_tree(
     pid: int, start_time: int | None = None, grace_s: float = TERMINATE_GRACE_S
 ) -> list[int]:
@@ -604,6 +633,28 @@ def open_store(workspace: str | Path | None = None) -> "JobStore":
     """
     root = resolve_workspace_root(workspace)
     return JobStore(state_root() / workspace_key(root), workspace_root=root)
+
+
+def list_jobs_tolerant(workspace: str | Path | None = None) -> tuple[list[dict], int]:
+    """Enumerate a workspace's Jobs, tolerating malformed or missing state.
+
+    THE shared tolerant enumeration seam behind both session hooks and the same
+    ``JobStore.load_records`` path ``status`` reads: a malformed ``jobs/<id>.json``
+    is skipped and only counted, never allowed to hide the healthy Jobs beside it,
+    and a missing or truncated ``state.json`` is rebuilt from the record filenames
+    rather than treated as an error (jobs/01's store-invariants decision). The
+    hooks want the COUNT of unparseable records, not their ids, so that is what
+    this returns.
+
+    Args:
+        workspace: The requested workspace, or None for the cwd; resolved to the
+            git toplevel like every other verb.
+
+    Returns:
+        The readable records, and the number that would not parse.
+    """
+    records, malformed = open_store(workspace).load_records()
+    return records, len(malformed)
 
 
 def make_dir(path: Path) -> Path:

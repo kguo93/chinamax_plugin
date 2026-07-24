@@ -1,0 +1,22 @@
+# scripts/ — conventions
+
+Inventory lives in `./repo-map.md`.
+
+- **Interpreter discovery lives ONLY in `_interpreter.sh`.** The launcher, the
+  commands, and the hooks all go through `chinamax_exec`, so they never drift onto
+  three different pythons. The Bridge Agent (`agents/chinamax.md`) documents the
+  same order in prose — keep the two in lockstep. Do NOT add a second resolution
+  path anywhere.
+- **The bootstrap rung (system `python3` + `src/` on `PYTHONPATH`) is load-bearing.**
+  On a fresh machine with no `chinamax` env — exactly what `/chinamax:setup` exists
+  to diagnose — every conda rung fails, so without it the doctor could never start.
+  Never delete it as "dead code".
+- **The shims are NOT component-scanned by the plugin loader** (only `agents/`,
+  `commands/`, and `hooks/hooks.json`, and `skills/*/SKILL.md` are), so this trio
+  is safe here — a stray `.md` in `scripts/` registers as nothing.
+- **The shims pass argv AND stdin through verbatim.** The CLI does the argv
+  normalization (a single quoted `"$ARGUMENTS"` element); the shim must not
+  pre-split or reshape it. `set -euo pipefail`, and every env-var read defaults with
+  `${VAR:-}` so `set -u` never trips.
+- **`chmod +x` the three entrypoints** (`chinamax`, `session_start_hook`,
+  `stop_hook`); `_interpreter.sh` is sourced, so it need not be executable.

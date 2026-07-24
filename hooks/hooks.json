@@ -1,0 +1,28 @@
+{
+  "description": "chinamax session-lifecycle hooks. SessionStart injects the running/recent Job digest (and exports CHINAMAX_SESSION_ID + CLAUDE_PLUGIN_DATA); Stop emits a non-blocking running-Jobs notice. There is deliberately NO SessionEnd hook (ADR 0004): a Job outlives the Claude session that started it, so nothing about a session ending may touch a running worker. The clear matcher is included on purpose — /clear wipes context, exactly when inherited-Job awareness must be re-injected.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/session_start_hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# The chinamax CLI launcher: resolve the interpreter, then `python -m chinamax`.
+# A thin shim — interpreter discovery lives in _interpreter.sh, and argv/stdin
+# pass through verbatim (the CLI normalizes a single quoted "$ARGUMENTS").
+set -euo pipefail
+CHINAMAX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=scripts/_interpreter.sh
+. "${CHINAMAX_SCRIPT_DIR}/_interpreter.sh"
+chinamax_exec chinamax "$@"

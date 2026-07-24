@@ -17,12 +17,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
 
-from chinamax import ChinamaxError, profiles, provider, state
+from chinamax import ChinamaxError, doctor, profiles, provider, state
 from chinamax.liveness import LoopConfig, RunFailure, build_config, emit_event
 from chinamax.loop import PHASE_REPORTING, PHASE_STARTING, run_loop
 from chinamax.spec import JobSpec, load_spec, parse_spec
@@ -458,6 +459,92 @@ def run_steer(args: argparse.Namespace) -> int:
     return EXIT_TERMINAL
 
 
+def run_profiles(args: argparse.Namespace) -> int:
+    """List every configured Profile with endpoint, model and key presence.
+
+    Renders the api-key env-var NAME and PRESENT/MISSING per Profile — never the
+    key VALUE, on any stream — so a misconfiguration is visible at a glance
+    without leaking a secret.
+
+    Args:
+        args: The parsed ``profiles`` arguments.
+
+    Returns:
+        0 always — listing configuration never fails the verb.
+    """
+    resolved = profiles.load_profiles()
+    keys = profiles.load_keys()
+    for name in sorted(resolved):
+        profile = resolved[name]
+        present = "PRESENT" if keys.get(profile.api_key_env, "").strip() else "MISSING"
+        print(
+            f"{name}  endpoint={profile.base_url}  model={profile.model}  "
+            f"key={present} ({profile.api_key_env})"
+        )
+    return EXIT_TERMINAL
+
+
+#: The operator command verbs a slash-command shim wraps by forwarding a single
+#: quoted ``"$ARGUMENTS"`` element. Only these are argv-normalized; the internal
+#: verbs (`exec`/`task`/`task-worker`/`steer`) take real argv and are left alone,
+#: so a spec path carrying a space is never shlex-split out from under `exec`.
+_ARGUMENT_VERBS = frozenset(
+    {"status", "result", "cancel", "resume", "logs", "profiles", "setup"}
+)
+
+
+def normalize_argv(argv: list[str]) -> list[str]:
+    """Map a command file's single quoted ``"$ARGUMENTS"`` element onto real argv.
+
+    Quoting ``"$ARGUMENTS"`` in the `!`-command hands the shim exactly ONE argv
+    element after the verb, so ``--wait``, ``--tail N``, ``--json`` would never
+    reach the parser and an empty invocation would pass ``""`` rather than
+    nothing. This collapses that one element the way the prior art does
+    (`scripts/codex-companion.mjs:130`): a blank or whitespace-only element
+    becomes no arguments at all, and a lone raw string is `shlex.split` so its
+    flags reach argparse as separate tokens.
+
+    ``resume`` is the case splitting would corrupt — its free-text follow-up
+    carries quotes, leading dashes and newlines. Its prompt is kept intact after
+    a ``--`` terminator (so a leading dash is not read as a flag), with an
+    optional leading ``task-`` selector peeled off first; quoting ``"$ARGUMENTS"``
+    already delivers the exact bytes into argv, so the ``--`` path preserves them
+    byte-identically without a second transport.
+
+    An argv that is not exactly ``[verb, one-element]`` for an operator command
+    verb is returned unchanged, so every internal and multi-token call is inert.
+
+    Args:
+        argv: The raw argument vector (verb first).
+
+    Returns:
+        The normalized argument vector.
+    """
+    if len(argv) != 2 or argv[0] not in _ARGUMENT_VERBS:
+        return argv
+    verb, raw = argv[0], argv[1]
+    if not raw.strip():
+        return [verb]
+    if verb == "resume":
+        return [verb, *_normalize_resume(raw)]
+    return [verb, *shlex.split(raw)]
+
+
+def _normalize_resume(raw: str) -> list[str]:
+    """Split ``resume``'s single ``"$ARGUMENTS"`` element into argv, prompt intact.
+
+    A leading ``task-`` token is the target Job; the remainder is the follow-up
+    prompt, passed after ``--`` byte-for-byte. With no selector the whole string
+    is the prompt.
+    """
+    head = raw.strip().split(None, 1)
+    if head and head[0].startswith(JOB_ID_PREFIX):
+        selector = head[0]
+        prompt = head[1] if len(head) > 1 else ""
+        return [selector, "--", prompt] if prompt else [selector]
+    return ["--", raw.strip()]
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser.
 
@@ -537,6 +624,20 @@ def build_parser() -> argparse.ArgumentParser:
         "message", nargs="*", help="the steer message; read from stdin when absent"
     )
 
+    profiles_parser = subcommands.add_parser(
+        "profiles", help="list configured Profiles and key presence"
+    )
+    # No selectors: the whole point is a keyless at-a-glance view. It still takes
+    # a lone quoted "$ARGUMENTS" (dropped when blank) through `normalize_argv`.
+
+    setup_parser = subcommands.add_parser(
+        "setup", help="diagnose env, dependencies, keys and state-dir in one pass"
+    )
+    setup_parser.add_argument(
+        "--json", action="store_true", help="emit the diagnosis as JSON"
+    )
+    setup_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+
     worker_parser = subcommands.add_parser("task-worker", help="run a dispatched Job (internal)")
     worker_parser.add_argument("--job-id", required=True, help="the Job to run")
     worker_parser.add_argument("--state-dir", required=True, help="its state directory")
@@ -552,7 +653,8 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         The process exit code.
     """
-    args = build_parser().parse_args(argv)
+    raw = sys.argv[1:] if argv is None else list(argv)
+    args = build_parser().parse_args(normalize_argv(raw))
     try:
         if args.command == "exec":
             return run_exec(args.spec_path)
@@ -572,6 +674,10 @@ def main(argv: list[str] | None = None) -> int:
             return run_resume(args)
         if args.command == "steer":
             return run_steer(args)
+        if args.command == "profiles":
+            return run_profiles(args)
+        if args.command == "setup":
+            return doctor.run_setup(args)
         raise ChinamaxError(f"unknown command {args.command!r}")
     except ChinamaxError as error:
         print(f"chinamax: {error}", file=sys.stderr)
@@ -992,25 +1098,8 @@ def _updated_at(record: dict) -> float:
 
 
 def _elapsed(record: dict) -> str:
-    """Render a Job's elapsed time.
-
-    Measured from ``startedAt`` once running and from ``createdAt`` while
-    queued, and frozen at ``completedAt`` once terminal.
-    """
-    start = state.parse_timestamp(record.get("startedAt")) or state.parse_timestamp(
-        record.get("createdAt")
-    )
-    if start is None:
-        return "-"
-    end = state.parse_timestamp(record.get("completedAt"))
-    if end is None:
-        end = time.time()
-    seconds = int(max(0.0, end - start))
-    hours, rest = divmod(seconds, 3600)
-    minutes, secs = divmod(rest, 60)
-    if hours:
-        return f"{hours}h{minutes:02d}m"
-    return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
+    """Render a Job's elapsed time (the shared `state.elapsed`)."""
+    return state.elapsed(record)
 
 
 def _read_text(path: Path) -> str:
