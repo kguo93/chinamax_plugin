@@ -4,7 +4,7 @@ Repository for the `chinamax` worker-model subagent plugin for Claude Code. The 
 
 - `pyproject.toml` — packaging for the `chinamax` Runtime: src layout, `anthropic` and `httpx` runtime deps, `[test]` extra, and the `data/*.json` package-data rule that ships the shipped Profiles.
 - `.gitignore` — the editable install's byproducts (`__pycache__/`, `*.pyc`, `*.egg-info/`), which are never committed.
-- `.claude-plugin/` — the plugin + marketplace manifest pair that makes the repo a self-installing single-plugin marketplace (`chinamax@deepseek-plugin`); see `.claude-plugin/repo-map.md`.
+- `.claude-plugin/` — the plugin + marketplace manifest pair that makes the repo a self-installing single-plugin marketplace (`chinamax@chinamax-plugin`); see `.claude-plugin/repo-map.md`.
 - `agents/` — Claude Code agent definitions. The plugin loader auto-scans this dir and registers EVERY `.md` as an agent, so it holds only component files: `chinamax.md`, the Bash-only Bridge Agent (`chinamax:chinamax`). No `CLAUDE.md`/`repo-map.md` trio here (it would register as bogus agents) — its conventions live in the root `CLAUDE.md`.
 - `commands/` — Claude Code slash commands, likewise auto-scanned (component files only): `task.md` (`/chinamax:task`, the Bridge-dispatch command carrying the embedded Bridge contract) plus the thin `!`-launcher wrappers over `scripts/chinamax` — `status`, `result`, `cancel`, `resume`, `steer` (relay-01's in-turn steering), `logs`, `profiles`, `setup`. No trio here for the same reason; conventions in the root `CLAUDE.md`.
 - `hooks/` — session-hook registration (`hooks.json`: SessionStart + Stop, no SessionEnd); the hook LOGIC is `src/chinamax/hooks/`. See `hooks/repo-map.md`.

@@ -1,5 +1,5 @@
 ---
-description: Print a finished chinamax Job's result — the worker's stored report_result payload verbatim, or its status and error when it carries none.
+description: Print a finished chinamax Job's result — the worker's stored response verbatim, or its status and error when it carries none.
 argument-hint: "[job-id] [--json] [--workspace <dir>]"
 disable-model-invocation: true
 allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/chinamax:*)

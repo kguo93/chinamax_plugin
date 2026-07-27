@@ -3,6 +3,14 @@
 A Profile is a named provider configuration (base URL, model string, API-key
 source). The shipped set ships with the package; `~/.claude/chinamax-profiles.json`
 overlays it field by field. There is no default Profile.
+
+Extending to more models: any provider that implements the Anthropic-compatible
+Messages API becomes a Profile through the overlay — a row with `name`,
+`base_url` (the provider's `/anthropic` endpoint), `model`, and `api_key_env` —
+plus the matching key line in `~/.claude/model-keys.env`. The setup doctor
+scaffolds that key file from the RESOLVED rows (`doctor.key_template_text`
+iterates `load_profiles()`), so a new overlay Profile's key line appears in the
+next scaffold with no code change here.
 """
 
 from __future__ import annotations

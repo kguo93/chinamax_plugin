@@ -40,13 +40,10 @@ BASH_COMMAND = "echo hello > out.txt && cat out.txt"
 BASH_TOOL_USE_ID = "toolu_bash_1"
 REPORT_TOOL_USE_ID = "toolu_report_1"
 REPORT_PAYLOAD = {
-    "outcome": "completed",
-    "summary": "Wrote out.txt in the workspace and read it back.",
-    "changed_files": ["out.txt"],
-    "commands_run": [BASH_COMMAND],
-    "tests": ["cat out.txt"],
-    "failures": [],
-    "concerns": ["The workspace was empty before this job."],
+    "response": (
+        "Wrote out.txt in the workspace and read it back; `cat out.txt` prints "
+        "hello. The workspace was empty before this job."
+    ),
 }
 
 #: Sentinel: drop this field from the generated job spec.

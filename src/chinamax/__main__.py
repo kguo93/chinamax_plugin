@@ -38,17 +38,6 @@ EXIT_TERMINAL = 0
 EXIT_ACTIVE = 2
 EXIT_ERROR = 1
 
-#: The `report_result` payload's seven fields, in schema order — the order the
-#: default `result` rendering walks them in.
-RESULT_FIELDS = (
-    "outcome",
-    "summary",
-    "changed_files",
-    "commands_run",
-    "tests",
-    "failures",
-    "concerns",
-)
 #: What `cancel` records as a cancelled Job's reason.
 CANCEL_REASON = "Cancelled by user."
 #: What `resume` sends when the operator supplied no follow-up.
@@ -312,10 +301,9 @@ def run_result(args: argparse.Namespace) -> int:
     """Print a finished Job's stored result, refusing an active one.
 
     Only `completed` carries a payload: every `report_result` ends a Job as
-    `completed` with the payload stored verbatim, even when its own ``outcome``
-    is ``failed`` or ``blocked``, while status `failed` is reserved for Runtime
-    errors that carry only an ``errorMessage``. So this reports honestly per
-    state rather than inventing an empty payload.
+    `completed` with its ``response`` stored verbatim, while status `failed` is
+    reserved for Runtime errors that carry only an ``errorMessage``. So this
+    reports honestly per state rather than inventing an empty payload.
 
     Args:
         args: The parsed ``result`` arguments.
@@ -649,10 +637,14 @@ def build_parser() -> argparse.ArgumentParser:
     # a lone quoted "$ARGUMENTS" (dropped when blank) through `normalize_argv`.
 
     setup_parser = subcommands.add_parser(
-        "setup", help="diagnose env, dependencies, keys and state-dir in one pass"
+        "setup",
+        help=(
+            "diagnose and fix the install in one pass — create the env, install "
+            "deps, scaffold the key template"
+        ),
     )
     setup_parser.add_argument(
-        "--json", action="store_true", help="emit the diagnosis as JSON"
+        "--json", action="store_true", help="emit the report (with fixes) as JSON"
     )
     setup_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
 
@@ -1004,22 +996,17 @@ def _result_json(store: state.JobStore, record: dict, status: str) -> str:
 
 
 def _print_result(record: dict, status: str) -> None:
-    """Render a terminal Job's result: the payload, or the status and reason."""
+    """Render a terminal Job's result: the response, or the status and reason.
+
+    The header line is the only scaffolding; everything after it is the worker's
+    stored ``response``, bare, so a relay strips one line and nothing else.
+    """
     print(f"{record['id']}  {status}")
     payload = record.get("result") if status == state.STATUS_COMPLETED else None
     if isinstance(payload, dict):
-        for field in RESULT_FIELDS:
-            if field not in payload:
-                continue
-            value = payload[field]
-            if not isinstance(value, list):
-                print(f"{field}: {value}")
-            elif not value:
-                print(f"{field}: (none)")
-            else:
-                print(f"{field}:")
-                for item in value:
-                    print(f"  - {item}")
+        response = payload.get("response")
+        if response is not None:
+            print(response)
         return
     if record.get("errorMessage"):
         print(f"error: {state.escape_control(record['errorMessage'])}")

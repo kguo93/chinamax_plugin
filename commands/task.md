@@ -20,9 +20,13 @@ general-purpose subagent does not expose it. The one Agent call MUST set:
 - BACKGROUND, addressable — not foreground: a foreground subagent cannot receive
   a message while it runs, and forwarding a mid-run Steer is the whole point.
 
-The final user-visible response is the Bridge's relayed output — the worker's
-result with its envelope stripped and the worker's own prose untouched. Do not
-paraphrase, summarize, verify, or add commentary of your own.
+The Bridge's terminal SendMessage(to='main') carries the worker's response. Your
+final user-visible response is that relayed content REGURGITATED VERBATIM — as
+if the operator had dispatched the worker model themselves in their own
+terminal. Do not paraphrase, summarize, verify, trim, reorder, or add commentary
+of your own. The chain is: operator → you → Bridge → worker → Bridge →
+SendMessage(to='main') → you → operator, and a break in ANY link is a failed
+dispatch.
 
 Raw dispatch request:
 $ARGUMENTS
@@ -56,21 +60,28 @@ the `prompt` of the Agent call. Carry these rules into it:
   (poll again — every non-terminal return is 2), 1 a bounded failure (report once
   and stop). If the operator gave `poll=<seconds>`, use
   `--timeout-ms <seconds×1000>` and Bash `timeout` `(seconds+60)×1000` ms.
-- **Relay errors only.** Message the operator ONLY for a bounded failure (or a
-  steer-delivery failure being re-routed) and for the terminal result. Send NO
-  progress messages while the Job merely runs; a successful steer is silent.
-- **Present the terminal result envelope-stripped.** Run `"$PY" -m chinamax
-  result <id>` and present it as a clean answer: strip the report scaffolding —
-  status headers, the `report_result` envelope and field labels, "task completed"
-  boilerplate — and fix layout, while leaving the worker's own sentences
-  UNTOUCHED (no omission, summary, verification, judgment, or added content). The
-  seam's stored result is unchanged; this is presentation only.
+- **Stay silent while the Job runs.** Send NO progress messages — not the Job
+  id, not a phase change, not a log line; a successful steer is silent.
+- **Relay with EXACTLY ONE SendMessage(to='main') at terminal.** The Bridge runs
+  in the background, so nothing it prints reaches the operator: to relay, it
+  MUST call the SendMessage tool with to='main'. Ending its turn without calling
+  SendMessage(to='main') is NOT a relay and the operator will never see it.
+  Exactly one SendMessage(to='main') per relayed Job — when the Job ends, never
+  before: the worker's response for a `completed` Job; the status and
+  `errorMessage` for a failed/cancelled/interrupted one; a bounded failure
+  reported once.
+- **Relay the response untouched.** Run `"$PY" -m chinamax result <id>`; its
+  first line is the `<id>  <status>` header, and for a `completed` Job
+  everything after it is the worker's complete final answer. Strip the header
+  line and relay the response UNTOUCHED — byte-for-byte verbatim: no omission,
+  summary, verification, judgment, correction, added content, or reformatting.
+  The seam's stored result is unchanged; this is presentation only.
 - **Steer when busy, resume when finished.** A mid-run message becomes
   `"$PY" -m chinamax steer <id>` (message on stdin); after terminal it routes to
   `"$PY" -m chinamax resume <id>` (explicit id). If `steer` reports the message
   was NOT delivered (the finish-during-steer race, exit 1 pointing at resume),
   re-route to `resume` carrying the ORIGINAL message as the resume prompt, and
-  disclose the possible duplicate.
+  disclose the possible duplicate inside the source Job's terminal relay.
 - **Bounded failures never spin.** Exit 1, an unresolvable interpreter, or a poll
   killed by the Bash timeout is reported ONCE and ends the relay.
 

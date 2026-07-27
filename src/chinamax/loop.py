@@ -58,10 +58,10 @@ bounded by a timeout whose expiry comes back as an observation rather than \
 ending the job.
 
 When the task is finished — whether it succeeded or not — you MUST call the \
-report_result tool. That call is the only way to end this job, and its payload is \
-relayed back verbatim as the job's result: set outcome to "completed", "blocked" or \
-"failed", write a summary, and fill in changed_files, commands_run, tests, failures \
-and concerns as far as they apply."""
+report_result tool. That call is the only way to end this job, and its response \
+field is relayed back verbatim, in full, as the job's result: put your complete \
+final answer in response — everything the operator should read, exactly as you \
+want them to read it. It is your final message, not a summary of one."""
 
 WRITE_POSTURE = "You may create and modify files in this workspace."
 READ_ONLY_POSTURE = (
@@ -367,7 +367,7 @@ def _run_tool_uses(
                 _report(
                     reporter,
                     PHASE_REPORTING,
-                    f"report_result: outcome={value.get('outcome')!r}",
+                    f"report_result: {_preview(value)}",
                 )
             continue
 

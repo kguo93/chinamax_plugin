@@ -30,12 +30,8 @@ def test_result_finished(dispatch_env, capsys):
     rendered = capsys.readouterr().out
     assert job_id in rendered
     assert state.STATUS_COMPLETED in rendered
-    # Every populated field of the payload, walked in schema order.
-    assert REPORT_PAYLOAD["outcome"] in rendered
-    assert REPORT_PAYLOAD["summary"] in rendered
-    for field in ("changed_files", "commands_run", "tests", "concerns"):
-        for item in REPORT_PAYLOAD[field]:
-            assert item in rendered, field
+    # The stored response, rendered bare after the header line.
+    assert REPORT_PAYLOAD["response"] in rendered
 
     # --json is the bytes of jobs/<id>.result.json, not a re-serialization.
     assert main(["result", job_id, "--json", "--workspace", workspace]) == 0

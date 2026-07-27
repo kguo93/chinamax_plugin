@@ -1,5 +1,5 @@
 """The plugin manifests: both live under `.claude-plugin/` and describe
-`chinamax@deepseek-plugin`.
+`chinamax@chinamax-plugin`.
 
 Static-file assertions only — the full marketplace-add + install is verified
 manually on the machine (surface/01's install smoke), since this environment
@@ -33,9 +33,9 @@ def test_manifest_and_marketplace_valid():
     assert plugin["name"] == "chinamax"
     assert KEBAB.match(plugin["name"]), plugin["name"]
 
-    # The marketplace name is deepseek-plugin — what qualifies an install as
-    # `chinamax@deepseek-plugin` — and is kebab-case (never the underscored dir).
-    assert marketplace["name"] == "deepseek-plugin"
+    # The marketplace name is chinamax-plugin — what qualifies an install as
+    # `chinamax@chinamax-plugin` — and is kebab-case (never the underscored dir).
+    assert marketplace["name"] == "chinamax-plugin"
     assert KEBAB.match(marketplace["name"]), marketplace["name"]
 
     # owner.name is present.

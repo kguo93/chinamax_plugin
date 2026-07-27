@@ -7,5 +7,5 @@ The repo doubles as its own single-plugin marketplace, so both files live here.
   author}`. `version` is kept equal to the marketplace entry's version.
 - `marketplace.json` — the marketplace manifest (`claude plugin marketplace add
   <repo>` reads `<repo>/.claude-plugin/marketplace.json`): `$schema`, `name:
-  "deepseek-plugin"` (what qualifies `chinamax@deepseek-plugin`), `owner.name`,
+  "chinamax-plugin"` (what qualifies `chinamax@chinamax-plugin`), `owner.name`,
   and a single `plugins` entry self-sourcing `"./"`.

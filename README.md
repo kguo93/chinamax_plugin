@@ -13,9 +13,11 @@ Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md
 
 - **Bridge Agent** — the Claude-facing named subagent, registered as `chinamax`
   (agent type `chinamax:chinamax`). It forwards one dispatch to the runtime, then
-  long-polls it — relaying errors and the terminal result — and forwards mid-run
-  messages as steers. Exactly one named Bridge serves a dispatch; it never inspects
-  the repo, edits files, spawns another agent, or does the task itself.
+  long-polls it in silence and relays the outcome exactly once, when the Job
+  ends — the worker's response untouched, or the failure report — and forwards
+  mid-run messages as steers. Exactly one named Bridge serves a dispatch; it
+  never inspects the repo, edits files, spawns another agent, or does the task
+  itself.
 - **Runtime** — the custom agent-loop process that owns the provider API
   conversation, tool execution, and safety controls for one task.
 - **Profile** — a named provider configuration (base URL, model string, API-key
@@ -38,26 +40,28 @@ supported commands. Point the marketplace at the root of this checkout (the
 directory containing `.claude-plugin/marketplace.json`):
 
 ```bash
-claude plugin marketplace add /path/to/deepseek_plugin
-claude plugin install chinamax@deepseek-plugin
+claude plugin marketplace add /path/to/chinamax_plugin
+claude plugin install chinamax@chinamax-plugin
 ```
 
-`chinamax@deepseek-plugin` resolves because the marketplace is named
-`deepseek-plugin` and its single plugin is named `chinamax` — never the repo's
+`chinamax@chinamax-plugin` resolves because the marketplace is named
+`chinamax-plugin` and its single plugin is named `chinamax` — never the repo's
 underscored directory name.
 
 The runtime runs in a dedicated conda env named `chinamax` (Python 3.12), separate
-from any other project env. Create it and install the package editable, with the
-`[test]` extra so the setup doctor's own dependency check is satisfied:
+from any other project env. Run [`/chinamax:setup`](#chinamaxsetup) — in one pass
+it creates that env when missing, installs the package editable with the `[test]`
+extra, scaffolds `~/.claude/model-keys.env` as a commented template when absent,
+verifies the API-key entries and state-dir writability, and records the resolved
+interpreter path the plugin reads first. (Miniconda itself is the one
+prerequisite setup will not install — an absent conda is reported with advice.)
+
+The equivalent manual commands, if you prefer to run them yourself:
 
 ```bash
 conda create -y -n chinamax python=3.12
-conda run -n chinamax pip install -e '/path/to/deepseek_plugin[test]'
+conda run -n chinamax pip install -e '/path/to/chinamax_plugin[test]'
 ```
-
-Then run [`/chinamax:setup`](#chinamaxsetup) — it verifies the env, the
-dependencies, the API-key entries, and state-dir writability in one pass, and
-records the resolved interpreter path the plugin reads first.
 
 ## Configuration
 
@@ -94,9 +98,13 @@ error, so a typo fails loudly rather than being silently dispatched.
 ### API keys: `~/.claude/model-keys.env`
 
 Keys are read from `~/.claude/model-keys.env`, one `NAME=value` per line, using the
-variable names in the table above. Blank lines and `#` comments are ignored, and
-values are unquoted by shell rules (single-quoting a value is fine — the same file
-is normally consumed by bash-sourcing it):
+variable names in the table above. When the file does not exist,
+[`/chinamax:setup`](#chinamaxsetup) scaffolds it as a comments-only template — one
+commented `<api_key_env>=` line per resolved Profile (overlay-added Profiles
+included) plus comments explaining the format and how to extend to more
+Anthropic-compatible providers; an existing file is never touched. Blank lines and
+`#` comments are ignored, and values are unquoted by shell rules (single-quoting a
+value is fine — the same file is normally consumed by bash-sourcing it):
 
 ```
 DEEPSEEK_API_KEY=...
@@ -140,12 +148,14 @@ eight are thin wrappers over the same CLI seam (`scripts/chinamax`, i.e. `python
 `profile=<name> [--read-only] [--resume|--fresh] [bash_timeout=<seconds>] [poll=<seconds>] <what the worker model should do>`
 
 Dispatch a task through the Bridge Agent. Exactly one named haiku Bridge detaches a
-durable Job, relays its id immediately, then long-polls it (900 s default, or your
-`poll=<seconds>`) — relaying errors and the terminal result only, with no progress
-chatter — and forwards any mid-run message you send as a Steer. The task text is
-delivered to the runtime on stdin, so quotes, newlines, and leading dashes arrive
-byte-identical. The final response is the worker's result with its `report_result`
-envelope stripped and the worker's own prose left untouched.
+durable Job, then long-polls it (900 s default, or your `poll=<seconds>`) in
+silence — no progress chatter, no id acknowledgment — and forwards any mid-run
+message you send as a Steer. When the Job ends, the Bridge relays exactly one
+message: the worker's complete final answer (or the failure report), untouched.
+The task text is delivered to the runtime on stdin, so quotes, newlines, and
+leading dashes arrive byte-identical. The final response you read is the worker's
+`response` exactly as the worker wrote it — as if you had dispatched the worker
+model yourself.
 
 ### `/chinamax:status`
 `[job-id] [--wait] [--timeout-ms <ms>] [--workspace <dir>]`
@@ -159,10 +169,11 @@ long-poll is honored rather than capped). Exit codes: `0` terminal, `2` still ac
 ### `/chinamax:result`
 `[job-id] [--json] [--workspace <dir>]`
 
-Print a finished Job's stored result — the worker's `report_result` payload
-verbatim. With no id, the latest `completed` Job. A `failed`, `cancelled`, or
-`interrupted` Job prints its status and error instead of a payload; an active Job is
-refused (exit `2`). `--json` emits the stored result artifact as JSON.
+Print a finished Job's stored result — the worker's `response` verbatim, bare
+under one `<id>  <status>` header line. With no id, the latest `completed` Job. A
+`failed`, `cancelled`, or `interrupted` Job prints its status and error instead of
+a payload; an active Job is refused (exit `2`). `--json` emits the stored result
+artifact as JSON.
 
 ### `/chinamax:cancel`
 `[job-id] [--workspace <dir>]`
@@ -205,7 +216,8 @@ List every configured Profile with its endpoint, model, and API-key presence
 ### `/chinamax:setup`
 `[--json] [--workspace <dir>]`
 
-The environment doctor — see [Troubleshooting](#troubleshooting).
+The environment doctor — it diagnoses **and fixes** the install in one pass; see
+[Troubleshooting](#troubleshooting).
 
 ## How Jobs live
 
@@ -257,27 +269,33 @@ only; it is **never written onto the record**, so the stored status stays
 
 ### The setup doctor: `/chinamax:setup`
 
-Run it first, and whenever a dispatch misbehaves. In one pass it reports:
+Run it first, and whenever a dispatch misbehaves. In one pass it diagnoses — and
+**fixes** — what a first run needs:
 
-- **conda env** — whether the `chinamax` env exists; when it does not, it prints the
-  exact `conda create` / `pip install -e` commands to create it.
+- **conda env** — a missing `chinamax` env is created with
+  `conda create -y -n chinamax python=3.12`. If conda itself is absent, that is
+  reported once with install-miniconda advice, never retried.
 - **dependencies** — whether `chinamax`, `anthropic`, and `pytest` import **under
   the resolved env python** (never the interpreter the doctor itself runs under, so
-  a bootstrap run on a fresh machine does not grade itself).
+  a bootstrap run on a fresh machine does not grade itself); missing deps are
+  installed with `pip install -e '<repo>[test]'` under that python.
 - **API keys** — each Profile's key entry as `PRESENT` or `MISSING`, by variable
-  name. Key presence is reported but never fails the run — an unused Profile must
-  not block setup.
+  name. A missing `~/.claude/model-keys.env` is scaffolded as a commented template
+  (an existing file is never touched); key presence is reported but never fails
+  the run — an unused Profile must not block setup.
 - **state directory** — the resolved state root, this workspace's state directory,
   and whether it is writable.
 
-It also records the resolved env python at `<data root>/python-path`, which the
-Bridge and the shell shims read first when resolving the interpreter.
+A healthy machine's run mutates nothing and reports a pure diagnosis. It also
+records the resolved env python at `<data root>/python-path`, which the Bridge and
+the shell shims read first when resolving the interpreter.
 
 `/chinamax:setup --json` emits a machine-readable document with the pinned fields
 `ok`, `python`, `state_root`, `workspace_state_dir`, `state_writable`, `env`
-(`present`/`path`), `deps`, and `profiles`. The command exits `0` when everything
-the plugin needs is in place (env present, all three deps import, state writable),
-and `1` otherwise.
+(`present`/`path`), `deps`, `profiles`, and `fixes` (the fix rows the run
+performed, in order, each `{action, ok, detail}`). The command exits `0` when
+everything the plugin needs is in place **after** the fix pass (env present, all
+three deps import, state writable), and `1` otherwise.
 
 ### Common provider errors
 

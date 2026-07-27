@@ -63,14 +63,19 @@ def test_required_stanzas_present():
     # bound (960000 ms over the 900000 ms `--timeout-ms`).
     assert "poll=" in lower
     assert "960000" in text
-    # Relay ERRORS ONLY — no progress messages between the id and the terminal.
-    assert "relay errors only" in lower
+    # Silent while running — no progress messages, no Job-id relay.
+    assert "no progress messages" in lower
 
-    # Terminal: run `result <id>`, envelope stripped, the worker's prose untouched.
+    # The relay mechanism: EXACTLY ONE SendMessage(to='main') at terminal — a
+    # background teammate's turn ending without it reaches nobody.
+    assert "must call the sendmessage tool with to='main'" in lower
+    assert "not a relay and the operator will never see it" in lower
+    assert "exactly one sendmessage(to='main')" in lower
+
+    # Terminal: run `result <id>`, header stripped, the response untouched.
     assert "result <id>" in text
     assert "verbatim" in lower
-    assert "strip the report scaffolding" in lower
-    assert "envelope" in lower
+    assert "strip the header line and relay the response untouched" in lower
 
     # Steer-when-busy and resume-when-finished mappings, plus the finish-during-
     # steer race re-routing to resume carrying the original message.

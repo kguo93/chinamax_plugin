@@ -21,8 +21,10 @@ CONTRACT = (REPO_ROOT / "agents" / "chinamax.md").read_text(encoding="utf-8")
 #: other fails the suite.
 SHARED_STANZAS = (
     "forbidden to spawn any subagent",
-    "relay errors only",
-    "strip the report scaffolding",
+    "must call the sendmessage tool with to='main'",
+    "not a relay and the operator will never see it",
+    "exactly one sendmessage(to='main')",
+    "strip the header line and relay the response untouched",
 )
 
 

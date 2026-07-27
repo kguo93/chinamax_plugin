@@ -1,8 +1,11 @@
 """The `/chinamax:setup` doctor, driven hermetically with injected probes (ADR 0011).
 
-The conda/import probes are INJECTED so the doctor never resolves this machine's
-real conda or chinamax env, and HOME / CLAUDE_PLUGIN_DATA / XDG_STATE_HOME are all
-controlled so the state root is isolated.
+The conda/import probes AND the fixers are INJECTED so the doctor never resolves
+this machine's real conda env — and never runs a real ``conda create`` — while
+HOME / CLAUDE_PLUGIN_DATA / XDG_STATE_HOME are all controlled so the state root
+and the scaffolded key template are isolated. Any test whose diagnosed env is
+MISSING must inject ``create_env``/``install_deps``: the production fixer would
+otherwise run ``conda create`` on the machine running the suite.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ import stat
 
 import pytest
 
-from chinamax import doctor
+from chinamax import doctor, profiles
 from conftest import write_keys
 
 SENTINEL_KEY = "sk-do-not-print-this-value"
@@ -28,6 +31,25 @@ def _ns(json_flag: bool, workspace) -> argparse.Namespace:
 def _all_present(_python: str) -> dict:
     """A dep checker that would report every dep importable (to prove non-use)."""
     return {name: True for name in doctor.DEPS}
+
+
+class _Fixers:
+    """Recording fixer stubs — every env-missing run_setup call injects these."""
+
+    def __init__(self, create_ok: bool = True):
+        self.creates = 0
+        self.installs: list[str] = []
+        self.create_ok = create_ok
+
+    def create_env(self) -> tuple:
+        self.creates += 1
+        if self.create_ok:
+            return True, ""
+        return False, "conda not found — install Miniconda, then re-run /chinamax:setup"
+
+    def install_deps(self, env_python: str) -> tuple:
+        self.installs.append(env_python)
+        return True, ""
 
 
 @pytest.fixture
@@ -54,10 +76,13 @@ def test_doctor_reports(tmp_path, keyless_home, isolated, monkeypatch, capsys):
     workspace.mkdir()
 
     try:
+        fixers = _Fixers(create_ok=False)
         code = doctor.run_setup(
             _ns(True, workspace),
             find_env_python=lambda: None,
             check_deps=_all_present,
+            create_env=fixers.create_env,
+            install_deps=fixers.install_deps,
         )
         out = capsys.readouterr()
         report = json.loads(out.out)
@@ -72,6 +97,7 @@ def test_doctor_reports(tmp_path, keyless_home, isolated, monkeypatch, capsys):
             "env",
             "deps",
             "profiles",
+            "fixes",
         }
         assert report["ok"] is False and code == 1
         assert report["python"] is None
@@ -89,19 +115,30 @@ def test_doctor_reports(tmp_path, keyless_home, isolated, monkeypatch, capsys):
         assert by_name["deepseek"]["key_env"] == "DEEPSEEK_API_KEY"
         assert any(row["key"] == "MISSING" for row in report["profiles"])
 
+        # The failed create is one recorded fix row; the keys file exists, so no
+        # template row, and no python means install is never reached.
+        assert [row["action"] for row in report["fixes"]] == ["create-env"]
+        assert report["fixes"][0]["ok"] is False
+        assert "conda not found" in report["fixes"][0]["detail"]
+        assert fixers.creates == 1 and fixers.installs == []
+
         # No key VALUE on any stream, JSON included.
         assert SENTINEL_KEY not in out.out
         assert SENTINEL_KEY not in out.err
 
-        # The human pass reports the same in one go, with the create advice.
+        # The human pass reports the same in one go, with the create advice and
+        # the failed fix surfaced.
         doctor.run_setup(
             _ns(False, workspace),
             find_env_python=lambda: None,
             check_deps=_all_present,
+            create_env=_Fixers(create_ok=False).create_env,
+            install_deps=_Fixers().install_deps,
         )
         human = capsys.readouterr()
         assert "MISSING" in human.out and "conda create -y -n chinamax" in human.out
         assert "pip install -e" in human.out
+        assert "FAILED" in human.out and "install Miniconda" in human.out
         assert SENTINEL_KEY not in human.out and SENTINEL_KEY not in human.err
     finally:
         os.chmod(readonly, stat.S_IRWXU)
@@ -165,12 +202,139 @@ def test_doctor_bootstrap_without_env(tmp_path, isolated, capsys):
         find_env_python=lambda: None,
         # Would report chinamax importable (it IS, in-process) — must be ignored.
         check_deps=_all_present,
+        create_env=_Fixers(create_ok=False).create_env,
+        install_deps=_Fixers().install_deps,
     )
     report = json.loads(capsys.readouterr().out)
 
     assert code == 1
     assert report["env"]["present"] is False
     assert report["deps"]["chinamax"] is False
+
+
+def test_setup_scaffolds_key_template(tmp_path, keyless_home, isolated, capsys):
+    """A missing ~/.claude/model-keys.env is scaffolded as a comments-only
+    template — one commented line per shipped Profile plus the overlay
+    extension recipe, 0600 — and an existing file is NEVER touched."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fake_python = _fake_python(tmp_path)
+    fixers = _Fixers()
+    # keyless_home seeds a synthetic key file; this test needs it ABSENT.
+    path = profiles.keys_path()
+    path.unlink()
+
+    code = doctor.run_setup(
+        _ns(True, workspace),
+        find_env_python=lambda: fake_python,
+        check_deps=_all_present,
+        create_env=fixers.create_env,
+        install_deps=fixers.install_deps,
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 0
+    assert [row["action"] for row in report["fixes"]] == ["key-template"]
+    assert fixers.creates == 0 and fixers.installs == []
+    content = path.read_text(encoding="utf-8")
+    # Comments only: an untouched template parses to zero keys.
+    assert all(line.startswith("#") for line in content.splitlines() if line.strip())
+    assert profiles.load_keys() == {}
+    # One commented `<api_key_env>=` line per shipped Profile.
+    for env_name in (
+        "DEEPSEEK_API_KEY",
+        "MIMO_API_KEY",
+        "GLM_API_KEY",
+        "MINIMAX_API_KEY",
+        "KIMI_API_KEY",
+    ):
+        assert f"# {env_name}=" in content
+    # The extension recipe: overlay row + key line, for any Anthropic-compatible model.
+    assert "chinamax-profiles.json" in content
+    assert "Anthropic-compatible" in content
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+    # An existing file is never overwritten — and a healthy re-run fixes nothing.
+    path.write_text("DEEPSEEK_API_KEY=mine\n", encoding="utf-8")
+    doctor.run_setup(
+        _ns(False, workspace),
+        find_env_python=lambda: fake_python,
+        check_deps=_all_present,
+        create_env=fixers.create_env,
+        install_deps=fixers.install_deps,
+    )
+    human = capsys.readouterr()
+    assert path.read_text(encoding="utf-8") == "DEEPSEEK_API_KEY=mine\n"
+    assert "fixing" not in human.out
+    assert fixers.creates == 0 and fixers.installs == []
+
+
+def test_setup_bootstraps_env_and_installs(tmp_path, keyless_home, isolated, capsys):
+    """Env missing -> create; deps missing -> install under the freshly resolved
+    python; the re-diagnosis reports the fixed state and exit 0."""
+    write_keys(keyless_home, {"DEEPSEEK_API_KEY": "x"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fake_python = _fake_python(tmp_path)
+    world = {"env": False, "deps": False}
+    installs: list[str] = []
+
+    def find_env_python():
+        return fake_python if world["env"] else None
+
+    def check_deps(_python: str) -> dict:
+        return {name: world["deps"] for name in doctor.DEPS}
+
+    def create_env() -> tuple:
+        world["env"] = True
+        return True, ""
+
+    def install_deps(env_python: str) -> tuple:
+        installs.append(env_python)
+        world["deps"] = True
+        return True, ""
+
+    code = doctor.run_setup(
+        _ns(True, workspace),
+        find_env_python=find_env_python,
+        check_deps=check_deps,
+        create_env=create_env,
+        install_deps=install_deps,
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert code == 0 and report["ok"] is True
+    assert [row["action"] for row in report["fixes"]] == ["create-env", "install-deps"]
+    assert all(row["ok"] for row in report["fixes"])
+    # The install ran under the python the create made resolvable.
+    assert installs == [fake_python]
+    assert report["env"] == {"present": True, "path": fake_python}
+    assert report["deps"] == {name: True for name in doctor.DEPS}
+    # The re-diagnosis recorded the interpreter where the shims read it first.
+    assert doctor.python_path_file().read_text(encoding="utf-8").strip() == fake_python
+
+
+def test_setup_conda_absent_is_bounded(tmp_path, keyless_home, isolated, capsys):
+    """An absent conda is one reported failure with advice — install is never
+    reached, nothing retries, and the exit stays 1."""
+    write_keys(keyless_home, {"DEEPSEEK_API_KEY": "x"})
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fixers = _Fixers(create_ok=False)
+
+    code = doctor.run_setup(
+        _ns(False, workspace),
+        find_env_python=lambda: None,
+        check_deps=_all_present,
+        create_env=fixers.create_env,
+        install_deps=fixers.install_deps,
+    )
+    out = capsys.readouterr()
+
+    assert code == 1
+    assert fixers.creates == 1 and fixers.installs == []
+    assert "FAILED" in out.out
+    assert "conda not found" in out.out and "install Miniconda" in out.out
 
 
 def _fake_python(tmp_path, name: str = "fakepy") -> str:

@@ -115,12 +115,10 @@ def test_dispatch_poll_relay_sequence(dispatch_env):
     terminal = seam("status", job_id, "--wait", "--timeout-ms", "500", "--workspace", ws)
     assert terminal.returncode == 0, terminal.stderr
 
-    # `result`: exit 0, the worker's stored payload returned.
+    # `result`: exit 0, the worker's stored response returned.
     got = seam("result", job_id, "--workspace", ws)
     assert got.returncode == 0, got.stderr
-    assert REPORT_PAYLOAD["summary"] in got.stdout
-    for changed in REPORT_PAYLOAD["changed_files"]:
-        assert changed in got.stdout
+    assert REPORT_PAYLOAD["response"] in got.stdout
 
     # "Verbatim" pinned: `result --json` bytes equal the stored artifact.
     as_json = seam("result", job_id, "--json", "--workspace", ws)

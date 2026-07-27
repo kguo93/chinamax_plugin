@@ -5,8 +5,12 @@ A Claude Code plugin that exposes non-Claude worker models (DeepSeek, MiMo, GLM,
 ## Language
 
 **Bridge Agent**:
-The Claude-facing named subagent — registered as `chinamax` (agent type `chinamax:chinamax`) — that accepts a task, forwards it to the Runtime, and relays errors and the final result. Exactly one Bridge serves a dispatch; it never edits files, runs the task itself, or spawns another agent.
+The Claude-facing named subagent — registered as `chinamax` (agent type `chinamax:chinamax`) — that accepts a task, forwards it to the Runtime, and delivers exactly one Relay when the Job ends. Exactly one Bridge serves a dispatch; it stays silent while the Job runs and never edits files, runs the task itself, or spawns another agent.
 _Avoid_: wrapper agent, proxy, "the deepseek agent" (DeepSeek is one Profile among many)
+
+**Relay**:
+The Bridge Agent's single terminal message delivering a Job's outcome to the operator: the worker's final response untouched when the Job completed, or the failure report otherwise. Exactly one per Job, sent only when the Job ends — never a progress update, never an acknowledgment. The operator reads the worker's response as if they had dispatched the worker model themselves.
+_Avoid_: progress message, notification, status update (none of these are ever sent)
 
 **Runtime**:
 The custom agent-loop process that owns the provider API conversation, tool execution, and safety controls for a task. Speaks the provider's Anthropic-compatible Messages API (the proven `/anthropic` endpoints), not chat-completions.
