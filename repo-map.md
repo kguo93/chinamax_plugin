@@ -16,7 +16,6 @@ Repository for the `chinamax` worker-model subagent plugin for Claude Code. The 
 - `CONTEXT.md` — domain glossary (Bridge Agent, Runtime, Job, Thread, Profile, Steer, Pro).
 - `CLAUDE.md` — conventions and design-phase decisions (see `./repo-map.md` for inventory).
 - `AGENTS.md` — stub pointing agents at `CLAUDE.md`.
-- `settings.json.example` — earlier sketch of pointing Claude Code's env at DeepSeek's Anthropic-compatible endpoint; superseded by the custom-runtime decision but kept as reference.
 - `docs/agents/` — Local markdown issue-tracker config (`issue-tracker.md`, `triage-labels.md`, `domain.md`) seeded from setup-matt-pocock-skills templates.
 - `docs/plan/` — frozen implementation plans: `worker-model-subagent-plugin-relay-01-quiet-bridge.md` (the 2026-07-24 relay redesign; the nine original runtime/jobs/surface plans were removed once implemented), mirrored to `~/.claude/plans/`.
 - `docs/verification-report.md` — the committed record of the live acceptance gauntlet (surface/03): per-run profile/job-id/duration/outcome/anomalies, state-root readings, the steer transcript excerpt, the 83-minute survival evidence with the session-restart digest, and the glm/mimo `[1m]` model-string anomaly and its fix.
