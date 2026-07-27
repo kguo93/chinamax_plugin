@@ -35,18 +35,28 @@ Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md
 
 ## Install
 
-The repo doubles as its own single-plugin marketplace, so installation is two
-supported commands. Point the marketplace at the root of this checkout (the
-directory containing `.claude-plugin/marketplace.json`):
+The repo doubles as its own single-plugin marketplace, published at
+[`kguo93/chinamax_plugin`](https://github.com/kguo93/chinamax_plugin), so
+installation is two supported commands:
 
 ```bash
-claude plugin marketplace add /path/to/chinamax_plugin
+claude plugin marketplace add kguo93/chinamax_plugin
 claude plugin install chinamax@chinamax-plugin
 ```
 
 `chinamax@chinamax-plugin` resolves because the marketplace is named
 `chinamax-plugin` and its single plugin is named `chinamax` — never the repo's
 underscored directory name.
+
+**From a local checkout.** If you are developing the plugin itself, or want a
+revision you have not pushed, point the marketplace at the root of the checkout
+instead — the directory containing `.claude-plugin/marketplace.json`. The
+install command is unchanged:
+
+```bash
+claude plugin marketplace add /path/to/chinamax_plugin
+claude plugin install chinamax@chinamax-plugin
+```
 
 The runtime runs in a dedicated conda env named `chinamax` (Python 3.12), separate
 from any other project env. Run [`/chinamax:setup`](#chinamaxsetup) — in one pass
