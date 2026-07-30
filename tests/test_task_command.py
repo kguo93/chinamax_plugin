@@ -1,10 +1,11 @@
 """`commands/task.md`: the arg mapping, the Agent-tool wiring, and the embedded
-Bridge contract it carries.
+persistent-Bridge contract it carries.
 
 A named spawn gets a generic system prompt and ignores the agent frontmatter, so
 the full contract travels in the task command's spawn `prompt`. These tests pin
-that, plus a lockstep check that the shared stanzas match `agents/chinamax.md` so
-the two Bridge contracts cannot silently diverge.
+that, plus a THREE-WAY lockstep check that the shared stanzas match both
+`agents/chinamax.md` and the `bridge_contract` hook's injected `CONTRACT`
+constant, so the Bridge contract cannot silently diverge across its three copies.
 """
 
 from __future__ import annotations
@@ -12,19 +13,21 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from chinamax.hooks.bridge_contract import CONTRACT as HOOK_CONTRACT
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMAND = (REPO_ROOT / "commands" / "task.md").read_text(encoding="utf-8")
 CONTRACT = (REPO_ROOT / "agents" / "chinamax.md").read_text(encoding="utf-8")
 
-#: Stanzas that MUST appear (whitespace-normalized) in BOTH the agent contract
-#: and the task command's embedded prompt block, so changing one without the
-#: other fails the suite.
+#: Stanzas that MUST appear (whitespace-normalized) in ALL THREE Bridge-contract
+#: copies — the task command's embedded prompt, the agent contract, and the
+#: hook-injected `CONTRACT` — so changing one without the others fails the suite.
 SHARED_STANZAS = (
-    "forbidden to spawn any subagent",
-    "must call the sendmessage tool with to='main'",
-    "not a relay and the operator will never see it",
+    "never do the task yourself",
+    "classify each message from main",
     "exactly one sendmessage(to='main')",
-    "strip the header line and relay the response untouched",
+    "no progress messages",
+    "unsure between cancel and steer",
 )
 
 
@@ -51,29 +54,40 @@ def test_command_arg_mapping():
     assert "background" in lower
     assert 'model: "haiku"' in text
 
-    # The seam argv it normalizes onto — agreed with jobs/01, not a second dialect.
+    # The persistent teammate name convention (never a random suffix).
+    assert "chinamax-<profile>-<task-slug>" in text
+
+    # The seam argv it normalizes onto — agreed with the seam, not a second dialect.
     assert "--profile" in text
     assert "--read-only" in text
     assert "--bash-timeout-s" in text
+    # The Bridge passes its own name at dispatch so the roster/status stay populated.
+    assert "--bridge-name" in text
     # The task text goes on STDIN, never argv.
     assert "stdin" in lower
 
-    # `--resume`/`--fresh` are Bridge-level routing controls, not task flags.
-    assert "--resume" in text
-    assert "--fresh" in text
+    # There are NO --resume/--fresh routing controls any more.
+    assert "--resume" not in text
+    assert "--fresh" not in text
 
-    # The 900 s long-poll and the per-dispatch `poll=` override travel in the
-    # embedded contract, with the Bash timeout kept above the seam bound.
-    assert "--timeout-ms 900000" in text
+    # The 120 s long-poll and the per-dispatch `poll=` override travel in the
+    # embedded contract, with the Bash timeout (180 s) kept above the seam bound.
+    assert "--timeout-ms 120000" in text
     assert "poll=" in lower
-    assert "960000" in text
+    assert "180000" in text
+    # The old 900 s / 960 s numbers are gone.
+    assert "900000" not in text
+    assert "960000" not in text
 
 
-def test_contract_lockstep_with_agent():
-    """Each shared stanza is present in BOTH the task prompt and the agent
-    contract, so the two Bridge contracts cannot silently drift apart."""
+def test_contract_lockstep_three_way():
+    """Each shared stanza is present in ALL THREE Bridge-contract copies — the task
+    prompt, the agent contract, and the hook-injected constant — so they cannot
+    silently drift apart."""
     command = _normalized(COMMAND)
     contract = _normalized(CONTRACT)
+    hook = _normalized(HOOK_CONTRACT)
     for stanza in SHARED_STANZAS:
         assert stanza in command, f"missing from commands/task.md: {stanza!r}"
         assert stanza in contract, f"missing from agents/chinamax.md: {stanza!r}"
+        assert stanza in hook, f"missing from bridge_contract.CONTRACT: {stanza!r}"

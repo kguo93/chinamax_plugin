@@ -1,6 +1,12 @@
-"""`cancel`: the whole process TREE dies, and the record is never clobbered."""
+"""`cancel`: the whole process TREE dies, and the record is never clobbered.
+
+Also `reap` — the session-scoped kill/mark verb (ADR 0004 reversed) that reuses
+cancel's `terminate_tree` discipline.
+"""
 
 from __future__ import annotations
+
+import os
 
 from chinamax import state
 from chinamax.__main__ import CANCEL_REASON, main
@@ -128,3 +134,54 @@ def test_cancel_does_not_clobber_completed_result(dispatch_env, monkeypatch, cap
     assert kept["status"] == state.STATUS_COMPLETED
     assert kept["result"] == REPORT_PAYLOAD
     assert kept["errorMessage"] is None
+
+
+def test_reap_session_cancels_owner_only(dispatch_env, capsys):
+    """`reap --session` marks that session's stored-active Jobs cancelled; other
+    sessions and already-terminal Jobs are untouched."""
+    env = dispatch_env()
+    store = env.store
+    mine = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S1", bridge_name="chinamax-glm-mine",
+    )
+    theirs = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING, session_id="S2",
+    )
+    finished = build_record(
+        store, workspace=env.workspace, status=state.STATUS_COMPLETED,
+        completed_at=state.utc_now(), session_id="S1",
+    )
+
+    assert main(["reap", "--session", "S1"]) == 0
+    # One bridge-first digest line for the reaped Job.
+    assert mine in capsys.readouterr().out
+    assert store.read(mine)["status"] == state.STATUS_CANCELLED
+    assert store.read(theirs)["status"] == state.STATUS_RUNNING
+    assert store.read(finished)["status"] == state.STATUS_COMPLETED
+
+
+def test_reap_orphans_interrupts_dead_sessions(dispatch_env, capsys):
+    """`reap --orphans` interrupts a dead-session Job, spares a live session, and
+    reports (never kills) an ownerless live worker; stale registries are GC'd."""
+    env = dispatch_env()
+    store = env.store
+    dead = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING, session_id="DEAD",
+    )
+    state.write_session_registry("DEAD", dead_pid(), None)
+    live = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING, session_id="LIVE",
+    )
+    state.write_session_registry("LIVE", os.getpid(), state.read_pid_start_time(os.getpid()))
+    # No sessionId and no pid -> never gone -> reported, never killed.
+    ownerless = build_record(store, workspace=env.workspace, status=state.STATUS_RUNNING)
+
+    assert main(["reap", "--orphans"]) == 0
+    err = capsys.readouterr().err
+    assert store.read(dead)["status"] == state.STATUS_INTERRUPTED
+    assert store.read(live)["status"] == state.STATUS_RUNNING
+    assert store.read(ownerless)["status"] == state.STATUS_RUNNING
+    assert ownerless in err
+    assert state.read_session_registry("DEAD") is None
+    assert state.read_session_registry("LIVE") is not None

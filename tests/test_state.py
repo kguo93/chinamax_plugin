@@ -161,6 +161,30 @@ def test_schema_version_present(dispatch_env):
     ] == 1
 
 
+def test_bridge_name_and_session_id_persisted(dispatch_env, monkeypatch):
+    """`--bridge-name` round-trips and `sessionId` is populated from CHINAMAX_SESSION_ID."""
+    env = dispatch_env([report_turn()])
+    # The owning-session field now comes from CHINAMAX_SESSION_ID (the symbolic
+    # SESSION_ID_VARIABLE), which the dispatch fixture otherwise clears.
+    monkeypatch.setenv(state.SESSION_ID_VARIABLE, "sess-xyz")
+    code, job_id = env.dispatch("--bridge-name", "chinamax-deepseek-fix-auth")
+    assert code == 0
+    record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
+    assert record["bridgeName"] == "chinamax-deepseek-fix-auth"
+    assert record["sessionId"] == "sess-xyz"
+
+
+def test_session_id_absent_defaults_none(dispatch_env):
+    """With no CHINAMAX_SESSION_ID exported, sessionId and bridgeName default None."""
+    env = dispatch_env([report_turn()])
+    # dispatch_env already delenv's state.SESSION_ID_VARIABLE.
+    code, job_id = env.dispatch()
+    assert code == 0
+    record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
+    assert record["sessionId"] is None
+    assert record["bridgeName"] is None
+
+
 def test_reads_tolerate_additive_change(dispatch_env):
     """An unknown extra field survives a read and a missing optional defaults."""
     env = dispatch_env()
@@ -177,20 +201,24 @@ def test_reads_tolerate_additive_change(dispatch_env):
     assert record["status"] == state.STATUS_QUEUED
 
 
-def test_no_session_reaper():
-    """No session-boundary kill path exists in this slice's public surface.
+def test_session_reaper_exists():
+    """The session reaper now exists (ADR 0004 reversed): `reap` and its helpers.
 
-    The manifest half of the invariant — hooks.json registering no SessionEnd
-    entry — is asserted by surface/02, where the manifest actually exists.
+    The inverse of the old no-reaper invariant. `reap` is the ONLY verb taking a
+    session id; every other verb still rejects `--session`.
     """
-    reaping = [
-        name
-        for name in dir(state) + dir(state.JobStore)
-        if not name.startswith("_")
-        and any(word in name.lower() for word in ("reap", "delete", "purge", "destroy", "kill"))
-    ]
-    assert reaping == []
+    # The reap seam the session hooks call in-process.
+    assert callable(state.reap_session)
+    assert callable(state.reap_orphans)
 
+    # `reap` parses both forms; a missing target is refused (required group).
+    parser = build_parser()
+    assert parser.parse_args(["reap", "--session", "sess-1"]).session == "sess-1"
+    assert parser.parse_args(["reap", "--orphans"]).orphans is True
+    with pytest.raises(SystemExit):
+        parser.parse_args(["reap"])
+
+    # No OTHER verb takes a session selector.
     for verb, tail in (
         ("task", ["--profile", PROFILE]),
         ("status", []),
@@ -200,14 +228,14 @@ def test_no_session_reaper():
             with pytest.raises(SystemExit):
                 main([verb, *tail, flag, "sess-1"])
 
-    # Exhaustive rather than a spot check: every argument of every verb.
-    named = [
-        name
-        for verb in _subparsers(build_parser()).choices.values()
-        for action in verb._actions
-        for name in (action.option_strings or [action.dest])
-    ]
-    assert [name for name in named if "session" in name.lower()] == []
+    # Exhaustive: ONLY `reap` has a "session"-named argument.
+    session_owners = set()
+    for name, verb in _subparsers(build_parser()).choices.items():
+        for action in verb._actions:
+            for option in (action.option_strings or [action.dest]):
+                if "session" in option.lower():
+                    session_owners.add(name)
+    assert session_owners == {"reap"}
 
 
 def test_resolve_job_refuses_a_miss_and_an_ambiguous_prefix(dispatch_env):

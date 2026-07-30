@@ -260,12 +260,17 @@ def build_record(
     updated_at: str | None = None,
     completed_at: str | None = None,
     result: dict | None = None,
+    session_id: str | None = None,
+    bridge_name: str | None = None,
+    lineage_root: str | None = None,
 ) -> str:
     """Publish one Job record directly, with no dispatcher and no worker.
 
     For the states a live worker will not hold still in — an aged heartbeat, a
     dead recorded pid, a `queued` record nobody ever claimed. Every write still
-    goes through the store's own locked compare-and-swap updater.
+    goes through the store's own locked compare-and-swap updater. ``session_id``
+    and ``bridge_name`` set the owning-session/Bridge fields at creation;
+    ``lineage_root`` sets the resume-lineage field for the lineage-scoped tests.
     """
     store.ensure()
     job_id = store.reserve_id()
@@ -277,6 +282,8 @@ def build_record(
             write=write,
             workspace_root=workspace,
             log_file=store.log_path(job_id),
+            originating_session=session_id,
+            bridge_name=bridge_name,
         )
     )
     changes: dict = {"status": status}
@@ -287,6 +294,7 @@ def build_record(
         ("pidStartTime", pid_start_time),
         ("completedAt", completed_at),
         ("result", result),
+        ("lineageRoot", lineage_root),
     ):
         if value is not None:
             changes[name] = value

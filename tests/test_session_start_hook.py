@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 
 import pytest
@@ -171,3 +172,43 @@ def test_workspace_resolved_from_subdir(workspace_store, tmp_path, monkeypatch, 
     monkeypatch.chdir(subdir)
     _code, out = run_start({}, monkeypatch, capsys)
     assert job in out
+
+
+def test_orphan_reap_on_start(workspace_store, monkeypatch, capsys):
+    """SessionStart reaps a dead-session orphan (interrupted), spares a live session,
+    reports (never kills) an ownerless live worker, GCs stale registries, and the
+    digest reports the termination while still listing recent terminal Jobs."""
+    workspace, root, store = workspace_store
+    # Dead session: a dead-pid registry -> its Job is an orphan.
+    orphan = build_record(
+        store, workspace=root, status=state.STATUS_RUNNING,
+        session_id="DEAD", bridge_name="chinamax-glm-orphan",
+    )
+    state.write_session_registry("DEAD", dead_pid(), None)
+    # Live session: registered with this process's pid -> spared.
+    live = build_record(
+        store, workspace=root, status=state.STATUS_RUNNING, session_id="LIVE",
+    )
+    state.write_session_registry("LIVE", os.getpid(), state.read_pid_start_time(os.getpid()))
+    # No sessionId and no pid -> never gone -> reported, never killed.
+    ownerless = build_record(store, workspace=root, status=state.STATUS_RUNNING)
+    # A recent terminal Job that must still surface in the digest.
+    done = build_record(
+        store, workspace=root, status=state.STATUS_COMPLETED, completed_at=state.utc_now(),
+    )
+
+    code, out = run_start({"cwd": str(workspace), "session_id": "NEW"}, monkeypatch, capsys)
+    assert code == 0
+
+    assert store.read(orphan)["status"] == state.STATUS_INTERRUPTED
+    assert store.read(live)["status"] == state.STATUS_RUNNING
+    assert store.read(ownerless)["status"] == state.STATUS_RUNNING
+    # The dead session's registry is GC'd; the live one and the new one remain.
+    assert state.read_session_registry("DEAD") is None
+    assert state.read_session_registry("LIVE") is not None
+    assert state.read_session_registry("NEW") is not None
+    # The digest reports the freshly-interrupted orphan (bridge-first) AND the
+    # recent terminal Job (how a clean SessionEnd reap would surface here).
+    assert orphan in out
+    assert "chinamax-glm-orphan" in out
+    assert done in out

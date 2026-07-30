@@ -1,7 +1,9 @@
-"""The result-handling skill (and result.md) carry the duplication-guard language.
+"""The result-handling skill carries the duplication-guard language.
 
-The Bridge-contract half of AC bullet 5 is covered by
-`test_bridge_contract.py::test_required_stanzas_present`; it is NOT duplicated here.
+`commands/result.md` was deleted with the rest of the internal command surface
+(2026-07-30), so the inline report-and-stop copy now lives in the Bridge contract
+(`agents/chinamax.md`); the Bridge-contract half of the guard is covered by
+`test_bridge_contract.py::test_required_stanzas_present`.
 """
 
 from __future__ import annotations
@@ -10,12 +12,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SKILL = (REPO_ROOT / "skills" / "chinamax-results" / "SKILL.md").read_text(encoding="utf-8")
-RESULT_COMMAND = (REPO_ROOT / "commands" / "result.md").read_text(encoding="utf-8")
 
 
 def test_guard_language_present():
     """The skill carries a trigger-naming description, treat-as-data, and the
-    report-and-stop / no-substitute rule; result.md carries report-and-stop too."""
+    report-and-stop / no-substitute rule."""
     lower = SKILL.lower()
 
     # A trigger-naming description (a hidden skill whose description does not name
@@ -34,12 +35,6 @@ def test_guard_language_present():
     assert "stop" in lower
     assert "substitute" in lower
     assert "adr 0010" in lower
-
-    # commands/result.md carries the same report-and-stop rule inline.
-    result_lower = RESULT_COMMAND.lower()
-    assert "stop" in result_lower
-    assert "substitute" in result_lower
-    assert "adr 0010" in result_lower
 
 
 def _frontmatter_field(text: str, field: str) -> str:

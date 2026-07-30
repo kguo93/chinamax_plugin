@@ -2,14 +2,18 @@
 
 Verbs: ``exec`` (run one spec in the foreground), ``task`` (dispatch a durable
 detached Job and return its id), ``task-worker`` (the detached worker itself),
-``status``, ``logs``, ``result``, ``cancel`` and ``resume``. Exit codes are
-shared across the Job verbs so the Bridge branches on a code instead of parsing
-prose: 0 = the Job is terminal, 2 = the Job is still active, 1 = a usage or
-resolution error. The set is TOTAL — every non-terminal return is 2, including
-an early wake-up on progress, and a derived-`interrupted` Job returns 0 with the
-distinction carried in the OUTPUT rather than in a fourth code.
+``status``, ``logs``, ``result``, ``cancel``, ``resume``, ``steer`` and
+``reap``. Exit codes are shared across the Job verbs so the Bridge branches on a
+code instead of parsing prose: 0 = the Job is terminal, 2 = the Job is still
+active, 1 = a usage or resolution error. The set is TOTAL — every non-terminal
+return is 2, including an early wake-up on progress, and a derived-`interrupted`
+Job returns 0 with the distinction carried in the OUTPUT rather than in a fourth
+code.
 
-Nothing here reaps state at a session boundary (ADR 0004).
+``reap`` ends a dead or ending session's still-active Jobs (ADR 0004, reversed
+2026-07-30): ``reap --session <id>`` marks them ``cancelled`` and
+``reap --orphans`` marks a crashed session's Jobs ``interrupted``. It is an
+internal seam the session hooks call in-process.
 """
 
 from __future__ import annotations
@@ -147,6 +151,7 @@ def run_task(args: argparse.Namespace) -> int:
             log_file=store.log_path(job_id),
             bash_timeout_s=args.bash_timeout_s,
             originating_session=state.session_id(),
+            bridge_name=args.bridge_name,
         )
     )
     state.make_dir(store.steer_dir(job_id))
@@ -440,7 +445,11 @@ def run_steer(args: argparse.Namespace) -> int:
     job_id = record["id"]
     status = state.effective_status(record)
     if status not in state.ACTIVE_STATUSES:
-        raise ChinamaxError(_steer_refusal(job_id, status))
+        raise ChinamaxError(
+            _steer_refusal(
+                job_id, status, reaped=record["status"] == state.STATUS_INTERRUPTED
+            )
+        )
 
     message = _read_steer_message(words)
     steer_id = store.enqueue_steer(job_id, message)
@@ -476,6 +485,42 @@ def run_profiles(args: argparse.Namespace) -> int:
         print(
             f"{name}  endpoint={profile.base_url}  model={profile.model}  "
             f"key={present} ({profile.api_key_env})"
+        )
+    return EXIT_TERMINAL
+
+
+def run_reap(args: argparse.Namespace) -> int:
+    """End a dead or ending session's still-active Jobs (ADR 0004, reversed).
+
+    ``--session <id>`` marks that session's stored-active Jobs ``cancelled``;
+    ``--orphans`` marks every stored-active Job whose owner session is no longer
+    alive ``interrupted``. Both sweep every workspace store, print one
+    bridge-first digest line per reaped Job on stdout, and exit 0 even when
+    nothing was reaped. A Job whose worker outlived SIGKILL is reported on
+    stderr and left for the next sweep, exactly as `cancel` refuses to write a
+    terminal status over a Job it did not stop. This is the internal seam the
+    SessionEnd and SessionStart hooks call in-process.
+
+    Args:
+        args: The parsed ``reap`` arguments.
+
+    Returns:
+        0 always — reaping never fails the verb.
+    """
+    result = state.reap_session(args.session) if args.session is not None else state.reap_orphans()
+    for record in result.reaped:
+        print(state.render_job_row(record))
+    for job_id, survivors in result.survived:
+        print(
+            f"chinamax: {job_id} NOT reaped: still alive after SIGKILL: "
+            f"{', '.join(str(pid) for pid in survivors)}",
+            file=sys.stderr,
+        )
+    for record in result.reported:
+        print(
+            f"chinamax: {record['id']} has a live worker but no recorded owner "
+            "session; reported, not reaped",
+            file=sys.stderr,
         )
     return EXIT_TERMINAL
 
@@ -548,8 +593,9 @@ def _normalize_resume(raw: str) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser.
 
-    Deliberately exposed: it is the surface a test reads to prove no verb takes
-    a session id as a selector (ADR 0004).
+    Deliberately exposed for tests to read the whole verb/flag surface — e.g.
+    that ONLY `reap` takes a session id, the internal seam the session hooks call
+    (ADR 0004, reversed 2026-07-30).
 
     Returns:
         The parser for every verb.
@@ -568,6 +614,11 @@ def build_parser() -> argparse.ArgumentParser:
     task_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
     task_parser.add_argument(
         "--bash-timeout-s", type=float, default=None, help="per-command bash timeout"
+    )
+    task_parser.add_argument(
+        "--bridge-name",
+        default=None,
+        help="the owning Bridge teammate name (chinamax-<profile>-<task-slug>)",
     )
     task_parser.add_argument(
         "prompt", nargs="*", help="the prompt; read from stdin when absent"
@@ -648,6 +699,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
 
+    reap_parser = subcommands.add_parser(
+        "reap",
+        help="end a dead/ending session's active Jobs (internal; ADR 0004)",
+    )
+    reap_target = reap_parser.add_mutually_exclusive_group(required=True)
+    reap_target.add_argument(
+        "--session", default=None, help="reap one session's active Jobs (cancelled)"
+    )
+    reap_target.add_argument(
+        "--orphans",
+        action="store_true",
+        help="reap every dead-session orphan (interrupted)",
+    )
+
     worker_parser = subcommands.add_parser("task-worker", help="run a dispatched Job (internal)")
     worker_parser.add_argument("--job-id", required=True, help="the Job to run")
     worker_parser.add_argument("--state-dir", required=True, help="its state directory")
@@ -686,6 +751,8 @@ def main(argv: list[str] | None = None) -> int:
             return run_steer(args)
         if args.command == "profiles":
             return run_profiles(args)
+        if args.command == "reap":
+            return run_reap(args)
         if args.command == "setup":
             return doctor.run_setup(args)
         raise ChinamaxError(f"unknown command {args.command!r}")
@@ -894,8 +961,18 @@ def _read_steer_message(words: list[str]) -> str:
     return message
 
 
-def _steer_refusal(job_id: str, status: str) -> str:
-    """Build the refusal for steering a Job that is not steerable."""
+def _steer_refusal(job_id: str, status: str, reaped: bool = False) -> str:
+    """Build the refusal for steering a Job that is not steerable.
+
+    A DERIVED-`interrupted` crash is still resumable, so the refusal points at
+    `resume`; a STORED-`interrupted` (reaped) Job is not, so its refusal says the
+    owning session ended instead.
+    """
+    if reaped:
+        return (
+            f"{job_id} cannot be steered: its owning Claude session ended and the "
+            "Job was reaped; its Thread cannot be resumed"
+        )
     reason = (
         "its worker is gone"
         if status == state.STATUS_INTERRUPTED
@@ -1011,10 +1088,19 @@ def _print_result(record: dict, status: str) -> None:
     if record.get("errorMessage"):
         print(f"error: {state.escape_control(record['errorMessage'])}")
     if status == state.STATUS_INTERRUPTED:
-        print(
-            "hint: the worker is gone and this Job will not progress; continue "
-            f"its Thread with `resume {record['id']} <prompt>`"
-        )
+        if record.get("status") == state.STATUS_INTERRUPTED:
+            # A reaped dead-session Job: its Thread is policy-dead and A5 refuses
+            # to resume it.
+            print(
+                "hint: the owning Claude session ended and this Job was reaped; "
+                "its Thread cannot be resumed"
+            )
+        else:
+            # A DERIVED-interrupted crash: the Thread is still resumable.
+            print(
+                "hint: the worker is gone and this Job will not progress; continue "
+                f"its Thread with `resume {record['id']} <prompt>`"
+            )
 
 
 def _status_list(store: state.JobStore) -> int:
@@ -1073,20 +1159,10 @@ def _print_job(store: state.JobStore, record: dict) -> None:
 
     The rendered status is the EFFECTIVE one, so a crashed worker's Job reads
     `interrupted` while the record itself still says `running` — stale detection
-    never rewrites a record behind a worker.
+    never rewrites a record behind a worker. The bridge-first row leads with the
+    Bridge name via the shared `state.render_job_row`.
     """
-    print(
-        "  ".join(
-            [
-                str(record["id"]),
-                f"{state.effective_status(record):<11}",
-                f"{record['phase'] or '-':<14}",
-                f"{_elapsed(record):>8}",
-                str(record["profile"]),
-                str(record["title"]),
-            ]
-        )
-    )
+    print(state.render_job_row(record))
     if record.get("errorMessage"):
         print(f"    error: {state.escape_control(record['errorMessage'])}")
     for line in state.tail_lines(store.log_path(record["id"]), PREVIEW_LINES):
@@ -1105,11 +1181,6 @@ def _exit_code(record: dict) -> int:
 def _updated_at(record: dict) -> float:
     """Sort key: a record's ``updatedAt`` as epoch seconds."""
     return state.parse_timestamp(record.get("updatedAt")) or 0.0
-
-
-def _elapsed(record: dict) -> str:
-    """Render a Job's elapsed time (the shared `state.elapsed`)."""
-    return state.elapsed(record)
 
 
 def _read_text(path: Path) -> str:

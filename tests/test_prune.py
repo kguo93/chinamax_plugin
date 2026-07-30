@@ -128,3 +128,31 @@ def test_never_prunes_running(dispatch_env):
     assert state.effective_status(store.read(interrupted)) == state.STATUS_INTERRUPTED
     # An interrupted Job's Thread is exactly what pruning it would destroy.
     assert store.transcript_path(interrupted).exists()
+
+
+def test_reaped_interrupted_is_prunable(dispatch_env):
+    """A reaped STORED-`interrupted` record IS finished and prunable, unlike a
+    DERIVED-interrupted crash (stored `running`), whose Thread stays protected."""
+    env = dispatch_env()
+    store = env.store.ensure()
+    # A reaped orphan as the OLDEST finished record (STORED interrupted with a
+    # completedAt, exactly as reap_orphans writes it)...
+    reaped = seed(
+        store,
+        env.workspace,
+        status=state.STATUS_INTERRUPTED,
+        completed_at=aged(10_000),
+    )
+    # ...beneath PRUNE_KEEP newer finished ones.
+    for index in range(state.PRUNE_KEEP):
+        seed(store, env.workspace, status=state.STATUS_COMPLETED, completed_at=aged(index + 1))
+    # A DERIVED-interrupted crash: stored `running`, never counted, never pruned.
+    crash = seed_interrupted(store, env.workspace)
+
+    dropped = store.prune()
+
+    assert reaped in dropped, "a reaped STORED-interrupted record must be prunable"
+    for path in job_artifacts(store, reaped):
+        assert not path.exists(), path
+    assert crash not in dropped
+    assert store.transcript_path(crash).exists()

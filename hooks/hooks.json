@@ -1,14 +1,25 @@
 {
-  "description": "chinamax session-lifecycle hooks. SessionStart injects the running/recent Job digest (and exports CHINAMAX_SESSION_ID + CLAUDE_PLUGIN_DATA); Stop emits a non-blocking running-Jobs notice. There is deliberately NO SessionEnd hook (ADR 0004): a Job outlives the Claude session that started it, so nothing about a session ending may touch a running worker. The clear matcher is included on purpose — /clear wipes context, exactly when inherited-Job awareness must be re-injected.",
+  "description": "chinamax session-lifecycle and Bridge-enforcement hooks. Jobs are session-scoped (ADR 0004, reversed 2026-07-30). SessionStart writes the session-liveness registry, reaps orphaned Jobs of dead sessions, and injects the running/recent Job digest (exporting CHINAMAX_SESSION_ID + CLAUDE_PLUGIN_DATA); its matcher includes clear (re-inject after /clear wipes context) and fork (a forked session must register its own owner). SessionEnd kills the ending session's active Jobs and removes its registry entry — clear reaps like an exit. Stop emits a non-blocking running-Jobs notice. UserPromptSubmit injects the live-Bridge roster and the explicit-addressing routing rule into main. PreToolUse (Bash) re-injects the Bridge classification contract into the chinamax Bridge as subagent-scoped context (ADR 0010, no hard blocks).",
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|resume|clear|compact",
+        "matcher": "startup|resume|clear|compact|fork",
         "hooks": [
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/session_start_hook\"",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/session_end_hook\"",
+            "timeout": 30
           }
         ]
       }
@@ -19,6 +30,29 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/stop_hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/user_prompt_hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/bridge_contract_hook\"",
             "timeout": 10
           }
         ]

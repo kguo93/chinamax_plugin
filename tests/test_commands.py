@@ -22,14 +22,12 @@ COMMANDS_DIR = REPO_ROOT / "commands"
 BANG_LINE = re.compile(r"^!`(.+)`\s*$", re.MULTILINE)
 
 #: verb -> a representative raw "$ARGUMENTS" string the parser must accept once
-#: normalized. Each exercises the flags the command's argument-hint advertises.
+#: normalized. Only the FOUR surviving command files map to a seam verb here
+#: (task uses the Agent tool, tested separately); the internal seam verbs
+#: result/cancel/resume/steer/logs still exist in the CLI but have no command file
+#: (2026-07-30), so they are exercised by `test_argument_normalization` directly.
 SAMPLE_ARGS = {
     "status": "task-abc-000001 --wait --timeout-ms 5000",
-    "result": "task-abc-000001 --json",
-    "cancel": "task-abc-000001",
-    "resume": "task-abc-000001 keep going with the plan",
-    "steer": "task-abc-000001 stop touching module X",
-    "logs": "task-abc-000001 --tail 20",
     "profiles": "",
     "setup": "--json",
 }

@@ -12,12 +12,14 @@ runtime speaks each provider's Anthropic-compatible Messages API (the proven
 Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md)):
 
 - **Bridge Agent** — the Claude-facing named subagent, registered as `chinamax`
-  (agent type `chinamax:chinamax`). It forwards one dispatch to the runtime, then
-  long-polls it in silence and relays the outcome exactly once, when the Job
-  ends — the worker's response untouched, or the failure report — and forwards
-  mid-run messages as steers. Exactly one named Bridge serves a dispatch; it
-  never inspects the repo, edits files, spawns another agent, or does the task
-  itself.
+  (agent type `chinamax:chinamax`). Each `/chinamax:task` spawns a **persistent**
+  Bridge named `chinamax-<profile>-<task-slug>` that owns one Thread for the
+  session's life: it forwards one dispatch to the runtime, long-polls it in
+  silence, relays the outcome exactly once when the Job ends (the worker's response
+  untouched, or the failure report), and then stays available to **steer**, **resume**,
+  or **cancel** that Thread as you message it. Exactly one named Bridge serves a
+  Thread; it never inspects the repo, edits files, spawns another agent, or does the
+  task itself.
 - **Runtime** — the custom agent-loop process that owns the provider API
   conversation, tool execution, and safety controls for one task.
 - **Profile** — a named provider configuration (base URL, model string, API-key
@@ -25,13 +27,15 @@ Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md
   picks one explicitly. There is no default Profile.
 - **Job** — one durable unit of dispatched work with persistent state, logs, and a
   lifecycle (`queued`, `running`, `completed`, `failed`, `cancelled`; a crashed
-  worker's Job reads as `interrupted`). It survives the Claude session that started
-  it.
+  worker's Job reads as `interrupted`). It is **session-scoped**: it is killed when
+  the Claude session that started it ends — including `/clear` — and a Job orphaned
+  by a crashed session is reaped, never resumed.
 - **Thread** — the persistent worker-model transcript belonging to a Job. Resuming
-  carries the Thread forward; a Job's steers and follow-ups land in it.
-- **Steer** — a message sent to a running Job, relayed by the Bridge Agent or
-  enqueued directly with `/chinamax:steer`. It lands in the Job's steer queue and is
-  injected into the Thread as a user message at the runtime's next loop iteration.
+  carries the Thread forward; a Job's steers and follow-ups land in it. One Bridge
+  serves one Thread for its whole life.
+- **Steer** — a message sent to a running Job, relayed by the Bridge Agent when you
+  address it. It lands in the Job's steer queue and is injected into the Thread as a
+  user message at the runtime's next loop iteration.
 
 ## Install
 
@@ -131,92 +135,52 @@ or empty fails its first dispatch with `missing API key: <NAME> is not set in
 
 ### Per-dispatch flags
 
-You steer a single dispatch with a few flags. Written to the Bridge Agent (via
-[`/chinamax:task`](#chinamaxtask) or by addressing the agent), the operator-facing
-spellings are on the left; the Bridge maps them onto the CLI seam argv on the right:
+You steer a single dispatch with a few flags, written to the Bridge Agent via
+[`/chinamax:task`](#chinamaxtask). The operator-facing spellings are on the left;
+the Bridge maps them onto the CLI seam argv on the right:
 
 | Bridge-level              | CLI seam (`chinamax task`) | Meaning                                                             |
 |---------------------------|----------------------------|--------------------------------------------------------------------|
-| `profile=<name>`          | `--profile <name>`         | **Required** on a fresh dispatch. No default — a profile-less dispatch is refused. |
+| `profile=<name>`          | `--profile <name>`         | **Required.** No default — a profile-less dispatch is refused.      |
 | `--read-only`             | `--read-only`              | Opt out of write-capable tools. Write-capable is the default.      |
 | `bash_timeout=<seconds>`  | `--bash-timeout-s <seconds>` | Per-command bash timeout override (a non-numeric value is refused). |
-| `poll=<seconds>`          | *(poll loop, not a task flag)* | The Bridge's long-poll bound: `status --wait --timeout-ms <seconds×1000>` (default 900 s), with the Bash timeout kept above it. A non-numeric value is refused. |
-| `--resume` / `--fresh`    | *(routing, not passed through)* | Bridge-level routing: `--fresh` (or a first dispatch) routes to `task`; `--resume` (or a natural-language follow-up) routes to `resume`. |
+| `poll=<seconds>`          | *(poll loop, not a task flag)* | The Bridge's long-poll bound: `status --wait --timeout-ms <seconds×1000>` (default 120 s), with the Bash timeout kept above it. A non-numeric value is refused. |
 
-`--resume` and `--fresh` are Bridge-level **routing controls**, never seam flags —
-the Bridge picks the `task` or `resume` verb and never forwards them as arguments. A
-`resume` continues a Thread whose Profile is already fixed, so it takes no
-`profile=`.
+There are no `--resume`/`--fresh` routing controls. A dispatch is always a fresh
+Bridge on a fresh Thread; continuing a Thread is the live Bridge's own act when you
+follow up (see **Talking to a Bridge**), and a new Profile or a new unrelated task
+is a new `/chinamax:task`.
 
 ## Commands
 
-Nine slash commands. `/chinamax:task` dispatches the Bridge Agent; the other
-eight are thin wrappers over the same CLI seam (`scripts/chinamax`, i.e. `python
--m chinamax`) and return the seam output verbatim.
+Four slash commands. `/chinamax:task` dispatches the Bridge Agent; the other three
+(`status`, `profiles`, `setup`) are thin wrappers over the CLI seam
+(`scripts/chinamax`, i.e. `python -m chinamax`) and return the seam output verbatim.
+The internal seam verbs (`result`, `logs`, `cancel`, `resume`, `steer`) are no
+longer exposed as commands — the Bridge drives them on your behalf.
 
 ### `/chinamax:task`
-`profile=<name> [--read-only] [--resume|--fresh] [bash_timeout=<seconds>] [poll=<seconds>] <what the worker model should do>`
+`profile=<name> [--read-only] [bash_timeout=<seconds>] [poll=<seconds>] <what the worker model should do>`
 
 Dispatch a task through the Bridge Agent. Exactly one named haiku Bridge detaches a
-durable Job, then long-polls it (900 s default, or your `poll=<seconds>`) in
-silence — no progress chatter, no id acknowledgment — and forwards any mid-run
-message you send as a Steer. When the Job ends, the Bridge relays exactly one
-message: the worker's complete final answer (or the failure report), untouched.
-The task text is delivered to the runtime on stdin, so quotes, newlines, and
-leading dashes arrive byte-identical. The final response you read is the worker's
-`response` exactly as the worker wrote it — as if you had dispatched the worker
-model yourself.
+durable Job, then long-polls it (120 s default, or your `poll=<seconds>`) in
+silence — no progress chatter, no id acknowledgment. When the Job ends, the Bridge
+relays exactly one message: the worker's complete final answer (or the failure
+report), untouched. The task text is delivered to the runtime on stdin, so quotes,
+newlines, and leading dashes arrive byte-identical. The final response you read is
+the worker's `response` exactly as the worker wrote it — as if you had dispatched
+the worker model yourself. The Bridge then **stays available** for the Thread (see
+**Talking to a Bridge**).
 
 ### `/chinamax:status`
 `[job-id] [--wait] [--timeout-ms <ms>] [--workspace <dir>]`
 
-With no id, list every active Job in this workspace plus the recent finished ones.
-With an id (or unambiguous prefix), show that one Job with a short progress preview.
-`--wait` blocks until the Job's status, phase, or log advances, or the bound expires
-(`--timeout-ms`, default 240000 ms, clamped to a 900000 ms ceiling so the Bridge's
-long-poll is honored rather than capped). Exit codes: `0` terminal, `2` still active.
-
-### `/chinamax:result`
-`[job-id] [--json] [--workspace <dir>]`
-
-Print a finished Job's stored result — the worker's `response` verbatim, bare
-under one `<id>  <status>` header line. With no id, the latest `completed` Job. A
-`failed`, `cancelled`, or `interrupted` Job prints its status and error instead of
-a payload; an active Job is refused (exit `2`). `--json` emits the stored result
-artifact as JSON.
-
-### `/chinamax:cancel`
-`[job-id] [--workspace <dir>]`
-
-Stop a running Job — kill its whole process tree and mark the record `cancelled`.
-With no id, the single active Job; several active Jobs are listed rather than
-guessed. A Job that completed during the kill keeps its result. If a targeted
-process survives `SIGKILL`, cancel reports it and does **not** write `cancelled`.
-
-### `/chinamax:resume`
-`[job-id] <follow-up prompt>`
-
-Continue a finished Job's Thread with a follow-up — a new Job that inherits the
-source's Profile and write posture. Name the source Job id first (else the most
-recent non-active Job with a Thread is used). It refuses while any Job in the
-workspace is still active. Takes no `profile=`.
-
-### `/chinamax:steer`
-`[job-id] <steer message>`
-
-Enqueue a mid-run message onto a running Job — it lands in the Thread as a user
-message at the runtime's next loop boundary. With no id the single active Job is
-targeted; several active Jobs are listed rather than guessed. A finished or
-interrupted Job is refused with a pointer to `resume`. This is the same Steer the
-Bridge forwards, enqueued directly from the main context with none of the long
-poll's latency.
-
-### `/chinamax:logs`
-`<job-id> [--tail <n>] [--workspace <dir>]`
-
-Print a Job's timestamped progress log (`--tail <n>` for the last N lines). When the
-progress log is empty — a worker that died on import before writing anything — it
-falls back to the spawn log.
+With no id, list every active Job in this workspace plus the recent finished ones —
+each row **bridge-first**, leading with the owning Bridge name (the Job id follows
+as a secondary field). With an id (or unambiguous prefix), show that one Job with a
+short progress preview. `--wait` blocks until the Job's status, phase, or log
+advances, or the bound expires (`--timeout-ms`, default 240000 ms, clamped to a
+900000 ms ceiling). Exit codes: `0` terminal, `2` still active.
 
 ### `/chinamax:profiles`
 
@@ -229,15 +193,49 @@ List every configured Profile with its endpoint, model, and API-key presence
 The environment doctor — it diagnoses **and fixes** the install in one pass; see
 [Troubleshooting](#troubleshooting).
 
+## Talking to a Bridge
+
+Once a `/chinamax:task` is running, its Bridge is a live teammate named
+`chinamax-<profile>-<task-slug>`. You interact with the Job by **addressing that
+Bridge** — by its teammate name, its profile, or "the bridge"/"the worker". The
+Bridge classifies each message and acts on its own Thread:
+
+- **Steer** a running Job — send an instruction ("also update the tests", "stop
+  touching module X"). It lands in the Thread at the runtime's next loop boundary,
+  silently; the Bridge keeps polling and still relays exactly one terminal result.
+- **Resume** after a Job ends — a follow-up ("now summarize what you changed")
+  starts a new Job continuing the same Thread, inheriting the Profile and write
+  posture. The Bridge relays that new Job's result when it ends.
+- **Cancel** — "stop the job", "cancel", "never mind" kills the run; the Bridge
+  relays the cancelled report.
+- **Out of scope** — asking for a different model, or a brand-new unrelated task,
+  is refused with a pointer to dispatch a new `/chinamax:task` (a new Bridge). One
+  Bridge serves one Thread and never switches Profile.
+
+Main forwards a message to a Bridge **only when you address it**; anything else is
+Claude's own work. If several Bridges are live at once, name the one you mean.
+
 ## How Jobs live
 
-**A Job outlives the Claude session that started it (ADR 0004).** There is no
-SessionEnd hook and nothing reaps state at a session boundary; a session ending
-never touches a running worker. Instead, a `SessionStart` hook injects a bounded
-digest of this workspace's running/recent Jobs (so a fresh session — or one after
-`/clear` — inherits awareness of a long Job mid-flight), and a non-blocking `Stop`
-hook notices any still-running Jobs at turn's end. The originating session id is kept
-only as provenance; no lifecycle behavior keys off it.
+**A Job is session-scoped (ADR 0004, reversed 2026-07-30).** A Job never outlives
+the Claude session that started it:
+
+- **SessionEnd** — including `/clear` — kills the ending session's still-active
+  Jobs (the whole process tree) and marks their records `cancelled`.
+- **SessionStart** registers the live Claude process in a session-liveness registry,
+  then **reaps orphans**: any active Job whose owning session is no longer alive
+  (the crash path, where SessionEnd never fired) is marked `interrupted`. It then
+  injects a bounded, bridge-first digest of this workspace's running/recent Jobs (so
+  a fresh session — or one after `/clear` — sees what was just terminated and any
+  live Job mid-flight), and a non-blocking `Stop` hook notices still-running Jobs at
+  turn's end.
+- A dead session's Job ids are **never** resumed or re-attached. Continuing work is
+  only ever a live Bridge Agent resuming its own Thread inside the owning session.
+
+Each record carries its owning `sessionId`, the owning `bridgeName`, and (for a
+resume-created Job) `resumedFrom` and a `lineageRoot` — so one Bridge's whole Thread
+lineage stays addressable and a resume refuses only when its own lineage is still
+active, never workspace-wide.
 
 **State root.** Every per-workspace state directory lives under one root:
 
@@ -246,9 +244,11 @@ only as provenance; no lifecycle behavior keys off it.
 - else `$XDG_STATE_HOME/chinamax`,
 - else `~/.local/state/chinamax`.
 
-An empty or relative value counts as unset. The `SessionStart` hook re-exports
+An empty or relative value counts as unset. The session-liveness registry lives
+under a sibling `sessions/` directory. The `SessionStart` hook re-exports
 `CLAUDE_PLUGIN_DATA` so the hooks and the Bridge's dispatches agree on the root —
-otherwise Jobs would land under one root while the digest read another.
+otherwise Jobs would land under one root while the digest and the reaps read
+another.
 
 **Per-workspace layout.** Within the root, each workspace gets its own directory
 named `<repo-basename>-<sha256[:16]>`, keyed on the **git toplevel** of the
@@ -259,21 +259,20 @@ holds a `state.json` index, a `state.lock`, and a `jobs/` subdirectory with, per
 `<id>.spawn.log`, `<id>.thread.jsonl` (the Thread), `<id>.result.json`, and an
 `<id>.steer/` queue directory.
 
-**Steer.** A message to the busy Bridge — or a direct `/chinamax:steer` — becomes a
-Steer: it is written to the Job's `<id>.steer/` queue and drained into the Thread as
-a `[steer]` user message at the runtime's next loop boundary — exactly once, even
-across a worker relaunch. A steer to a finished Job is refused and re-routed to
-`resume`.
+**Steer.** A message to a busy Bridge becomes a Steer: it is written to the Job's
+`<id>.steer/` queue and drained into the Thread as a `[steer]` user message at the
+runtime's next loop boundary — exactly once, even across a worker relaunch.
 
-**Resume.** `resume` dispatches a new Job that continues a finished Job's Thread,
-inheriting its Profile and write posture. It refuses while any Job in the workspace
-is still active.
+**Resume.** A follow-up on a finished Job dispatches a new Job continuing its
+Thread, inheriting its Profile and write posture. It refuses while that Thread's own
+lineage is still active, and refuses a Job whose owning session was reaped.
 
-**Interrupted.** When a worker is *provably* gone (its process no longer exists —
-a reboot, an OOM kill), the Job reads as `interrupted`. This is derived read-side
-only; it is **never written onto the record**, so the stored status stays
-`running`/`queued` and the Thread stays resumable. `status` and `result` surface
-`interrupted` and point you at `resume <id>` to continue the Thread.
+**Interrupted.** A crashed worker (its process *provably* gone — a reboot, an OOM
+kill) reads as `interrupted`, derived read-side only; the stored status stays
+`running`/`queued` and the Thread stays resumable. A dead-**session** reap, by
+contrast, *writes* `interrupted` onto the record — that Thread is policy-dead and no
+longer resumable. `status` surfaces both and points a resumable one at continuing
+via its Bridge.
 
 ## Troubleshooting
 
@@ -327,8 +326,10 @@ three deps import, state writable), and `1` otherwise.
 
 ### Interrupted Jobs
 
-An `interrupted` Job means its worker process is gone and the Job will not progress
-on its own — typically the machine rebooted or the worker was killed mid-run. It is
-not a completion. The Thread is preserved, so `/chinamax:resume <id> <prompt>`
-continues exactly where it left off. Do not wait on an interrupted Job — it will
-never leave that state by itself.
+An `interrupted` Job means its worker process is gone. If the machine rebooted or
+the worker was killed mid-run while its session was still alive, the record's stored
+status stays `running`/`queued` and the Thread is preserved — message the Job's
+Bridge to continue it (a resume). If instead the **owning session** ended and the
+Job was reaped, `interrupted` is written onto the record and that Thread is
+policy-dead — it is not resumable; dispatch a fresh `/chinamax:task`. Either way, do
+not wait on an interrupted Job — it will never leave that state by itself.

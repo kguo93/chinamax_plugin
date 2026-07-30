@@ -2,18 +2,30 @@
 
 Inventory lives in `./repo-map.md`.
 
-- **`hooks.json` registers SessionStart and Stop ONLY — never SessionEnd** (ADR
-  0004): a Job outlives the session that started it, so nothing about a session
-  ending may touch a running worker. The no-SessionEnd rationale is recorded in the
-  file's own `description` string (surface/03 owns the README).
-- **The `clear` matcher is deliberate.** `/clear` wipes context — exactly when
-  inherited-Job awareness must be re-injected — and no model-facing leg of the guard
-  survives a clear otherwise.
-- **Timeouts are 10s, not 5.** Interpreter resolution can fall through to `conda
-  run`, which pays process-startup cost before the hook body begins.
+- **`hooks.json` registers five events** (ADR 0004 reversed 2026-07-30 — Jobs are
+  now session-scoped): `SessionStart`, `SessionEnd`, `Stop`, `UserPromptSubmit`,
+  and `PreToolUse` (matcher `Bash`). `SessionEnd` is the reversal's core: a session
+  ending — including `/clear` — kills its still-active Jobs, so a Job no longer
+  outlives the session that started it.
+- **The `SessionStart` matcher is `startup|resume|clear|compact|fork`.** `clear`
+  re-injects inherited-Job awareness after `/clear` wipes context (and its digest
+  now reports what the orphan reap just terminated); `fork` matters because a
+  forked session inherits the parent's exported `CHINAMAX_SESSION_ID` — without its
+  own SessionStart it never registers its own owner and its dispatches are reaped
+  with the parent.
+- **Timeouts are 10s, except `SessionEnd` at 30s.** Interpreter resolution can fall
+  through to `conda run` (process-startup cost before the hook body), and a
+  SessionEnd reap may kill several Jobs; its reap runs with the short
+  `state.SESSION_REAP_GRACE_S`/`SESSION_REAP_CONFIRM_S` so it fits that budget.
+- **The `PreToolUse(Bash)` hook fires on EVERY Bash call in every session.** Its
+  shim fast-paths in-shell: it buffers stdin and, unless the event contains
+  `chinamax:chinamax`, exits 0 WITHOUT launching python — only a Bridge event pays
+  the interpreter-resolution cost. The python side filters again on
+  `agent_type == "chinamax:chinamax"` and injects context; it NEVER blocks a call
+  (ADR 0010, no hard blocks).
 - **The command strings run the `scripts/` shims, not the python modules directly**
-  (`"${CLAUDE_PLUGIN_ROOT}/scripts/session_start_hook"`). The shim is what resolves
-  the env interpreter; naming `python -m …` here would skip that.
+  (`"${CLAUDE_PLUGIN_ROOT}/scripts/session_end_hook"`). The shim resolves the env
+  interpreter; naming `python -m …` here would skip that. Keep the hook LOGIC in
+  `src/chinamax/hooks/`, not in this directory.
 - **Only `hooks.json` is consumed here; the loader does not `.md`-component-scan
-  `hooks/`,** so this trio is safe. Keep the hook LOGIC in `src/chinamax/hooks/`, not
-  in this directory.
+  `hooks/`,** so the CLAUDE.md/AGENTS.md/repo-map.md trio is safe.

@@ -1,13 +1,13 @@
-"""Session-lifecycle hook entrypoints and their shared helpers.
+"""Session-lifecycle and Bridge-enforcement hook entrypoints and shared helpers.
 
-Both hooks are python entrypoints (unit-testable with crafted stdin JSON) run
-through the plugin's shims. They read Job state through the ONE shared tolerant
-enumeration seam `state.list_jobs_tolerant`, resolve "THIS workspace" the same
-three-rung way, and degrade to a clean exit rather than ever putting a traceback
-in Claude's context.
-
-There is deliberately no SessionEnd entrypoint here (ADR 0004): nothing a Claude
-session does may touch a running worker.
+Every hook is a python entrypoint (unit-testable with crafted stdin JSON) run
+through the plugin's shims: `session_start` (registry + orphan reap + digest),
+`session_end` (session reap; ADR 0004, reversed 2026-07-30), `stop` (running-Job
+notice), `user_prompt` (the live-Bridge roster into main), and `bridge_contract`
+(the classification contract re-injected into the Bridge). They read Job state
+through the ONE shared tolerant enumeration seam `state.list_jobs_tolerant`,
+resolve "THIS workspace" the same three-rung way, and degrade to a clean exit
+rather than ever putting a traceback in Claude's context.
 """
 
 from __future__ import annotations

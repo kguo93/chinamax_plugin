@@ -13,10 +13,12 @@ Selection and liveness live here too, in ONE place: the shared id resolver, the
 that derives `interrupted` from it. Every verb reads them rather than deriving
 its own, so `result`/`cancel`/`resume` cannot drift from `status`/`logs`.
 
-Nothing here is keyed on a Claude session (ADR 0004): there is no
-session-boundary API of any kind. Pruning removes only FINISHED Jobs beyond the
-cap and cancellation is an explicit operator verb — no session ending, and no
-reaper, ever touches a live Job.
+Jobs are session-scoped (ADR 0004, reversed 2026-07-30): records carry their
+owning ``sessionId`` and `reap_session`/`reap_orphans` end a dead session's
+still-active Jobs, keyed off a session-liveness registry under
+``<data root>/sessions/`` that records each live Claude process. Pruning removes
+only FINISHED Jobs beyond the cap — now including reaped, STORED-`interrupted`
+records; a DERIVED-`interrupted` crash keeps its resumable Thread.
 """
 
 from __future__ import annotations
@@ -55,18 +57,29 @@ STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 
-#: DERIVED, never stored: a non-terminal Job whose worker is provably gone and
-#: whose heartbeat has aged past the grace. Nothing ever writes it onto a record
-#: — stale detection is read-side only, so a Thread stays resumable.
+#: Either DERIVED read-side (a non-terminal Job whose worker is provably gone and
+#: whose heartbeat has aged past the grace — the crash path, whose stored status
+#: stays `running`/`queued` so the Thread stays resumable) OR STORED by
+#: `reap_orphans` when a dead session's Job is reaped (ADR 0004, reversed
+#: 2026-07-30 — a policy-dead Thread, terminal and prunable). `effective_status`
+#: derives the read-side case; the stored case is a terminal status like the rest.
 STATUS_INTERRUPTED = "interrupted"
 
-#: A Job in one of these will never move again on its own.
-TERMINAL_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED})
+#: A Job in one of these will never move again on its own. STORED `interrupted`
+#: joins them (ADR 0004, reversed): a reaped Thread is policy-dead. A DERIVED-
+#: interrupted record still stores `running`/`queued`, so only prune grading —
+#: which keys on the STORED status — treats the reaped case as finished.
+TERMINAL_STATUSES = frozenset(
+    {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_INTERRUPTED}
+)
 ACTIVE_STATUSES = frozenset({STATUS_QUEUED, STATUS_RUNNING})
-#: The stored statuses pruning grades as finished. `interrupted` is deliberately
-#: absent: its Thread is still resumable, so pruning it would destroy exactly the
-#: crash recovery it exists for.
-FINISHED_STATUSES = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED})
+#: The stored statuses pruning grades as finished — including STORED `interrupted`
+#: (a reaped Job, prunable). `_prune_locked` grades the STORED status, so a
+#: DERIVED-interrupted record (stored `running`, crashed worker) is NOT graded
+#: finished and keeps exactly the crash recovery it exists for.
+FINISHED_STATUSES = frozenset(
+    {STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED, STATUS_INTERRUPTED}
+)
 
 #: Record writes are throttled to one per this interval, matching the
 #: `status --wait` poll so a caller cannot outrun the record it polls.
@@ -81,13 +94,24 @@ HEARTBEAT_INTERVAL_S = 30.0
 #: around a crash, never a pid gap: the dispatcher records the pid immediately
 #: after `Popen` and the worker's claim is an atomic locked CAS.
 STALE_GRACE_S = 60.0
-#: Newest finished Jobs kept per workspace. Active and `interrupted` Jobs are
-#: never pruned and never counted toward it.
+#: Newest finished Jobs kept per workspace. Active Jobs and DERIVED-`interrupted`
+#: Jobs (stored `running`/`queued`) are never pruned and never counted; a reaped
+#: STORED-`interrupted` Job is finished and prunable like any terminal record.
 PRUNE_KEEP = 50
 #: How long `cancel` waits after SIGTERM before escalating to SIGKILL.
 TERMINATE_GRACE_S = 10.0
 #: How long the SIGKILL sweep waits for its targets to actually disappear.
 _TERMINATE_CONFIRM_S = 5.0
+#: The SIGTERM grace and SIGKILL-confirm a session reap runs with — far shorter
+#: than a cancel's, because a multi-Job reap under a SessionEnd/SessionStart hook
+#: timeout cannot afford the 10 s + 5 s cancel budget (a hook killed mid-reap is
+#: safe: the next SessionStart's re-reap is idempotent).
+SESSION_REAP_GRACE_S = 2.0
+SESSION_REAP_CONFIRM_S = 2.0
+#: What a SessionEnd (or same-PID predecessor) reap stamps as a Job's reason.
+SESSION_REAP_REASON = "Reaped: the owning Claude session ended."
+#: What an orphan reap stamps when a dead session's Job is marked `interrupted`.
+ORPHAN_REAP_REASON = "Interrupted: the owning Claude session is no longer alive."
 #: Poll interval while waiting on a signalled process to go away.
 _TERMINATE_POLL_S = 0.05
 
@@ -105,9 +129,10 @@ WAIT_TIMEOUT_MS = 900_000
 DIR_MODE = 0o700
 FILE_MODE = 0o600
 
-#: The environment variable surface/02's SessionStart hook exports. Recorded for
-#: provenance and digest rendering only — no lifecycle behavior keys off it.
-SESSION_ID_VARIABLE = "CLAUDE_SESSION_ID"
+#: The environment variable the SessionStart hook exports (`session_start.py`).
+#: This IS the owning-session field: `reap_session`/`reap_orphans` key a Job's
+#: lifecycle off the `sessionId` it populates (ADR 0004, reversed 2026-07-30).
+SESSION_ID_VARIABLE = "CHINAMAX_SESSION_ID"
 #: Overrides the interpreter the detached worker runs under. Tests point it at a
 #: non-executable path to make a spawn fail for real, with no mocked process layer.
 WORKER_PYTHON_VARIABLE = "CHINAMAX_WORKER_PYTHON"
@@ -141,6 +166,9 @@ RECORD_DEFAULTS: dict[str, object] = {
     "write": True,
     "workspaceRoot": None,
     "sessionId": None,
+    "bridgeName": None,
+    "resumedFrom": None,
+    "lineageRoot": None,
     "status": STATUS_QUEUED,
     "phase": None,
     "pid": None,
@@ -475,9 +503,10 @@ def latest_key(record: dict) -> tuple[float, float, str]:
     """Sort key for "latest", shared by every verb's default selection.
 
     ``completedAt`` first, falling back to ``updatedAt`` for records that have
-    none — which `interrupted` records never do, since their stored status is
-    still ``running``/``queued`` — then ``createdAt``, then the id. Callers sort
-    with ``reverse=True``.
+    none — which a DERIVED-`interrupted` record never does (its stored status is
+    still ``running``/``queued``), while a reaped STORED-`interrupted` one now
+    carries ``completedAt`` like any terminal record — then ``createdAt``, then
+    the id. Callers sort with ``reverse=True``.
     """
     primary = (
         parse_timestamp(record.get("completedAt"))
@@ -516,8 +545,38 @@ def elapsed(record: dict) -> str:
     return f"{minutes}m{secs:02d}s" if minutes else f"{secs}s"
 
 
+def render_job_row(record: dict) -> str:
+    """Render one Job's bridge-first summary row.
+
+    THE shared row helper: `status`, the `reap` digests and both session-hook
+    digests render through it, so the three cannot diverge. The Bridge name leads
+    (``-`` for a record without one — a direct dispatch); the id, effective
+    status, phase, elapsed, profile and title follow in their prior order.
+
+    Args:
+        record: The Job record.
+
+    Returns:
+        The two-space-joined row.
+    """
+    return "  ".join(
+        [
+            str(record.get("bridgeName") or "-"),
+            str(record["id"]),
+            f"{effective_status(record):<11}",
+            f"{(record.get('phase') or '-'):<14}",
+            f"{elapsed(record):>8}",
+            str(record.get("profile") or "-"),
+            str(record.get("title") or ""),
+        ]
+    )
+
+
 def terminate_tree(
-    pid: int, start_time: int | None = None, grace_s: float = TERMINATE_GRACE_S
+    pid: int,
+    start_time: int | None = None,
+    grace_s: float = TERMINATE_GRACE_S,
+    confirm_s: float = _TERMINATE_CONFIRM_S,
 ) -> list[int]:
     """Stop a worker's whole process TREE, and report what survived.
 
@@ -535,6 +594,9 @@ def terminate_tree(
         pid: The recorded worker pid.
         start_time: Its recorded ``pidStartTime``, when the record carries one.
         grace_s: How long to wait between SIGTERM and SIGKILL.
+        confirm_s: How long to wait for the SIGKILL sweep's targets to disappear
+            (a session reap passes a shorter value than a `cancel`'s default, so
+            a multi-Job reap fits a hook's timeout budget).
 
     Returns:
         The pids still alive after the sweep — empty when everything targeted is
@@ -560,7 +622,7 @@ def terminate_tree(
     if not remaining:
         return []
     _signal_processes(remaining, signal.SIGKILL)
-    _await_exit(remaining, _TERMINATE_CONFIRM_S)
+    _await_exit(remaining, confirm_s)
     return sorted(_alive_targets(remaining))
 
 
@@ -591,6 +653,160 @@ def state_root() -> Path:
     if xdg is not None:
         return xdg / "chinamax"
     return Path.home() / ".local" / "state" / "chinamax"
+
+
+#: Comms of the transient wrappers between a hook's python and the long-lived
+#: Claude process: the login shells and the plugin's own `scripts/` shims. The
+#: ancestor walk skips them so the registered pid is Claude's, never a runner's.
+_SHELL_COMMS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+_SHIM_COMMS = frozenset(
+    {
+        "chinamax",
+        "session_start_hook",
+        "session_end_hook",
+        "stop_hook",
+        "user_prompt_hook",
+        "bridge_contract_hook",
+        "conda",
+        "env",
+    }
+)
+
+
+def sessions_dir() -> Path:
+    """Return the session-liveness registry directory.
+
+    A SIBLING of the state root (``<data root>/sessions``), deliberately OUTSIDE
+    it so `iter_workspace_stores`'s ``state_root()/*`` walk never mistakes a
+    registry file for a workspace store.
+    """
+    return state_root().parent / "sessions"
+
+
+def session_registry_path(session_id_value: str) -> Path:
+    """Return one session's registry file path."""
+    return sessions_dir() / session_id_value
+
+
+def read_comm(pid: int) -> str | None:
+    """Return a process's command name (``/proc/<pid>/comm``), or None."""
+    try:
+        return (
+            Path(f"/proc/{pid}/comm")
+            .read_text(encoding="utf-8", errors="replace")
+            .strip()
+        )
+    except OSError:
+        return None
+
+
+def resolve_owner_process(start_pid: int | None = None) -> tuple[int, int | None] | None:
+    """Return the long-lived Claude process ``(pid, start_time)``, or None.
+
+    A hook runs as a grandchild subprocess of its Claude session, so the Claude
+    pid must be recovered by climbing the ``/proc`` ancestor chain: from
+    ``os.getppid()`` upward, skipping ancestors whose comm is a login shell or a
+    plugin ``scripts/`` shim, take the first remaining ancestor. Recording a
+    transient runner pid instead would make every session read dead and turn the
+    orphan reaper into a live-Job killer.
+
+    Args:
+        start_pid: Where to start the walk; ``os.getppid()`` by default.
+
+    Returns:
+        The Claude process ``(pid, start_time)``, or None when nothing resolves
+        (a non-Linux dev box with no ``/proc``).
+    """
+    seen: set[int] = set()
+    pid = os.getppid() if start_pid is None else start_pid
+    fallback: tuple[int, int | None] | None = None
+    while pid > 1 and pid not in seen:
+        seen.add(pid)
+        info = read_process(pid)
+        if info is None:
+            break
+        candidate = (pid, info.start_time)
+        comm = (read_comm(pid) or "").lower()
+        if comm not in _SHELL_COMMS and comm not in _SHIM_COMMS:
+            return candidate
+        # Every ancestor is a shell/shim so far — keep the highest as a fallback,
+        # so a session is still registered rather than dropped.
+        fallback = candidate
+        pid = info.ppid
+    return fallback
+
+
+def session_alive(pid: int | None, start_time: int | None) -> bool:
+    """Report whether a registered session's Claude process is still alive.
+
+    Reuses the `worker_gone` predicate family — ESRCH-only gone, EPERM alive,
+    ``/proc`` state ``Z`` gone, start-time mismatch gone — NOT a bare
+    ``os.kill(pid, 0)``, which reads a zombie or a recycled pid as alive and
+    would leave a dead session's orphans running forever.
+
+    Args:
+        pid: The registered Claude pid, or None.
+        start_time: Its recorded ``/proc`` start time, or None.
+
+    Returns:
+        Whether the session's process is still that same live process.
+    """
+    if pid is None:
+        return False
+    return not worker_gone({"pid": pid, "pidStartTime": start_time})
+
+
+def write_session_registry(
+    session_id_value: str, pid: int, start_time: int | None
+) -> None:
+    """Record a live Claude session's ``(pid, start_time)`` atomically."""
+    path = session_registry_path(session_id_value)
+    make_dir(path.parent)
+    _write_file(
+        path,
+        json.dumps({"pid": pid, "pidStartTime": start_time}, sort_keys=True) + "\n",
+    )
+
+
+def read_session_registry(session_id_value: str) -> tuple[int, int | None] | None:
+    """Return a registered session's ``(pid, start_time)``, or None when absent."""
+    try:
+        data = json.loads(
+            session_registry_path(session_id_value).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("pid"), int):
+        return None
+    start = data.get("pidStartTime")
+    return data["pid"], start if isinstance(start, int) else None
+
+
+def remove_session_registry(session_id_value: str) -> None:
+    """Remove one session's registry file, tolerating absence."""
+    _unlink(session_registry_path(session_id_value))
+
+
+def iter_session_registrations() -> Iterator[tuple[str, int, int | None]]:
+    """Yield every ``(session_id, pid, start_time)`` in the registry."""
+    try:
+        entries = list(os.scandir(sessions_dir()))
+    except OSError:
+        return
+    for entry in sorted(entries, key=lambda item: item.name):
+        if not entry.is_file():
+            continue
+        registration = read_session_registry(entry.name)
+        if registration is not None:
+            yield entry.name, registration[0], registration[1]
+
+
+def session_is_alive(session_id_value: str) -> bool:
+    """Report whether a session's registered Claude process is still alive."""
+    registration = read_session_registry(session_id_value)
+    if registration is None:
+        return False
+    return session_alive(registration[0], registration[1])
 
 
 def resolve_workspace_root(workspace: str | Path | None = None) -> Path:
@@ -659,6 +875,161 @@ def list_jobs_tolerant(workspace: str | Path | None = None) -> tuple[list[dict],
     """
     records, malformed = open_store(workspace).load_records()
     return records, len(malformed)
+
+
+def iter_workspace_stores() -> Iterator["JobStore"]:
+    """Yield a JobStore for every per-workspace state dir under the state root.
+
+    THE shared reap iteration: a session may own Jobs in several workspaces
+    (``task --workspace``), so both reap forms sweep every store rather than only
+    the cwd's. The `sessions/` registry sits OUTSIDE ``state_root()`` and the
+    ``python-path`` record is a file, so a directory-only walk keeps both out of
+    the sweep by construction.
+    """
+    try:
+        entries = sorted(state_root().glob("*"))
+    except OSError:
+        return
+    for entry in entries:
+        if entry.is_dir():
+            yield JobStore(entry)
+
+
+@dataclass
+class ReapResult:
+    """The outcome of one reap sweep.
+
+    ``reaped`` are the records marked terminal; ``survived`` are ``(id, pids)``
+    for Jobs whose worker outlived the SIGKILL sweep — left for the next pass,
+    exactly as `cancel` refuses to write ``cancelled`` over a Job it did not
+    stop; ``reported`` are live workers with no recorded owner, surfaced but
+    never killed (a missing ``sessionId`` is a plumbing failure, not a kill path).
+    """
+
+    reaped: list[dict]
+    survived: list[tuple[str, list[int]]]
+    reported: list[dict]
+
+
+def _stored_active_records(store: "JobStore") -> list[dict]:
+    """Return a store's records whose STORED status is ``queued`` or ``running``.
+
+    Deliberately NOT `is_active`: a crashed worker's record (stored ``running``,
+    derived ``interrupted``) must still be reaped and marked, or it stays
+    resumable from a later session in violation of ADR 0004.
+    """
+    records, _ = store.load_records()
+    return [record for record in records if record.get("status") in ACTIVE_STATUSES]
+
+
+def _reap_record(
+    store: "JobStore",
+    record: dict,
+    terminal_status: str,
+    reason: str,
+    grace_s: float,
+    confirm_s: float,
+) -> tuple[dict | None, list[int]]:
+    """Kill a live worker's tree (if any) and mark the record terminal via CAS.
+
+    A live worker is killed first; a provably-gone one is marked WITHOUT a kill.
+    If the tree outlives SIGKILL the terminal status is NOT written — the
+    survivors are returned and the record is left for the next sweep.
+
+    Returns:
+        ``(marked_record_or_None, survivor_pids)``.
+    """
+    pid = usable_pid(record)
+    if pid is not None and not worker_gone(record):
+        survivors = terminate_tree(
+            pid, record.get("pidStartTime"), grace_s=grace_s, confirm_s=confirm_s
+        )
+        if survivors:
+            return None, survivors
+    marked = store.update(
+        record["id"],
+        {"status": terminal_status, "completedAt": utc_now(), "errorMessage": reason},
+        expect=ACTIVE_STATUSES,
+    )
+    return marked, []
+
+
+def reap_session(
+    session_id_value: str,
+    *,
+    grace_s: float = SESSION_REAP_GRACE_S,
+    confirm_s: float = SESSION_REAP_CONFIRM_S,
+) -> ReapResult:
+    """Reap every stored-active Job a session owns: kill the tree, mark cancelled.
+
+    The SessionEnd path (and the same-PID predecessor reap). Every workspace
+    store is swept; a Job whose worker is already gone is marked without a kill.
+
+    Args:
+        session_id_value: The ending session's id.
+        grace_s: SIGTERM grace for each kill.
+        confirm_s: SIGKILL-confirm bound for each kill.
+
+    Returns:
+        The `ReapResult`.
+    """
+    result = ReapResult([], [], [])
+    for store in iter_workspace_stores():
+        for record in _stored_active_records(store):
+            if record.get("sessionId") != session_id_value:
+                continue
+            marked, survivors = _reap_record(
+                store, record, STATUS_CANCELLED, SESSION_REAP_REASON, grace_s, confirm_s
+            )
+            if survivors:
+                result.survived.append((record["id"], survivors))
+            elif marked is not None:
+                result.reaped.append(marked)
+    return result
+
+
+def reap_orphans(
+    *,
+    grace_s: float = SESSION_REAP_GRACE_S,
+    confirm_s: float = SESSION_REAP_CONFIRM_S,
+) -> ReapResult:
+    """Mark `interrupted` every stored-active Job whose owner session is dead.
+
+    The SessionStart crash-recovery path (and the CLI `reap --orphans`). "Owner
+    dead" = a `sessionId` whose registry says the Claude process is gone, or a
+    registry missing entirely. A record with NO `sessionId` is reaped ONLY when
+    its worker is already provably gone; a LIVE worker with no recorded owner is
+    reported, never killed. Stale registry files (whose process is gone) are then
+    unlinked.
+
+    Returns:
+        The `ReapResult` — ``reported`` holds the ownerless live workers.
+    """
+    result = ReapResult([], [], [])
+    for store in iter_workspace_stores():
+        for record in _stored_active_records(store):
+            sid = record.get("sessionId")
+            if sid is not None and session_is_alive(sid):
+                continue
+            if sid is None and not worker_gone(record):
+                result.reported.append(record)
+                continue
+            marked, survivors = _reap_record(
+                store, record, STATUS_INTERRUPTED, ORPHAN_REAP_REASON, grace_s, confirm_s
+            )
+            if survivors:
+                result.survived.append((record["id"], survivors))
+            elif marked is not None:
+                result.reaped.append(marked)
+    _gc_stale_registrations()
+    return result
+
+
+def _gc_stale_registrations() -> None:
+    """Unlink every registry file whose recorded Claude process is gone."""
+    for session_id_value, pid, start_time in list(iter_session_registrations()):
+        if not session_alive(pid, start_time):
+            remove_session_registry(session_id_value)
 
 
 def make_dir(path: Path) -> Path:
@@ -857,6 +1228,7 @@ def new_record(
     log_file: Path,
     bash_timeout_s: float | None = None,
     originating_session: str | None = None,
+    bridge_name: str | None = None,
 ) -> dict:
     """Build the first version of a Job record.
 
@@ -872,7 +1244,9 @@ def new_record(
             pins bash to — it must not diverge from the state-dir key.
         log_file: The Job's progress log path.
         bash_timeout_s: The per-command bash timeout, when overridden.
-        originating_session: The Claude session id, or None.
+        originating_session: The owning Claude session id, or None.
+        bridge_name: The persistent Bridge teammate that owns this Job's Thread
+            (``chinamax-<profile>-<task-slug>``), or None for a direct dispatch.
 
     Returns:
         The record, ready to publish.
@@ -895,6 +1269,7 @@ def new_record(
             "write": write,
             "workspaceRoot": str(workspace_root),
             "sessionId": originating_session,
+            "bridgeName": bridge_name,
             "status": STATUS_QUEUED,
             "createdAt": now,
             "updatedAt": now,
@@ -1241,32 +1616,67 @@ class JobStore:
         The DISPATCHER writes the copy, never the worker — a worker only ever
         reads its own transcript, so nothing can pull the source out from under
         a rehydrating Job. The new Job inherits the source's Profile, write
-        posture, workspace root and bash timeout: a resume must not silently
-        change posture or provider. Pending steers are deliberately NOT carried
-        forward — the new Job has its own empty queue.
+        posture, workspace root, bash timeout AND ``bridgeName``: a resume must
+        not silently change posture or provider, and one Bridge owns one Thread
+        lineage (ADR 0006), so the roster and bridge-first status stay populated
+        across resumes. It also records ``resumedFrom`` (the source id) and a
+        persisted ``lineageRoot`` (the source's ``lineageRoot``, else the source
+        id) — the lineage-scoped resume guard compares ``lineageRoot`` values
+        directly rather than walking ``resumedFrom`` chains, so a pruned ancestor
+        or a corrupt cycle can neither break nor hang it. Pending steers are
+        deliberately NOT carried forward — the new Job has its own empty queue.
+
+        The refusal is lineage-scoped for an explicit selector (refuse only when
+        this Thread's own lineage still has an active Job — an unrelated active
+        Job is fine) and workspace-wide for a bare resume (which must guess a
+        target). A source whose STORED status is `interrupted` (a reaped
+        dead-session Job) is refused by both forms in `_resume_source`.
 
         Args:
             selector: The source id or prefix, or None for the most recent
                 non-active Job with a Thread.
             prompt: The follow-up, already resolved (never empty).
-            originating_session: The CURRENT session id — provenance only.
+            originating_session: The CURRENT session id — the owning session of
+                the new Job.
 
         Returns:
             The new Job's record.
 
         Raises:
-            ChinamaxError: If a Job is still active, the source cannot be
-                resolved, or its Thread is absent, empty or unusable.
+            ChinamaxError: If the lineage (explicit) or any Job (bare) is still
+                active, the source cannot be resolved or was reaped, or its
+                Thread is absent, empty or unusable.
         """
         with self._locked():
             records = self._load_locked()
-            running = sorted(record["id"] for record in records if is_active(record))
-            if running:
-                raise ChinamaxError(
-                    "a Job is still running — use `status` to follow it or `cancel` "
-                    f"to stop it first: {', '.join(running)}"
+            if selector is None:
+                # A bare resume must guess a target, so it keeps the workspace-wide
+                # refusal — and it must fire BEFORE resolving a source, so an active
+                # but thread-less Job reports "still running", not "nothing to
+                # resume".
+                running = sorted(record["id"] for record in records if is_active(record))
+                if running:
+                    raise ChinamaxError(
+                        "a Job is still running — use `status` to follow it or "
+                        f"`cancel` to stop it first: {', '.join(running)}"
+                    )
+                source = self._resume_source(None, records)
+            else:
+                source = self._resume_source(selector, records)
+                lineage_root = source.get("lineageRoot") or source["id"]
+                # Explicit selector: refuse only when this Thread's OWN lineage
+                # still has an active Job — an unrelated active Job is fine.
+                active_lineage = sorted(
+                    other["id"]
+                    for other in records
+                    if is_active(other)
+                    and (other.get("lineageRoot") or other["id"]) == lineage_root
                 )
-            source = self._resume_source(selector, records)
+                if active_lineage:
+                    raise ChinamaxError(
+                        f"{source['id']} lineage still running — use status"
+                    )
+            lineage_root = source.get("lineageRoot") or source["id"]
             messages = merge_follow_up(self._resume_thread(source["id"]), prompt)
             request = source.get("request") or {}
             job_id = self.reserve_id()
@@ -1283,7 +1693,10 @@ class JobStore:
                 log_file=self.log_path(job_id),
                 bash_timeout_s=request.get("bashTimeoutSec"),
                 originating_session=originating_session,
+                bridge_name=source.get("bridgeName"),
             )
+            record["resumedFrom"] = source["id"]
+            record["lineageRoot"] = lineage_root
             write_messages(precreate(self.transcript_path(job_id)), messages)
             self._publish(record)
             self._sync_index()
@@ -1377,14 +1790,28 @@ class JobStore:
         return records
 
     def _resume_source(self, selector: str | None, records: list[dict]) -> dict:
-        """Pick the Job whose Thread a resume continues. The caller holds the lock."""
+        """Pick the Job whose Thread a resume continues. The caller holds the lock.
+
+        A source whose STORED status is `interrupted` (a reaped dead-session Job)
+        is refused by BOTH forms — ADR 0004's "dead-session Job ids are never
+        resumed" made mechanism, not convention. A DERIVED-interrupted crash
+        (stored ``running``/``queued``) stays resumable, as before.
+        """
         by_id = {record["id"]: record for record in records}
         if selector is not None:
-            return by_id[resolve_selector(selector, by_id)]
+            source = by_id[resolve_selector(selector, by_id)]
+            if source.get("status") == STATUS_INTERRUPTED:
+                raise ChinamaxError(
+                    f"{source['id']} cannot be resumed: its owning Claude session "
+                    "ended and the Job was reaped"
+                )
+            return source
         with_thread = [
             record
             for record in records
-            if not is_active(record) and self._thread_size(record["id"]) > 0
+            if not is_active(record)
+            and record.get("status") != STATUS_INTERRUPTED
+            and self._thread_size(record["id"]) > 0
         ]
         if not with_thread:
             raise ChinamaxError(
@@ -1417,11 +1844,19 @@ class JobStore:
             return 0
 
     def _prune_locked(self, keep: int) -> list[str]:
-        """Drop the oldest finished Jobs beyond ``keep``. The caller holds the lock."""
+        """Drop the oldest finished Jobs beyond ``keep``. The caller holds the lock.
+
+        Grades the STORED status, NOT `effective_status`: a reaped
+        STORED-`interrupted` record IS finished and prunable, while a DERIVED-
+        interrupted crash (stored ``running``/``queued``) is NOT — its resumable
+        Thread is exactly what pruning it would destroy. Equivalent to the old
+        `effective_status` grading for every other status, since derivation only
+        ever produced `interrupted`, which was never graded finished.
+        """
         finished = [
             record
             for record in self._load_locked()
-            if effective_status(record) in FINISHED_STATUSES
+            if record["status"] in FINISHED_STATUSES
         ]
         finished.sort(key=latest_key, reverse=True)
         dropped = [record["id"] for record in finished[keep:]]

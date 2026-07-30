@@ -34,7 +34,13 @@ def main() -> int:
 
 
 def _build_notice(event: dict) -> str | None:
-    """Return the notice for this workspace's active Jobs, or None when there are none."""
+    """Return the notice for this workspace's active Jobs, or None when there are none.
+
+    Bridge-first: each active Job is named by its owning Bridge (falling back to
+    the Job id for a direct dispatch), and the pointer is to message the Bridge
+    or run /chinamax:status — the /chinamax:cancel command no longer exists, a
+    running Job is stopped by messaging its Bridge to abandon it.
+    """
     root = resolve_workspace(event)
     if root is None:
         return None
@@ -45,11 +51,12 @@ def _build_notice(event: dict) -> str | None:
     )
     if not active:
         return None
-    ids = ", ".join(record["id"] for record in active)
+    names = ", ".join(record.get("bridgeName") or record["id"] for record in active)
     subject = "chinamax Jobs are" if len(active) > 1 else "A chinamax Job is"
     return (
-        f"{subject} still running in this workspace: {ids}. "
-        f"See /chinamax:status; use /chinamax:cancel <id> to stop one before ending."
+        f"{subject} still running in this workspace: {names}. "
+        "Message the Bridge to steer or abandon it, or see /chinamax:status, "
+        "before ending."
     )
 
 

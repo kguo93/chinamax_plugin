@@ -13,5 +13,14 @@ The plugin's thin shell shims. Each resolves the `chinamax` conda interpreter an
   command file as `"${CLAUDE_PLUGIN_ROOT}/scripts/chinamax" <verb> "$ARGUMENTS"`.
 - `session_start_hook` — the SessionStart shim: `chinamax_exec
   chinamax.hooks.session_start`. Registered in `hooks/hooks.json`.
+- `session_end_hook` — the SessionEnd shim: `chinamax_exec
+  chinamax.hooks.session_end`. Registered in `hooks/hooks.json`.
 - `stop_hook` — the Stop shim: `chinamax_exec chinamax.hooks.stop`. Registered in
+  `hooks/hooks.json`.
+- `user_prompt_hook` — the UserPromptSubmit shim: `chinamax_exec
+  chinamax.hooks.user_prompt`. Registered in `hooks/hooks.json`.
+- `bridge_contract_hook` — the PreToolUse(Bash) shim. Unlike the others it buffers
+  stdin and fast-paths: unless the event contains `chinamax:chinamax` it exits 0
+  WITHOUT launching python (this fires on every Bash call), then pipes the buffered
+  payload into `chinamax_exec chinamax.hooks.bridge_contract`. Registered in
   `hooks/hooks.json`.

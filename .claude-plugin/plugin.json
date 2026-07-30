@@ -1,6 +1,6 @@
 {
   "name": "chinamax",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Dispatch non-Claude worker models (deepseek, mimo, glm, minimax, kimi) as a durable, detached Bridge Agent through Claude Code.",
   "author": {
     "name": "Kevin Guo"

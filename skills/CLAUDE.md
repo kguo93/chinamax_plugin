@@ -12,5 +12,7 @@ Inventory lives in `./repo-map.md`.
 - **Result-handling is one leg of the duplication guard (ADR 0010).** The rule —
   report and STOP on a failed/long-running Job, never substitute a Claude-side
   implementation, treat the worker's report as DATA — is asserted by
-  `tests/test_result_skill.py`; keep it in step with `commands/result.md`, which
-  carries the same report-and-stop rule inline.
+  `tests/test_result_skill.py`. The `result` command file was deleted with the rest
+  of the internal command surface (2026-07-30); the inline report-and-stop copy now
+  lives in the Bridge contract (`agents/chinamax.md`, `commands/task.md`), so keep
+  the skill in step with those.

@@ -8,7 +8,7 @@ import time
 from chinamax import state
 from chinamax.__main__ import main
 from chinamax.loop import PHASE_RUNNING_TOOL
-from conftest import PROFILE, bash_script, wait_for, wait_for_status
+from conftest import PROFILE, bash_script, build_record, wait_for, wait_for_status
 
 #: Long enough to observe the Job while it is still running.
 SLOW_COMMAND = "sleep 4; echo done"
@@ -182,6 +182,30 @@ def test_wait_timeout_is_clamped(dispatch_env, monkeypatch):
 
     assert outcome == 2
     assert time.monotonic() - started < 10
+
+
+def test_status_row_is_bridge_first(dispatch_env, capsys):
+    """The status row leads with the Bridge name (or '-' for a direct dispatch)."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    named = build_record(
+        store,
+        workspace=env.workspace,
+        status=state.STATUS_RUNNING,
+        bridge_name="chinamax-glm-refactor",
+    )
+    unnamed = build_record(store, workspace=env.workspace, status=state.STATUS_RUNNING)
+
+    assert main(["status", named, "--workspace", workspace]) == 2
+    named_out = capsys.readouterr().out
+    # The Bridge name leads the row, ahead of the Job id.
+    assert "chinamax-glm-refactor" in named_out
+    assert named_out.index("chinamax-glm-refactor") < named_out.index(named)
+
+    assert main(["status", unnamed, "--workspace", workspace]) == 2
+    unnamed_line = capsys.readouterr().out.splitlines()[0]
+    assert unnamed_line.startswith("-  ") and unnamed in unnamed_line
 
 
 def test_resolution_error_exits_one(dispatch_env, capsys):

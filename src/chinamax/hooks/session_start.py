@@ -1,10 +1,17 @@
-"""SessionStart hook: inject the running/recent Job digest, export provenance.
+"""SessionStart hook: register the session, reap orphans, inject the Job digest.
 
-Writes the digest to STDOUT (Claude Code injects it as session context) and
-appends env exports to ``$CLAUDE_ENV_FILE`` when set. The digest is BOUNDED: every
-active or interrupted Job plus the 5 most recent finished ones within 24 h,
-capped at ~2 KB with a trailing ``(+N more)`` — inherited work a fresh session
-must learn about (ADR 0004) without flooding the context.
+Jobs are session-scoped (ADR 0004, reversed 2026-07-30). This hook FIRST records
+the live Claude process in the session-liveness registry (so a slow reap under
+the hook timeout cannot leave the new session unregistered), then reaps a
+same-PID predecessor (the ``/clear`` path, where the surviving Claude process
+keeps the ordinary orphan test reading "alive") and every orphaned Job of a dead
+session (``interrupted``), then writes the running/recent Job digest to STDOUT
+(Claude Code injects it as session context) and appends env exports to
+``$CLAUDE_ENV_FILE`` when set. The digest is BOUNDED: every active or interrupted
+Job plus the 5 most recent finished ones within 24 h, capped at ~2 KB with a
+trailing ``(+N more)`` — surfacing what the orphan reap just terminated and this
+workspace's recent terminal Jobs (how a clean SessionEnd reap surfaces here,
+there being no SessionEnd event ledger to read).
 """
 
 from __future__ import annotations
@@ -40,8 +47,10 @@ def main() -> int:
         to stderr, never a traceback into Claude's context.
     """
     event: dict = {}
+    digest = ""
     try:
         event = read_event()
+        _register_and_reap(event)
         digest = _build_digest(event)
     except Exception as error:  # noqa: BLE001 - never fail the session
         print(
@@ -56,6 +65,33 @@ def main() -> int:
     except Exception as error:  # noqa: BLE001 - exports are best-effort
         print(f"chinamax session_start hook (env): {error}", file=sys.stderr)
     return 0
+
+
+def _register_and_reap(event: dict) -> None:
+    """Register this session as live, reap a same-PID predecessor, reap orphans.
+
+    Ordering is load-bearing (B3): the registry is written FIRST, then the
+    same-PID predecessor reap, then the workspace-wide orphan reap. A same-PID
+    registered session with a different id is a dead predecessor — one Claude
+    process hosts one main session at a time — normally none (SessionEnd removed
+    it); a leftover means SessionEnd never fired on ``/clear`` or was killed
+    mid-reap, where the surviving Claude PID keeps the ordinary orphan test
+    reading "alive". A hook killed mid-reap is safe: the next SessionStart's
+    re-reap is idempotent.
+
+    Args:
+        event: The parsed hook event (its ``session_id`` is the new owner).
+    """
+    session = event.get("session_id")
+    owner = state.resolve_owner_process()
+    if session and owner is not None:
+        pid, start_time = owner
+        state.write_session_registry(str(session), pid, start_time)
+        for other, other_pid, _start in list(state.iter_session_registrations()):
+            if other != str(session) and other_pid == pid:
+                state.reap_session(other)
+                state.remove_session_registry(other)
+    state.reap_orphans()
 
 
 def _build_digest(event: dict) -> str:
@@ -103,12 +139,8 @@ def _within_window(record: dict, now: float) -> bool:
 
 
 def _line(record: dict) -> str:
-    """Render one Job's digest line: id, status, phase, elapsed, profile, title."""
-    return (
-        f"  {record['id']}  {state.effective_status(record):<11}  "
-        f"{(record.get('phase') or '-'):<14}  {state.elapsed(record):>8}  "
-        f"{record.get('profile') or '-'}  {record.get('title') or ''}"
-    ).rstrip()
+    """Render one Job's digest line, bridge-first via the shared row helper."""
+    return ("  " + state.render_job_row(record)).rstrip()
 
 
 def _pack(header: str, lines: list[str]) -> tuple[list[str], int]:

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# SessionEnd hook shim: resolve the interpreter, then run the entrypoint.
+# stdin (the hook event JSON) passes through verbatim; the reap runs in-process.
+set -euo pipefail
+CHINAMAX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# shellcheck source=scripts/_interpreter.sh
+. "${CHINAMAX_SCRIPT_DIR}/_interpreter.sh"
+chinamax_exec chinamax.hooks.session_end "$@"

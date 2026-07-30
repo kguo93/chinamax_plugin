@@ -29,20 +29,38 @@ def _entry(event_name: str) -> dict:
     return groups[0]["hooks"][0]
 
 
-def test_no_session_end():
-    """hooks.json registers SessionStart and Stop only — never SessionEnd (ADR 0004)."""
-    assert set(HOOKS["hooks"]) == {"SessionStart", "Stop"}
-    assert "SessionEnd" not in HOOKS["hooks"]
+def test_registered_events():
+    """hooks.json registers the five session/enforcement events (ADR 0004 reversed).
 
-    # The no-SessionEnd rationale is recorded in hooks.json's own description
-    # (JSON has no comments; the README belongs to surface/03).
+    Jobs are session-scoped now, so SessionEnd IS registered — the inverse of the
+    old no-SessionEnd invariant.
+    """
+    assert set(HOOKS["hooks"]) == {
+        "SessionStart",
+        "SessionEnd",
+        "Stop",
+        "UserPromptSubmit",
+        "PreToolUse",
+    }
+
+    # The reversal rationale is recorded in hooks.json's own description.
     assert "SessionEnd" in HOOKS["description"]
 
-    # `clear` is deliberately included; both hooks time out at 10s.
-    assert "clear" in HOOKS["hooks"]["SessionStart"][0]["matcher"]
+    # SessionStart's matcher includes both `clear` (re-inject after /clear) and
+    # `fork` (a forked session must register its own owner).
+    matcher = HOOKS["hooks"]["SessionStart"][0]["matcher"]
+    assert "clear" in matcher and "fork" in matcher
+
+    # Timeouts: 10s for everything except SessionEnd (30s, for a multi-Job reap).
     assert _entry("SessionStart")["timeout"] == 10
     assert _entry("Stop")["timeout"] == 10
+    assert _entry("UserPromptSubmit")["timeout"] == 10
+    assert _entry("PreToolUse")["timeout"] == 10
+    assert _entry("SessionEnd")["timeout"] == 30
     assert _entry("SessionStart")["type"] == "command"
+
+    # PreToolUse is scoped to Bash (the Bridge's only tool).
+    assert HOOKS["hooks"]["PreToolUse"][0]["matcher"] == "Bash"
 
 
 def _run_registered(command: str, event: dict, extra_env: dict) -> subprocess.CompletedProcess:

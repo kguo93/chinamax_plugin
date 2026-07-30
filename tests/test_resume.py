@@ -87,8 +87,8 @@ def test_resume_continues_thread(dispatch_env, capsys):
     assert record["request"]["workspaceRoot"] == finished["request"]["workspaceRoot"]
 
 
-def test_resume_refuses_while_active(dispatch_env, capsys):
-    """Resume refuses while any Job in the workspace is still active."""
+def test_bare_resume_refuses_while_active(dispatch_env, capsys):
+    """A BARE resume keeps the workspace-wide refusal (it must guess a target)."""
     env = dispatch_env()
     store = env.store
     active = build_record(store, workspace=env.workspace, status=state.STATUS_RUNNING)
@@ -99,6 +99,83 @@ def test_resume_refuses_while_active(dispatch_env, capsys):
     assert active in refusal
     assert "still running" in refusal
     assert store.job_ids() == [active], "a refused resume must create no Job"
+
+
+def test_explicit_resume_succeeds_while_unrelated_active(dispatch_env, capsys):
+    """An explicit-id resume succeeds while an UNRELATED Job is active, records
+    `resumedFrom`/`lineageRoot`, and inherits the source's `bridgeName`."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    # An unrelated active Job in the same workspace (its own lineage).
+    unrelated = build_record(store, workspace=env.workspace, status=state.STATUS_RUNNING)
+    # A finished source with a Thread and a Bridge.
+    source = build_record(
+        store,
+        workspace=env.workspace,
+        status=state.STATUS_COMPLETED,
+        completed_at=aged(60),
+        bridge_name="chinamax-kimi-fix-auth",
+    )
+    seed_thread(store, source, "Source thread.")
+
+    env.bind([report_turn()])
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    resumed = capsys.readouterr().out.strip()
+    assert resumed != unrelated and resumed != source
+    record = wait_for_status(store, resumed, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    assert record["resumedFrom"] == source
+    assert record["lineageRoot"] == source
+    assert record["bridgeName"] == "chinamax-kimi-fix-auth"
+
+
+def test_explicit_resume_refuses_own_lineage_active(dispatch_env, capsys):
+    """An explicit-id resume refuses while its OWN lineage still has an active Job."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    source = build_record(
+        store,
+        workspace=env.workspace,
+        status=state.STATUS_COMPLETED,
+        completed_at=aged(120),
+    )
+    seed_thread(store, source, "Source thread.")
+    # An active Job sharing the source's lineage root.
+    active = build_record(
+        store,
+        workspace=env.workspace,
+        status=state.STATUS_RUNNING,
+        lineage_root=source,
+    )
+
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 1
+    assert "lineage still running" in capsys.readouterr().err
+    assert sorted(store.job_ids()) == sorted([source, active]), "no new Job on a refusal"
+
+
+def test_resume_refuses_reaped_source(dispatch_env, capsys):
+    """A reaped (STORED-interrupted) source is refused by both resume forms."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    reaped = build_record(
+        store,
+        workspace=env.workspace,
+        status=state.STATUS_INTERRUPTED,
+        completed_at=aged(60),
+    )
+    seed_thread(store, reaped, "Reaped thread.")
+
+    # Explicit form: refused, naming the dead session.
+    assert main(["resume", "--workspace", workspace, reaped, "--", FOLLOW_UP]) == 1
+    assert "session" in capsys.readouterr().err.lower()
+
+    # Bare form: a reaped Thread is not a resumable candidate either.
+    assert main(["resume", "--workspace", workspace, "--", FOLLOW_UP]) == 1
+    assert "no finished Job with a Thread" in capsys.readouterr().err
+    assert store.job_ids() == [reaped], "a refused resume must create no Job"
 
 
 def test_bare_resume_takes_the_latest_thread(dispatch_env, capsys):

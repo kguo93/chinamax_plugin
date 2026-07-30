@@ -31,5 +31,5 @@ If a Job failed, was cancelled, is interrupted, or is still running long, report
 that plainly and STOP. Do NOT step in with a substitute implementation of the
 worker's task, do not "just finish it" yourself, and do not quietly redo the work
 Claude-side (ADR 0010) — delegation must never be silently undone. Point the
-operator at the right next command (`/chinamax:status`, `/chinamax:logs`,
-`/chinamax:resume <id>`, or `/chinamax:cancel <id>`) and let them decide.
+operator at `/chinamax:status`, or tell them to message the Job's Bridge teammate
+to steer, resume, or abandon it, and let them decide.
