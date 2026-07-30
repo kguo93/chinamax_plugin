@@ -22,7 +22,7 @@ import sys
 import time
 
 from chinamax import state
-from chinamax.hooks import debug_breadcrumb, read_event, resolve_workspace
+from chinamax.hooks import read_event, resolve_workspace
 
 #: Exports appended for a dispatched Bash to inherit. ``CHINAMAX_SESSION_ID`` is
 #: provenance; ``CLAUDE_PLUGIN_DATA`` is load-bearing — the hooks and the Bridge's
@@ -50,16 +50,7 @@ def main() -> int:
     digest = ""
     try:
         event = read_event()
-        debug_breadcrumb(
-            "SESSION_START-PY-ENTRY",
-            session=event.get("session_id"),
-            source=event.get("source"),
-            cpd=os.environ.get("CLAUDE_PLUGIN_DATA", "<unset>"),
-            data_root=str(state.state_root()),
-            cwd=os.getcwd(),
-        )
         _register_and_reap(event)
-        debug_breadcrumb("SESSION_START-PY-REGISTERED-REAPED", session=event.get("session_id"))
         digest = _build_digest(event)
     except Exception as error:  # noqa: BLE001 - never fail the session
         print(
