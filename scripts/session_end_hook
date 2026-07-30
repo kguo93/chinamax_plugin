@@ -3,6 +3,15 @@
 # stdin (the hook event JSON) passes through verbatim; the reap runs in-process.
 set -euo pipefail
 CHINAMAX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+# TEMPORARY DEBUG breadcrumb (revert after E5.7 diagnosis): proves the hook
+# PROCESS started, before any interpreter resolution / python import.
+printf '%s SESSION_END-SHIM-ENTRY pid=%s ppid=%s cpd=%s cwd=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || date -u 2>/dev/null || echo NOTIME)" \
+  "$$" "${PPID:-?}" "${CLAUDE_PLUGIN_DATA:-<unset>}" "$(pwd)" \
+  >> "${HOME}/chinamax-hook-debug.log" 2>/dev/null || true
 # shellcheck source=scripts/_interpreter.sh
 . "${CHINAMAX_SCRIPT_DIR}/_interpreter.sh"
+printf '%s SESSION_END-SHIM-PRE-EXEC pid=%s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%S.%3NZ 2>/dev/null || echo NOTIME)" "$$" \
+  >> "${HOME}/chinamax-hook-debug.log" 2>/dev/null || true
 chinamax_exec chinamax.hooks.session_end "$@"

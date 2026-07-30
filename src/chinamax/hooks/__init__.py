@@ -44,6 +44,24 @@ def read_event() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def debug_breadcrumb(tag: str, **fields: object) -> None:
+    """TEMPORARY diagnostic (revert after E5.7 diagnosis).
+
+    Append one line to ``~/chinamax-hook-debug.log`` capturing hook lifecycle.
+    Never raises — a breadcrumb must not perturb the behaviour being diagnosed.
+    """
+    try:
+        import time
+
+        parts = [f"{time.time():.3f}", tag, f"pid={os.getpid()}", f"ppid={os.getppid()}"]
+        parts += [f"{key}={value}" for key, value in fields.items()]
+        path = os.path.join(os.path.expanduser("~"), "chinamax-hook-debug.log")
+        with open(path, "a", encoding="utf-8") as handle:
+            handle.write(" ".join(str(part) for part in parts) + "\n")
+    except Exception:  # noqa: BLE001 - diagnostics must never fail the hook
+        pass
+
+
 def resolve_workspace(event: dict) -> Path | None:
     """Resolve THIS workspace from a hook event, walking to the git toplevel.
 
