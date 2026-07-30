@@ -18,11 +18,12 @@ Inventory lives in `./repo-map.md`.
   SessionEnd reap may kill several Jobs; its reap runs with the short
   `state.SESSION_REAP_GRACE_S`/`SESSION_REAP_CONFIRM_S` so it fits that budget.
 - **The `PreToolUse(Bash)` hook fires on EVERY Bash call in every session.** Its
-  shim fast-paths in-shell: it buffers stdin and, unless the event contains
-  `chinamax:chinamax`, exits 0 WITHOUT launching python — only a Bridge event pays
-  the interpreter-resolution cost. The python side filters again on
-  `agent_type == "chinamax:chinamax"` and injects context; it NEVER blocks a call
-  (ADR 0010, no hard blocks).
+  shim fast-paths in-shell: it buffers stdin and, unless the payload contains
+  `chinamax`, exits 0 WITHOUT launching python — only a marked event pays the
+  interpreter-resolution cost. The python side filters again on the `chinamax`
+  substring of `agent_type` (a NAMED spawn puts the teammate name,
+  `chinamax-<profile>-<slug>`, in `agent_type`, not the `chinamax:chinamax` subagent
+  type) and injects context; it NEVER blocks a call (ADR 0010, no hard blocks).
 - **The command strings run the `scripts/` shims, not the python modules directly**
   (`"${CLAUDE_PLUGIN_ROOT}/scripts/session_end_hook"`). The shim resolves the env
   interpreter; naming `python -m …` here would skip that. Keep the hook LOGIC in

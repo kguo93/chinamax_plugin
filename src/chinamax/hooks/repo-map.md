@@ -28,8 +28,10 @@ registered in `hooks/hooks.json`. Jobs are session-scoped (ADR 0004, reversed
   Job (one row per Bridge, terminal ones included as idle/messageable), and injects
   the roster + explicit-addressing `ROUTING_RULE` as `additionalContext`. No output
   when the session owns no bridge-named Jobs.
-- `bridge_contract.py` — the PreToolUse(Bash) entrypoint: for
-  `agent_type == "chinamax:chinamax"` only, emits the `CONTRACT` constant (the one
-  source of the injected classification contract, imported by the test) as
-  subagent-scoped `additionalContext`; silent and exit 0 otherwise. Reinforcement,
-  never a gate (ADR 0010).
+- `bridge_contract.py` — the PreToolUse(Bash) entrypoint: for an `agent_type`
+  carrying the `chinamax` substring only (a NAMED spawn puts the teammate name,
+  `chinamax-<profile>-<slug>`, in `agent_type`, not the `chinamax:chinamax` subagent
+  type), emits the `CONTRACT` constant (the one source of the injected
+  classification contract, imported by the test) as subagent-scoped
+  `additionalContext`; silent and exit 0 otherwise. Reinforcement, never a gate
+  (ADR 0010).

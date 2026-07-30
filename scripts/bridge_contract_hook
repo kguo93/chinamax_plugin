@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # PreToolUse(Bash) hook shim: re-inject the Bridge classification contract, but
 # ONLY for the chinamax Bridge. This fires on EVERY Bash call in EVERY session,
-# so it fast-paths in-shell: buffer stdin, and unless the event names the Bridge
-# agent type, exit 0 WITHOUT launching python — interpreter resolution can fall
-# through to a seconds-long `conda run` probe that must never tax an ordinary
-# Bash call. Only a Bridge event pays the python cost.
+# so it fast-paths in-shell: buffer stdin, and unless the payload carries the
+# "chinamax" marker (a NAMED Bridge's agent_type is its chinamax-* teammate name),
+# exit 0 WITHOUT launching python — interpreter resolution can fall through to a
+# seconds-long `conda run` probe that must never tax an ordinary Bash call. The
+# module then makes the precise agent_type decision.
 set -euo pipefail
 CHINAMAX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 payload="$(cat)"
 case "$payload" in
-  *chinamax:chinamax*) ;;
+  *chinamax*) ;;
   *) exit 0 ;;
 esac
 # shellcheck source=scripts/_interpreter.sh

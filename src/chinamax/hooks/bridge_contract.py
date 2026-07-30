@@ -1,8 +1,10 @@
 """PreToolUse(Bash) hook: re-inject the Bridge classification contract (ADR 0010).
 
 Fires on every Bash call in every session; the shim fast-paths past a non-Bridge
-event without launching python. Here we parse the event and, ONLY for
-``agent_type == "chinamax:chinamax"``, emit the contract as subagent-scoped
+event without launching python. Here we parse the event and, ONLY when
+``agent_type`` contains ``chinamax`` — a NAMED spawn makes Claude Code put the
+teammate NAME (``chinamax-<profile>-<slug>``) in ``agent_type``, not the
+``chinamax:chinamax`` subagent type — emit the contract as subagent-scoped
 ``additionalContext``. This is REINFORCEMENT, not a gate: additionalContext lands
 for the Bridge's NEXT turn — it re-anchors a drifting haiku Bridge every poll
 cycle but cannot veto the already-chosen call. The operative first copy is the
@@ -16,8 +18,10 @@ import sys
 
 from chinamax.hooks import read_event
 
-#: The agent type of the chinamax Bridge; the filter this hook keys on.
-BRIDGE_AGENT_TYPE = "chinamax:chinamax"
+#: A NAMED Bridge's agent_type is its teammate NAME (chinamax-<profile>-<slug>),
+#: never the "chinamax:chinamax" subagent type — Claude Code puts the name in the
+#: payload. So the filter keys on the "chinamax" substring every Bridge name carries.
+BRIDGE_AGENT_MARKER = "chinamax"
 
 #: The single source of the injected contract text — the D4 test imports THIS
 #: constant and it is one of the three lockstep members `test_task_command.py`
@@ -68,7 +72,7 @@ def main() -> int:
             file=sys.stderr,
         )
         return 0
-    if event.get("agent_type") != BRIDGE_AGENT_TYPE:
+    if BRIDGE_AGENT_MARKER not in (event.get("agent_type") or ""):
         return 0
     sys.stdout.write(
         json.dumps(
