@@ -76,3 +76,18 @@ def test_notice_active_only(make_workspace, monkeypatch, capsys):
     code, out = run_stop({"cwd": str(workspace)}, monkeypatch, capsys)
     assert code == 0
     assert out == ""
+
+
+def test_notice_sweeps_dead_bridge(make_workspace, monkeypatch, capsys):
+    """A stale-supervised Job is swept dead before the active filter, so the notice
+    no longer lists it (and stays silent when it was the only Job)."""
+    workspace, root, store = make_workspace()
+    job_id = build_record(
+        store, workspace=root, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-glm-dead",
+        supervision_timeout_ms=120_000, supervised_at=aged(300),
+    )
+    code, out = run_stop({"cwd": str(workspace), "session_id": "S"}, monkeypatch, capsys)
+    assert code == 0
+    assert store.read(job_id)["status"] == state.STATUS_INTERRUPTED
+    assert out == ""

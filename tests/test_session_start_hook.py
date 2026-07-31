@@ -212,3 +212,23 @@ def test_orphan_reap_on_start(workspace_store, monkeypatch, capsys):
     assert orphan in out
     assert "chinamax-glm-orphan" in out
     assert done in out
+
+
+def test_supervision_sweep_on_start(workspace_store, monkeypatch, capsys):
+    """SessionStart sweeps THIS (live) session's stale-supervised Bridge-owned Job
+    dead (interrupted) after the orphan reap, and the digest reports it bridge-first.
+
+    The starting session is registered live first, so the orphan reap spares it;
+    the supervision sweep is what reaps the dead Bridge's Job.
+    """
+    workspace, root, store = workspace_store
+    job_id = build_record(
+        store, workspace=root, status=state.STATUS_RUNNING,
+        session_id="NEW", bridge_name="chinamax-glm-dead",
+        supervision_timeout_ms=120_000, supervised_at=aged(300),
+    )
+    code, out = run_start({"cwd": str(workspace), "session_id": "NEW"}, monkeypatch, capsys)
+    assert code == 0
+    assert store.read(job_id)["status"] == state.STATUS_INTERRUPTED
+    assert job_id in out
+    assert "chinamax-glm-dead" in out

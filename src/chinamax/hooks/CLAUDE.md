@@ -16,6 +16,23 @@ Inventory lives in `./repo-map.md`. Domain vocabulary lives in `../../../CONTEXT
   registry-removal last — a hook killed mid-reap degrades to the next SessionStart's
   orphan path, which is idempotent). Reaps run with the short
   `state.SESSION_REAP_GRACE_S`/`SESSION_REAP_CONFIRM_S`, not `cancel`'s 10 s + 5 s.
+- **A Job must not outlive its Bridge (ADR 0003/0004, amended 2026-07-31).**
+  UserPromptSubmit, Stop and SessionStart also run the shared
+  `sweep_stale_supervision` (→ `state.reap_stale_supervision`) in-process — inside
+  their 10 s hook timeouts, on the same short
+  `SESSION_REAP_GRACE_S`/`SESSION_REAP_CONFIRM_S` budget — reaping this session's
+  Bridge-owned, still-`is_active` Jobs whose long-poll heartbeat has aged past
+  `2×bound + 10 s` as `interrupted` (`SUPERVISION_REAP_REASON`). UserPromptSubmit
+  sweeps at the top of `_build_context` (before the roster); Stop inside
+  `_build_notice` after `resolve_workspace` (before the active filter — a None
+  workspace skips it, harmlessly, since the user_prompt sweep covers that event);
+  SessionStart in `_register_and_reap` AFTER `reap_orphans`. A hook killed mid-sweep
+  is safe for still-live workers: the next sweep re-reaps them. One narrow exception,
+  unlike the SessionEnd reap: killed exactly between `_reap_record`'s kill and its
+  mark, the worker is dead and the record ages into a DERIVED-`interrupted` crash the
+  `is_active` scope then skips — it reads as an ordinary crash, never gets the
+  `bridge terminated` mark, and is completed by the SessionEnd/orphan reap instead.
+  `hooks.json` registrations are unchanged.
 - **`interrupted` is BOTH read-side-derived AND a stored status now.** SessionStart's
   digest lists active + derived/stored-interrupted + recent-finished; Stop lists
   ACTIVE ONLY. Both grade through `state.effective_status`, never a re-derived

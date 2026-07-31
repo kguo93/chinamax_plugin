@@ -7,6 +7,10 @@ Job — one roster row per Bridge, never one per Job, and INCLUDING terminal one
 to it becomes a resume). It injects the roster plus the explicit-addressing
 routing rule as ``additionalContext`` (inserted before the model processes the
 prompt). NO output at all when the session owns no bridge-named Jobs.
+
+Before rendering the roster it runs the stale-supervision sweep (ADR 0003/0004,
+amended 2026-07-31), so a Bridge this session no longer supervises is reaped and
+its row shows the terminated state rather than inviting a follow-up.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ import json
 import sys
 
 from chinamax import state
-from chinamax.hooks import read_event
+from chinamax.hooks import read_event, sweep_stale_supervision
 
 #: The routing rule injected alongside the roster: main forwards to a Bridge only
 #: when the operator addresses it, and never does a worker's task itself.
@@ -62,6 +66,9 @@ def _build_context(event: dict) -> str | None:
     session = event.get("session_id")
     if not session:
         return None
+    # A Job must not outlive its Bridge: reap this session's stale-supervised
+    # Bridges BEFORE reading the roster, so their rows render post-reap.
+    sweep_stale_supervision(event)
     bridges = _session_bridges(str(session))
     if not bridges:
         return None
@@ -87,11 +94,19 @@ def _session_bridges(session_id_value: str) -> list[dict]:
 
 
 def _roster_row(record: dict) -> str:
-    """Render one Bridge's roster entry — active, or idle and messageable."""
+    """Render one Bridge's roster entry — active, idle, or swept dead.
+
+    A Bridge the stale-supervision sweep just declared dead
+    (`SUPERVISION_REAP_REASON`) is a stranded Thread: it renders as dead with a
+    fresh-dispatch pointer, never the idle "message it to follow up" advice a
+    resumable Bridge gets.
+    """
     bridge = record.get("bridgeName")
     status = state.effective_status(record)
     if status in state.ACTIVE_STATUSES:
         return f"{bridge} ({status})"
+    if record.get("errorMessage") == state.SUPERVISION_REAP_REASON:
+        return f"{bridge} (dead — bridge terminated; dispatch a fresh /chinamax:task)"
     return f"{bridge} (idle — {status}; message it to follow up)"
 
 

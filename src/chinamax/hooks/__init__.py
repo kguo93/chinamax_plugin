@@ -8,6 +8,11 @@ notice), `user_prompt` (the live-Bridge roster into main), and `bridge_contract`
 through the ONE shared tolerant enumeration seam `state.list_jobs_tolerant`,
 resolve "THIS workspace" the same three-rung way, and degrade to a clean exit
 rather than ever putting a traceback in Claude's context.
+
+SessionStart, Stop and UserPromptSubmit additionally run the shared
+`sweep_stale_supervision` in-process (ADR 0003/0004, amended 2026-07-31): a Job
+must not outlive its Bridge, so each reaps this session's Bridge-owned Jobs whose
+long-poll heartbeat has aged out.
 """
 
 from __future__ import annotations
@@ -72,3 +77,29 @@ def resolve_workspace(event: dict) -> Path | None:
         except ChinamaxError:
             continue
     return None
+
+
+def sweep_stale_supervision(event: dict) -> None:
+    """Reap this session's Jobs whose Bridge has stopped supervising them.
+
+    The stale-supervision sweep the SessionStart, Stop and UserPromptSubmit hooks
+    run in-process (ADR 0003/0004, amended 2026-07-31): a Job must not outlive its
+    Bridge, and the Bridge's long-poll heartbeat is what a dead Bridge stops
+    refreshing. Keyed on the event's ``session_id`` (skipped when absent — a sweep
+    with no live session to own has nothing to reap), and degraded to a stderr
+    diagnostic on any failure so a sweep error never suppresses the hook's own
+    output or fails the turn.
+
+    Args:
+        event: The parsed hook event.
+    """
+    session = event.get("session_id")
+    if not session:
+        return
+    try:
+        state.reap_stale_supervision(str(session))
+    except Exception as error:  # noqa: BLE001 - a sweep must never fail the hook
+        print(
+            f"chinamax stale-supervision sweep: {type(error).__name__}: {error}",
+            file=sys.stderr,
+        )

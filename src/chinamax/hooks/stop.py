@@ -5,6 +5,10 @@ non-blocking, operator-visible field) and never a ``decision`` key — so the
 notice is operator-facing and can never block a turn. Lists ACTIVE Jobs only: an
 interrupted Job is not in flight, so nagging about it every turn would be noise
 (SessionStart still surfaces it).
+
+It first runs the stale-supervision sweep (ADR 0003/0004, amended 2026-07-31), so
+a Job whose Bridge died is marked `interrupted` before the active filter and thus
+drops out of the notice.
 """
 
 from __future__ import annotations
@@ -13,7 +17,7 @@ import json
 import sys
 
 from chinamax import state
-from chinamax.hooks import read_event, resolve_workspace
+from chinamax.hooks import read_event, resolve_workspace, sweep_stale_supervision
 
 
 def main() -> int:
@@ -44,6 +48,11 @@ def _build_notice(event: dict) -> str | None:
     root = resolve_workspace(event)
     if root is None:
         return None
+    # Reap this session's stale-supervised Bridges before the active filter, so a
+    # dead Bridge's Job drops out of the notice. When root is None the early
+    # return above skips this — harmless: the session-keyed user_prompt sweep
+    # covers that event. Guarded internally on the event's session_id.
+    sweep_stale_supervision(event)
     records, _ = state.list_jobs_tolerant(root)
     active = sorted(
         (record for record in records if state.effective_status(record) in state.ACTIVE_STATUSES),

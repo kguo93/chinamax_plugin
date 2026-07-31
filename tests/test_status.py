@@ -184,6 +184,55 @@ def test_wait_timeout_is_clamped(dispatch_env, monkeypatch):
     assert time.monotonic() - started < 10
 
 
+def test_wait_stamps_supervision(dispatch_env):
+    """`status --wait` on an active Job stamps the supervision heartbeat.
+
+    The stamp records ``supervisedAt`` + the clamped bound WITHOUT refreshing
+    ``updatedAt`` (``touch=False``, so the 60 s crash grace is untouched); a
+    later poll with a smaller bound never lowers the stored one; ``--timeout-ms
+    0`` and a terminal Job stamp nothing.
+    """
+    env = dispatch_env()
+    store, job_id = running_job(env)
+    workspace = str(env.workspace)
+    updated_before = store.read(job_id)["updatedAt"]
+
+    # --timeout-ms 0: the poll returns at once and stamps NOTHING.
+    assert main(["status", job_id, "--wait", "--timeout-ms", "0", "--workspace", workspace]) == 2
+    zero = store.read(job_id)
+    assert zero["supervisedAt"] is None
+    assert zero["supervisionTimeoutMs"] is None
+
+    # A real bound stamps supervisedAt + the clamped bound; updatedAt is untouched
+    # (a default touch would re-mask a crashed worker for the whole 60 s grace).
+    assert main(["status", job_id, "--wait", "--timeout-ms", "1000", "--workspace", workspace]) == 2
+    stamped = store.read(job_id)
+    assert stamped["supervisedAt"] is not None
+    assert stamped["supervisionTimeoutMs"] == 1000
+    assert stamped["updatedAt"] == updated_before
+
+    # A smaller later bound never lowers the stored one — an operator status --wait
+    # must not shrink the Bridge's supervision threshold under its own poll.
+    assert main(["status", job_id, "--wait", "--timeout-ms", "500", "--workspace", workspace]) == 2
+    assert store.read(job_id)["supervisionTimeoutMs"] == 1000
+
+    # A terminal Job gets no stamp: clear the fields, mark completed, re-wait.
+    store.update(
+        job_id,
+        {
+            "status": state.STATUS_COMPLETED,
+            "completedAt": state.utc_now(),
+            "supervisedAt": None,
+            "supervisionTimeoutMs": None,
+        },
+        expect={state.STATUS_RUNNING},
+    )
+    assert main(["status", job_id, "--wait", "--timeout-ms", "1000", "--workspace", workspace]) == 0
+    terminal = store.read(job_id)
+    assert terminal["supervisedAt"] is None
+    assert terminal["supervisionTimeoutMs"] is None
+
+
 def test_status_row_is_bridge_first(dispatch_env, capsys):
     """The status row leads with the Bridge name (or '-' for a direct dispatch)."""
     env = dispatch_env()

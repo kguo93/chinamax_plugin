@@ -5,7 +5,10 @@ the live Claude process in the session-liveness registry (so a slow reap under
 the hook timeout cannot leave the new session unregistered), then reaps a
 same-PID predecessor (the ``/clear`` path, where the surviving Claude process
 keeps the ordinary orphan test reading "alive") and every orphaned Job of a dead
-session (``interrupted``), then writes the running/recent Job digest to STDOUT
+session (``interrupted``); it then sweeps THIS (live) session's stale-supervised
+Bridge-owned Jobs (ADR 0003/0004, amended 2026-07-31 — a resumed session that
+kept its id while its Bridge teammates did not survive the restart), then writes
+the running/recent Job digest to STDOUT
 (Claude Code injects it as session context) and appends env exports to
 ``$CLAUDE_ENV_FILE`` when set. The digest is BOUNDED: every active or interrupted
 Job plus the 5 most recent finished ones within 24 h, capped at ~2 KB with a
@@ -22,7 +25,7 @@ import sys
 import time
 
 from chinamax import state
-from chinamax.hooks import read_event, resolve_workspace
+from chinamax.hooks import read_event, resolve_workspace, sweep_stale_supervision
 
 #: Exports appended for a dispatched Bash to inherit. ``CHINAMAX_SESSION_ID`` is
 #: provenance; ``CLAUDE_PLUGIN_DATA`` is load-bearing — the hooks and the Bridge's
@@ -92,6 +95,9 @@ def _register_and_reap(event: dict) -> None:
                 state.reap_session(other)
                 state.remove_session_registry(other)
     state.reap_orphans()
+    # Orphan reap owns dead sessions; this sweep owns THIS live session's dead
+    # Bridges (a Job must not outlive its Bridge, ADR 0003/0004).
+    sweep_stale_supervision(event)
 
 
 def _build_digest(event: dict) -> str:

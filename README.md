@@ -231,6 +231,12 @@ the Claude session that started it:
   turn's end.
 - A dead session's Job ids are **never** resumed or re-attached. Continuing work is
   only ever a live Bridge Agent resuming its own Thread inside the owning session.
+- **A Job never outlives its Bridge, either.** The Bridge supervises its Job through
+  the same long-poll that relays it, so if the Bridge teammate dies or stops polling
+  (a killed teammate, an abandoned poll loop), the session hooks reap its still-active
+  Job `interrupted` with the reason `bridge terminated` (shown by `/chinamax:status`).
+  That Thread is stranded — it is not resumable; dispatch a fresh `/chinamax:task` to
+  continue.
 
 Each record carries its owning `sessionId`, the owning `bridgeName`, and (for a
 resume-created Job) `resumedFrom` and a `lineageRoot` — so one Bridge's whole Thread
@@ -271,8 +277,10 @@ lineage is still active, and refuses a Job whose owning session was reaped.
 kill) reads as `interrupted`, derived read-side only; the stored status stays
 `running`/`queued` and the Thread stays resumable. A dead-**session** reap, by
 contrast, *writes* `interrupted` onto the record — that Thread is policy-dead and no
-longer resumable. `status` surfaces both and points a resumable one at continuing
-via its Bridge.
+longer resumable. A dead-**Bridge** reap likewise *writes* `interrupted`, with the
+reason `bridge terminated` — the Thread is stranded, so continuing is a fresh
+`/chinamax:task`. `status` surfaces all three and points a resumable one at
+continuing via its Bridge.
 
 ## Troubleshooting
 
@@ -331,5 +339,8 @@ the worker was killed mid-run while its session was still alive, the record's st
 status stays `running`/`queued` and the Thread is preserved — message the Job's
 Bridge to continue it (a resume). If instead the **owning session** ended and the
 Job was reaped, `interrupted` is written onto the record and that Thread is
-policy-dead — it is not resumable; dispatch a fresh `/chinamax:task`. Either way, do
-not wait on an interrupted Job — it will never leave that state by itself.
+policy-dead — it is not resumable; dispatch a fresh `/chinamax:task`. And an
+`interrupted` Job whose reason is `bridge terminated` means the Job's **Bridge**
+teammate died or stopped polling — the session hooks reaped the Job and that Thread
+is also stranded, so dispatch a fresh `/chinamax:task`. Either way, do not wait on
+an interrupted Job — it will never leave that state by itself.

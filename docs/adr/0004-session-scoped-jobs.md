@@ -22,6 +22,25 @@ remain fully supported *within* a session: liveness-based supervision
 running unsupervised) and kill-without-reaper (a crashed session's orphans
 would contradict the rule this ADR states).
 
+**Amended 2026-07-31** (bridge-death reap): a Job now also never outlives its
+**Bridge**. Supervision is heartbeat-stamped by the Bridge's own long-poll
+(`status --wait` stamps `supervisedAt`/`supervisionTimeoutMs`); the session hooks
+(UserPromptSubmit, Stop, SessionStart) sweep this live session's stale-supervised
+active Jobs in-process (`reap_stale_supervision`) and mark them `interrupted` with
+reason `bridge terminated`. The staleness threshold is `2×bound + 10 s` (bound =
+the stamped `--timeout-ms` in seconds, else the 900 s `WAIT_TIMEOUT_MS` fallback).
+Sweep scope is Bridge-owned, still-`is_active` records ONLY: a DERIVED-`interrupted`
+crash keeps its resumable Thread (the Bridge stops stamping the moment its poll
+reads terminal, so staleness alone cannot tell "Bridge dead" from "Job crashed,
+Bridge idle"), and a bridgeless direct dispatch is never supervised (nothing
+stamps it, so reaping it off `createdAt` would kill a healthy long-running
+worker). The reaped Thread is stranded — resume is Bridge-only — so continuing is
+a fresh `/chinamax:task`. Detection latency is event-bounded, not timed: the
+sweep runs only on the owning session's UserPromptSubmit/Stop/SessionStart events,
+so an idle session detects a dead Bridge no sooner than its next event, and never
+before the threshold has passed — a session resumed or restarted inside the
+threshold reaps nothing at SessionStart.
+
 > **Original decision (2026-07, now reversed):** The Codex plugin's SessionEnd
 > hook kills still-running jobs and deletes their records; we deliberately ship
 > no SessionEnd hook at all. Jobs exist for indefinite autonomous work (the

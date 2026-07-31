@@ -14,7 +14,7 @@ import pytest
 
 from chinamax import state
 from chinamax.hooks import user_prompt
-from conftest import build_record
+from conftest import aged, build_record
 
 
 def run_prompt(event, monkeypatch, capsys, stdin=None):
@@ -66,6 +66,24 @@ def test_roster_lists_this_sessions_bridges(prompt_store, monkeypatch, capsys):
     assert "chinamax-kimi-b (running)" in ctx  # an active Bridge shows its status
     assert "chinamax-mimo-c" not in ctx        # a different session's Bridge is omitted
     assert "the bridge/worker" in ctx          # the explicit-addressing routing rule
+
+
+def test_roster_reaps_dead_bridge(prompt_store, monkeypatch, capsys):
+    """A stale-supervised Job is swept dead before the roster renders: the record
+    ends `interrupted` and its row uses the dead-Bridge rendering, never the idle
+    "message it to follow up" advice."""
+    _workspace, root, store = prompt_store
+    job_id = build_record(
+        store, workspace=root, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-glm-dead",
+        supervision_timeout_ms=120_000, supervised_at=aged(300),
+    )
+    code, out = run_prompt({"session_id": "S", "prompt": "hi"}, monkeypatch, capsys)
+    assert code == 0
+    assert store.read(job_id)["status"] == state.STATUS_INTERRUPTED
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert "chinamax-glm-dead (dead — bridge terminated" in ctx
+    assert "message it to follow up" not in ctx
 
 
 def test_silent_without_bridges(prompt_store, monkeypatch, capsys):

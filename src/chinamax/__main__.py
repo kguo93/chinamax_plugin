@@ -447,7 +447,10 @@ def run_steer(args: argparse.Namespace) -> int:
     if status not in state.ACTIVE_STATUSES:
         raise ChinamaxError(
             _steer_refusal(
-                job_id, status, reaped=record["status"] == state.STATUS_INTERRUPTED
+                job_id,
+                status,
+                reaped=record["status"] == state.STATUS_INTERRUPTED,
+                reason=record.get("errorMessage"),
             )
         )
 
@@ -961,25 +964,35 @@ def _read_steer_message(words: list[str]) -> str:
     return message
 
 
-def _steer_refusal(job_id: str, status: str, reaped: bool = False) -> str:
+def _steer_refusal(
+    job_id: str, status: str, reaped: bool = False, reason: str | None = None
+) -> str:
     """Build the refusal for steering a Job that is not steerable.
 
     A DERIVED-`interrupted` crash is still resumable, so the refusal points at
-    `resume`; a STORED-`interrupted` (reaped) Job is not, so its refusal says the
-    owning session ended instead.
+    `resume`; a STORED-`interrupted` (reaped) Job is not. Its refusal names the
+    cause from the reaped record's ``errorMessage``: a terminated Bridge
+    (`SUPERVISION_REAP_REASON`) points at a fresh `/chinamax:task`, while a dead
+    owning session says so instead.
     """
     if reaped:
+        if reason == state.SUPERVISION_REAP_REASON:
+            return (
+                f"{job_id} cannot be steered: the Bridge supervising it terminated "
+                "and the Job was reaped; its Thread cannot be resumed — dispatch a "
+                "fresh /chinamax:task"
+            )
         return (
             f"{job_id} cannot be steered: its owning Claude session ended and the "
             "Job was reaped; its Thread cannot be resumed"
         )
-    reason = (
+    reason_text = (
         "its worker is gone"
         if status == state.STATUS_INTERRUPTED
         else f"it is {status}, not running"
     )
     return (
-        f"{job_id} cannot be steered ({reason}) — continue its Thread with "
+        f"{job_id} cannot be steered ({reason_text}) — continue its Thread with "
         f"`resume {job_id} <prompt>`"
     )
 
@@ -1089,12 +1102,19 @@ def _print_result(record: dict, status: str) -> None:
         print(f"error: {state.escape_control(record['errorMessage'])}")
     if status == state.STATUS_INTERRUPTED:
         if record.get("status") == state.STATUS_INTERRUPTED:
-            # A reaped dead-session Job: its Thread is policy-dead and A5 refuses
-            # to resume it.
-            print(
-                "hint: the owning Claude session ended and this Job was reaped; "
-                "its Thread cannot be resumed"
-            )
+            # A reaped Job: its Thread is policy-dead and A5 refuses to resume it.
+            # The reason distinguishes a dead Bridge from a dead owning session.
+            if record.get("errorMessage") == state.SUPERVISION_REAP_REASON:
+                print(
+                    "hint: the Bridge supervising this Job terminated and the Job "
+                    "was reaped; its Thread cannot be resumed — dispatch a fresh "
+                    "/chinamax:task to continue"
+                )
+            else:
+                print(
+                    "hint: the owning Claude session ended and this Job was reaped; "
+                    "its Thread cannot be resumed"
+                )
         else:
             # A DERIVED-interrupted crash: the Thread is still resumable.
             print(
@@ -1132,9 +1152,14 @@ def _status_wait(store: state.JobStore, job_id: str, timeout_ms: int) -> int:
     will never leave that state on its own, so a poll-relay that kept waiting
     would hang for the life of the Bridge.
     """
-    bound_s = min(max(timeout_ms, 0), state.WAIT_TIMEOUT_MS) / 1000.0
+    clamped_ms = min(max(timeout_ms, 0), state.WAIT_TIMEOUT_MS)
+    bound_s = clamped_ms / 1000.0
     record = store.read(job_id)
     if state.is_active(record):
+        # The Bridge's long-poll doubles as the supervision heartbeat: stamp the
+        # clamped bound actually used (never the raw timeout_ms) so a stale-
+        # supervision sweep can tell a live Bridge from a dead one.
+        state.stamp_supervision(store, job_id, clamped_ms)
         log_path = store.log_path(job_id)
         snapshot = (record["status"], record["phase"], state.log_signature(log_path))
         deadline = time.monotonic() + bound_s

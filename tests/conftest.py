@@ -263,6 +263,8 @@ def build_record(
     session_id: str | None = None,
     bridge_name: str | None = None,
     lineage_root: str | None = None,
+    supervised_at: str | None = None,
+    supervision_timeout_ms: int | None = None,
 ) -> str:
     """Publish one Job record directly, with no dispatcher and no worker.
 
@@ -270,7 +272,10 @@ def build_record(
     dead recorded pid, a `queued` record nobody ever claimed. Every write still
     goes through the store's own locked compare-and-swap updater. ``session_id``
     and ``bridge_name`` set the owning-session/Bridge fields at creation;
-    ``lineage_root`` sets the resume-lineage field for the lineage-scoped tests.
+    ``lineage_root`` sets the resume-lineage field for the lineage-scoped tests;
+    ``supervised_at``/``supervision_timeout_ms`` set the Bridge-supervision
+    heartbeat for the stale-supervision reap tests (a backdated ``supervised_at``
+    goes through the same ``touch=False`` update the ``updated_at`` parameter uses).
     """
     store.ensure()
     job_id = store.reserve_id()
@@ -295,12 +300,15 @@ def build_record(
         ("completedAt", completed_at),
         ("result", result),
         ("lineageRoot", lineage_root),
+        ("supervisionTimeoutMs", supervision_timeout_ms),
     ):
         if value is not None:
             changes[name] = value
     store.update(job_id, changes, expect={state.STATUS_QUEUED})
     if updated_at is not None:
         store.update(job_id, {"updatedAt": updated_at}, touch=False)
+    if supervised_at is not None:
+        store.update(job_id, {"supervisedAt": supervised_at}, touch=False)
     return job_id
 
 

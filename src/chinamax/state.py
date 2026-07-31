@@ -19,6 +19,13 @@ still-active Jobs, keyed off a session-liveness registry under
 ``<data root>/sessions/`` that records each live Claude process. Pruning removes
 only FINISHED Jobs beyond the cap — now including reaped, STORED-`interrupted`
 records; a DERIVED-`interrupted` crash keeps its resumable Thread.
+
+A Job is also supervised by its Bridge (ADR 0003/0004, amended 2026-07-31): each
+Bridge long-poll stamps ``supervisedAt``/``supervisionTimeoutMs`` via
+`stamp_supervision`, and `reap_stale_supervision` — run in-process by the session
+hooks — marks `interrupted` (`SUPERVISION_REAP_REASON`) a live session's still-
+active, Bridge-owned Job whose heartbeat has aged past ``2×bound+slack``, so a
+Job never outlives the Bridge that relays it.
 """
 
 from __future__ import annotations
@@ -112,6 +119,15 @@ SESSION_REAP_CONFIRM_S = 2.0
 SESSION_REAP_REASON = "Reaped: the owning Claude session ended."
 #: What an orphan reap stamps when a dead session's Job is marked `interrupted`.
 ORPHAN_REAP_REASON = "Interrupted: the owning Claude session is no longer alive."
+#: What a stale-supervision sweep stamps when a Job is reaped because its Bridge
+#: died or abandoned its poll loop — distinguishable from the dead-session reason.
+SUPERVISION_REAP_REASON = "bridge terminated"
+#: Staleness threshold shape: a Bridge heartbeat older than
+#: ``SUPERVISION_STALE_MULTIPLIER × bound + SUPERVISION_STALE_SLACK_S`` (bound =
+#: the stamped `--timeout-ms` in seconds, else `WAIT_TIMEOUT_MS`) declares the
+#: Bridge dead. The multiple-plus-slack tolerates one delayed poll.
+SUPERVISION_STALE_MULTIPLIER = 2
+SUPERVISION_STALE_SLACK_S = 10.0
 #: Poll interval while waiting on a signalled process to go away.
 _TERMINATE_POLL_S = 0.05
 
@@ -169,6 +185,8 @@ RECORD_DEFAULTS: dict[str, object] = {
     "bridgeName": None,
     "resumedFrom": None,
     "lineageRoot": None,
+    "supervisedAt": None,
+    "supervisionTimeoutMs": None,
     "status": STATUS_QUEUED,
     "phase": None,
     "pid": None,
@@ -1030,6 +1048,165 @@ def _gc_stale_registrations() -> None:
     for session_id_value, pid, start_time in list(iter_session_registrations()):
         if not session_alive(pid, start_time):
             remove_session_registry(session_id_value)
+
+
+def stamp_supervision(store: "JobStore", job_id: str, timeout_ms: int) -> None:
+    """Stamp a Job's supervision heartbeat from a Bridge long-poll.
+
+    The Bridge's ``status --wait`` long-poll doubles as the supervision heartbeat
+    (ADR 0003/0004, amended 2026-07-31): every poll on an active Job records the
+    current time in ``supervisedAt`` and the clamped poll bound in
+    ``supervisionTimeoutMs``, so `reap_stale_supervision` can tell a Bridge that
+    is still polling from one that died.
+
+    The write goes through the locked compare-and-swap with ``touch=False``: the
+    default ``touch=True`` refreshes ``updatedAt``, the field `effective_status`'s
+    60 s crash grace reads, so a default stamp would re-mask a crashed worker for
+    up to that grace per poll and flap `status`/roster/notice renderings. The
+    stored bound is only ever RAISED (``max``): `_status_wait` cannot tell a
+    Bridge poll from an operator-run ``status --wait``, so a small operator
+    ``--timeout-ms`` must never lower the threshold under the Bridge's own poll
+    and let the next sweep reap a live Job. The read-then-CAS is not atomic, so
+    concurrent stamps can interleave, but any regression is bounded below by the
+    Bridge's own steady-state stamp.
+
+    A non-positive ``timeout_ms``, a terminal or missing record, and ANY
+    exception (including `OSError`) are all no-ops: `_status_wait` runs under
+    `main`'s ``except Exception → EXIT_ERROR`` and the contract reads exit 1 as
+    "report once and stop polling", so a transient stamp failure must never alter
+    the verb's exit code — else the Bridge abandons a healthy Job the sweep then
+    reaps. A swallowed exception prints one stderr diagnostic (the hooks' degrade
+    pattern) so a persistently failing stamp is observable.
+
+    Args:
+        store: The Job's store.
+        job_id: The Job to stamp.
+        timeout_ms: The clamped long-poll bound actually used, in milliseconds.
+    """
+    if timeout_ms <= 0:
+        return
+    try:
+        record = store.try_read(job_id)
+        if record is None or record.get("status") not in ACTIVE_STATUSES:
+            return
+        existing = record.get("supervisionTimeoutMs")
+        bound = timeout_ms
+        if (
+            isinstance(existing, (int, float))
+            and not isinstance(existing, bool)
+            and existing > bound
+        ):
+            bound = int(existing)
+        store.update(
+            job_id,
+            {"supervisedAt": utc_now(), "supervisionTimeoutMs": bound},
+            expect=ACTIVE_STATUSES,
+            touch=False,
+        )
+    except Exception as error:  # noqa: BLE001 - a stamp must never alter the verb's exit
+        print(
+            f"chinamax: supervision stamp for {job_id} failed: "
+            f"{type(error).__name__}: {error}",
+            file=sys.stderr,
+        )
+
+
+def _supervision_is_stale(record: dict, now: float) -> bool:
+    """Report whether a supervised Job's Bridge heartbeat has aged out.
+
+    Baseline is ``supervisedAt`` when it parses, else ``createdAt`` (a never-
+    stamped Job's dispatch time); a record whose baseline does not parse at all is
+    never treated as stale — an unreadable baseline fails toward not killing. The
+    bound is ``supervisionTimeoutMs`` when that field is a positive number, else
+    `WAIT_TIMEOUT_MS`; a missing, non-positive, non-numeric or `bool` value all
+    fall back (``True`` is an int of value 1 ms — mirror `usable_pid`'s guard).
+
+    Args:
+        record: The Job record.
+        now: Epoch seconds to grade against.
+
+    Returns:
+        Whether the Bridge heartbeat is older than the staleness threshold.
+    """
+    baseline = parse_timestamp(record.get("supervisedAt")) or parse_timestamp(
+        record.get("createdAt")
+    )
+    if baseline is None:
+        return False
+    stored = record.get("supervisionTimeoutMs")
+    if isinstance(stored, bool) or not isinstance(stored, (int, float)) or stored <= 0:
+        bound_s = WAIT_TIMEOUT_MS / 1000.0
+    else:
+        bound_s = stored / 1000.0
+    threshold = SUPERVISION_STALE_MULTIPLIER * bound_s + SUPERVISION_STALE_SLACK_S
+    return now - baseline > threshold
+
+
+def reap_stale_supervision(
+    session_id_value: str,
+    *,
+    grace_s: float = SESSION_REAP_GRACE_S,
+    confirm_s: float = SESSION_REAP_CONFIRM_S,
+) -> ReapResult:
+    """Reap a live session's Jobs whose Bridge has stopped supervising them.
+
+    A Job must not outlive its Bridge (ADR 0003/0004, amended 2026-07-31). The
+    session hooks call this in-process; it marks `interrupted`
+    (`SUPERVISION_REAP_REASON`) every still-active Job this session owns whose
+    Bridge heartbeat has aged past the staleness threshold — the Bridge is
+    deemed dead, or to have abandoned its poll loop (deliberately
+    indistinguishable). The Thread is stranded (resume is Bridge-only); continuing
+    is a fresh `/chinamax:task`.
+
+    Sweep scope (decision 1): only records this session owns (``sessionId``) that
+    carry a ``bridgeName`` (a bridgeless direct dispatch was never supervised —
+    nothing stamps it, and reaping it off ``createdAt`` would kill a healthy
+    long-running worker) AND are still `is_active` (a DERIVED-`interrupted` crash
+    keeps its resumable Thread; the Bridge stops stamping the moment its poll
+    reads terminal, so staleness alone cannot tell "Bridge dead" from "Job
+    crashed, Bridge idle").
+
+    Each stale candidate is RE-READ fresh before it is killed and the whole
+    predicate re-run: the `load_records` snapshot ages while earlier candidates
+    are killed (up to ~``confirm_s`` each), and a Bridge that stamped in that gap
+    must win.
+
+    Args:
+        session_id_value: The live session whose Bridges are supervised.
+        grace_s: SIGTERM grace for each kill.
+        confirm_s: SIGKILL-confirm bound for each kill.
+
+    Returns:
+        The `ReapResult`.
+    """
+    result = ReapResult([], [], [])
+    now = time.time()
+    for store in iter_workspace_stores():
+        for record in _stored_active_records(store):
+            if record.get("sessionId") != session_id_value:
+                continue
+            if not record.get("bridgeName") or not is_active(record):
+                continue
+            if not _supervision_is_stale(record, now):
+                continue
+            fresh = store.try_read(record["id"])
+            if fresh is None or not fresh.get("bridgeName") or not is_active(fresh):
+                continue
+            if not _supervision_is_stale(fresh, time.time()):
+                continue
+            marked, survivors = _reap_record(
+                store,
+                fresh,
+                STATUS_INTERRUPTED,
+                SUPERVISION_REAP_REASON,
+                grace_s,
+                confirm_s,
+            )
+            if survivors:
+                result.survived.append((fresh["id"], survivors))
+            elif marked is not None:
+                result.reaped.append(marked)
+    return result
 
 
 def make_dir(path: Path) -> Path:

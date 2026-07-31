@@ -12,6 +12,7 @@ from chinamax import state
 from chinamax.__main__ import CANCEL_REASON, main
 from conftest import (
     REPORT_PAYLOAD,
+    aged,
     bash_script,
     build_record,
     dead_pid,
@@ -185,3 +186,172 @@ def test_reap_orphans_interrupts_dead_sessions(dispatch_env, capsys):
     assert ownerless in err
     assert state.read_session_registry("DEAD") is None
     assert state.read_session_registry("LIVE") is not None
+
+
+# --- reap_stale_supervision: a Job must not outlive its Bridge (ADR 0003/0004) ---
+#: A supervisionTimeoutMs whose threshold (2×120 + 10 = 250 s) a 300 s-old stamp
+#: clears, so the reap fires; the fallback 900 s ceiling's 1810 s does not.
+STALE_BOUND_MS = 120_000
+
+
+def test_stale_supervision_reaped(dispatch_env):
+    """A Bridge-owned active Job whose supervision stamp has aged out is reaped:
+    marked `interrupted` with errorMessage `bridge terminated`."""
+    env = dispatch_env()
+    store = env.store
+    job_id = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-glm-x",
+        supervision_timeout_ms=STALE_BOUND_MS, supervised_at=aged(300),
+    )
+
+    result = state.reap_stale_supervision("S")
+    assert [record["id"] for record in result.reaped] == [job_id]
+    reaped = store.read(job_id)
+    assert reaped["status"] == state.STATUS_INTERRUPTED
+    assert reaped["errorMessage"] == "bridge terminated"
+    assert reaped["errorMessage"] == state.SUPERVISION_REAP_REASON
+
+
+def test_fresh_supervision_untouched(dispatch_env):
+    """A recently-stamped Bridge is alive; its Job is left running."""
+    env = dispatch_env()
+    store = env.store
+    job_id = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-glm-x",
+        supervision_timeout_ms=STALE_BOUND_MS, supervised_at=aged(10),
+    )
+    assert state.reap_stale_supervision("S").reaped == []
+    assert store.read(job_id)["status"] == state.STATUS_RUNNING
+
+
+def test_supervision_bound_fallback_untouched(dispatch_env):
+    """A garbage or non-positive stored bound (0, True) falls back to the 900 s
+    ceiling, so a 300 s-old stamp is NOT stale and the Job is spared."""
+    env = dispatch_env()
+    store = env.store
+    zero = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-a",
+        supervision_timeout_ms=0, supervised_at=aged(300),
+    )
+    truthy = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-b",
+        supervision_timeout_ms=True, supervised_at=aged(300),
+    )
+    assert state.reap_stale_supervision("S").reaped == []
+    assert store.read(zero)["status"] == state.STATUS_RUNNING
+    assert store.read(truthy)["status"] == state.STATUS_RUNNING
+
+
+def test_result_and_steer_render_bridge_terminated(dispatch_env, capsys):
+    """`result` and `steer` on a supervision-reaped Job render the bridge-
+    terminated wording, never the dead-session "owning Claude session ended"."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    job_id = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-glm-x",
+        supervision_timeout_ms=STALE_BOUND_MS, supervised_at=aged(300),
+    )
+    assert state.reap_stale_supervision("S").reaped  # it was reaped
+
+    assert main(["result", job_id, "--workspace", workspace]) == 0
+    out = capsys.readouterr().out
+    assert "Bridge" in out and "terminated" in out.lower()
+    assert "owning Claude session ended" not in out
+
+    assert main(["steer", "--workspace", workspace, job_id, "--", "keep going"]) == 1
+    err = capsys.readouterr().err
+    assert "Bridge" in err
+    assert "owning Claude session ended" not in err
+
+
+def test_supervision_createdat_baseline(dispatch_env):
+    """With no stamp the baseline is ``createdAt``: a fresh dispatch is spared,
+    one older than 2×WAIT_TIMEOUT_MS/1000 + 10 s is reaped."""
+    env = dispatch_env()
+    store = env.store
+    fresh = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-fresh",
+    )
+    old = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-old",
+    )
+    store.update(old, {"createdAt": aged(2000)}, touch=False)
+
+    reaped_ids = [record["id"] for record in state.reap_stale_supervision("S").reaped]
+    assert old in reaped_ids
+    assert fresh not in reaped_ids
+    assert store.read(old)["status"] == state.STATUS_INTERRUPTED
+    assert store.read(fresh)["status"] == state.STATUS_RUNNING
+
+
+def test_supervision_other_session_and_terminal_untouched(dispatch_env):
+    """A stale stamp owned by a DIFFERENT session, and a terminal record, are both
+    outside this session's sweep."""
+    env = dispatch_env()
+    store = env.store
+    other = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="OTHER", bridge_name="chinamax-other",
+        supervision_timeout_ms=STALE_BOUND_MS, supervised_at=aged(300),
+    )
+    terminal = build_record(
+        store, workspace=env.workspace, status=state.STATUS_COMPLETED,
+        completed_at=state.utc_now(), session_id="S", bridge_name="chinamax-done",
+        supervision_timeout_ms=STALE_BOUND_MS, supervised_at=aged(300),
+    )
+    assert state.reap_stale_supervision("S").reaped == []
+    assert store.read(other)["status"] == state.STATUS_RUNNING
+    assert store.read(terminal)["status"] == state.STATUS_COMPLETED
+
+
+def test_supervision_bridgeless_untouched(dispatch_env):
+    """A direct dispatch (no bridgeName) is never supervised — even stale by
+    createdAt, the sweep skips it (killing it off createdAt would kill a healthy
+    long-running worker)."""
+    env = dispatch_env()
+    store = env.store
+    job_id = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING, session_id="S",
+    )
+    store.update(job_id, {"createdAt": aged(2000)}, touch=False)
+    assert state.reap_stale_supervision("S").reaped == []
+    assert store.read(job_id)["status"] == state.STATUS_RUNNING
+
+
+def test_supervision_derived_interrupted_crash_untouched(dispatch_env):
+    """A DERIVED-`interrupted` crash (stored running, dead pid, heartbeat aged
+    past the 60 s grace) is outside the `is_active` scope: a stale stamp must not
+    reap it, so its Thread stays resumable."""
+    env = dispatch_env()
+    store = env.store
+    job_id = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-crash",
+        pid=dead_pid(), updated_at=aged(120),
+        supervision_timeout_ms=STALE_BOUND_MS, supervised_at=aged(300),
+    )
+    assert state.reap_stale_supervision("S").reaped == []
+    # The STORED status stays `running` — the crash keeps its resumable Thread.
+    assert store.read(job_id)["status"] == state.STATUS_RUNNING
+
+
+def test_supervision_unparsable_createdat_untouched(dispatch_env):
+    """With no stamp and an unparsable ``createdAt``, the baseline does not parse
+    and the record is never treated as stale (fail toward not killing)."""
+    env = dispatch_env()
+    store = env.store
+    job_id = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING,
+        session_id="S", bridge_name="chinamax-bad",
+    )
+    store.update(job_id, {"createdAt": "not-a-timestamp"}, touch=False)
+    assert state.reap_stale_supervision("S").reaped == []
+    assert store.read(job_id)["status"] == state.STATUS_RUNNING

@@ -5,7 +5,7 @@ A Claude Code plugin that exposes non-Claude worker models (DeepSeek, MiMo, GLM,
 ## Language
 
 **Bridge Agent**:
-The Claude-facing persistent teammate — agent type `chinamax:chinamax`, exactly one instance per Thread, named `chinamax-<profile>-<task-slug>` (a human-readable task slug, never a random suffix) — that dispatches a task to the Runtime and then serves its Thread for the Thread's whole life: it classifies every later operator message (Steer while the Job runs; resume when it has ended; cancel on explicit abandon intent; a refusal when the ask cannot be honored inside its Thread), always waits for the resulting Job to end, and delivers exactly one Relay per Job it supervises. It stays silent otherwise and never edits files, runs the task itself, or spawns another agent.
+The Claude-facing persistent teammate — agent type `chinamax:chinamax`, exactly one instance per Thread, named `chinamax-<profile>-<task-slug>` (a human-readable task slug, never a random suffix) — that dispatches a task to the Runtime and then serves its Thread for the Thread's whole life: it classifies every later operator message (Steer while the Job runs; resume when it has ended; cancel on explicit abandon intent; a refusal when the ask cannot be honored inside its Thread), always waits for the resulting Job to end, and delivers exactly one Relay per Job it supervises. It stays silent otherwise and never edits files, runs the task itself, or spawns another agent. A Bridge that dies or abandons its poll loop forfeits its Jobs: each is reaped (interrupted) and its Thread stranded, continued only by a fresh dispatch.
 _Avoid_: wrapper agent, proxy, "the deepseek agent" (DeepSeek is one Profile among many)
 
 **Relay**:
@@ -21,7 +21,7 @@ A named provider configuration — base URL, model string, and API-key source �
 _Avoid_: provider (the company), model (one field of a profile)
 
 **Job**:
-One durable unit of dispatched work with persistent state, logs, and a lifecycle (queued, running, completed, failed, cancelled; a crashed worker's Job is reported as interrupted). Owned by the Claude session that started it and never outlives it: session end — including `/clear` — kills its worker, and a Job orphaned by a crashed session is reaped, never resumed.
+One durable unit of dispatched work with persistent state, logs, and a lifecycle (queued, running, completed, failed, cancelled; a crashed worker's Job is reported as interrupted). Owned by the Claude session that started it AND supervised by its Bridge, and never outlives either: session end — including `/clear` — kills its worker, a Job orphaned by a crashed session is reaped, never resumed, and a Job whose Bridge dies or stops serving it is likewise reaped (interrupted) and its Thread stranded.
 _Avoid_: task (a task is what the user asks for; a job is its tracked execution)
 
 **Thread**:
