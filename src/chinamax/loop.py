@@ -47,12 +47,10 @@ _STEER_EXCERPT_LIMIT = 120
 #: Thread but still queued. Test-only; nothing production reads it.
 STEER_ABORT_VARIABLE = "CHINAMAX_STEER_ABORT"
 
-SYSTEM_TEMPLATE = """You are a worker model executing one task inside the workspace {workspace}.
-
-{posture}
+SYSTEM_TEMPLATE = """You are a worker model executing one task inside a confined workspace.
 
 Every tool is confined to that workspace: the file tools reject any path that \
-resolves outside it, and bash runs with {workspace} as its working directory. \
+resolves outside it, and bash runs with the workspace as its working directory. \
 Commands that destroy data or leave the machine are refused, and each one is \
 bounded by a timeout whose expiry comes back as an observation rather than \
 ending the job.
@@ -61,7 +59,11 @@ When the task is finished — whether it succeeded or not — you MUST call the 
 report_result tool. That call is the only way to end this job, and its response \
 field is relayed back verbatim, in full, as the job's result: put your complete \
 final answer in response — everything the operator should read, exactly as you \
-want them to read it. It is your final message, not a summary of one."""
+want them to read it. It is your final message, not a summary of one.
+
+Your workspace is {workspace}.
+
+{posture}"""
 
 WRITE_POSTURE = "You may create and modify files in this workspace."
 READ_ONLY_POSTURE = (
@@ -147,8 +149,11 @@ def run_loop(
             _drain_steers(steer_dir, consumed, transcript, messages, reporter)
             turn_number += 1
             _report(reporter, PHASE_CALLING_MODEL, f"turn {turn_number}: calling {profile.model}")
-            content = _stream_turn(client, profile, spec, registry, messages, config, transcript)
+            content, usage = _stream_turn(
+                client, profile, spec, registry, messages, config, transcript
+            )
             _append(transcript, messages, "assistant", content)
+            _emit_usage(reporter, turn_number, usage)
 
             tool_uses = [block for block in content if block.get("type") == "tool_use"]
             if not tool_uses:
@@ -308,12 +313,14 @@ def _stream_turn(
     messages: list[dict],
     config: LoopConfig,
     transcript: Transcript,
-) -> list[dict]:
+) -> tuple[list[dict], dict | None]:
     """Stream one assistant turn through the supervision ladder.
 
     The ladder replays a snapshot of ``messages`` on every attempt and returns
     only a turn that reached ``message_stop``, so a retried attempt contributes
     nothing here — and nothing to the canonical history the caller appends to.
+    The usage returned is that ``message_stop`` message's, so a retried attempt
+    contributes no usage and exactly-once accounting is automatic.
     """
     message = stream_with_ladder(
         client,
@@ -325,7 +332,8 @@ def _stream_turn(
         config=config,
         on_retry=transcript.append_retry,
     )
-    return [_block_to_dict(block) for block in message.content]
+    content = [_block_to_dict(block) for block in message.content]
+    return content, _usage_to_dict(message)
 
 
 def _run_tool_uses(
@@ -442,6 +450,43 @@ def _block_to_dict(block: object) -> dict:
     """Convert an SDK content block to a plain, JSON-serializable dict."""
     data = block.model_dump(mode="json")
     return {key: value for key, value in data.items() if value is not None}
+
+
+def _usage_to_dict(message: object) -> dict | None:
+    """Return the completed message's provider-reported usage, None values dropped.
+
+    Defensive: an Anthropic-compatible provider is not guaranteed to send usage,
+    so an absent attribute yields None rather than a crash. Extra provider fields
+    (service_tier etc.) flow through deliberately — mode="json" keeps them
+    serializable.
+    """
+    usage = getattr(message, "usage", None)
+    if usage is None:
+        return None
+    data = usage.model_dump(mode="json")
+    return {key: value for key, value in data.items() if value is not None}
+
+
+def _emit_usage(
+    reporter: Callable[[str, str], None] | None, turn_number: int, usage: dict | None
+) -> None:
+    """Emit one turn's provider-reported usage: stderr AND the Job log.
+
+    stderr reaches the exec path (and the spawn log on a detached worker); the
+    reporter mirror is what lands in jobs/<id>.log — the worker's stderr goes to
+    the SPAWN log, not the Job log. ``PHASE_CALLING_MODEL`` keeps the record's
+    stored phase honest mid-run (``reporting`` would lie to ``status``); the
+    sorted keys make ``"event": "usage"`` a stable grep literal in the log.
+    """
+    if not usage:
+        return
+    details = {"turn": turn_number, **usage}
+    emit_event("usage", details)
+    _report(
+        reporter,
+        PHASE_CALLING_MODEL,
+        json.dumps({"event": "usage", **details}, sort_keys=True),
+    )
 
 
 def _append(

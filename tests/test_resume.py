@@ -15,6 +15,7 @@ from conftest import (
     bash_then_report_script,
     build_record,
     report_turn,
+    wait_for,
     wait_for_status,
 )
 
@@ -85,6 +86,38 @@ def test_resume_continues_thread(dispatch_env, capsys):
     assert record["write"] is False
     assert record["request"]["write"] is False
     assert record["request"]["workspaceRoot"] == finished["request"]["workspaceRoot"]
+
+
+def test_resume_request_shares_cache_prefix(dispatch_env):
+    """The provider's cache prefix survives the resume boundary intact.
+
+    A resume mints a new Job id for bookkeeping, but no Job id exists in any
+    request byte — the Thread's prefix is what the provider caches on. The
+    resumed Job's first request must replay the source's last request as its
+    prefix, under the same system and tools.
+    """
+    env = dispatch_env(bash_then_report_script())
+    source_provider = env.providers[PROFILE]
+    code, source = env.dispatch()
+    assert code == 0
+    store = env.store
+    workspace = str(env.workspace)
+    finished = wait_for_status(store, source, state.TERMINAL_STATUSES)
+    assert finished["status"] == state.STATUS_COMPLETED, finished.get("errorMessage")
+    last = source_provider.requests[-1]["body"]
+
+    # A fresh provider: the source Job exhausted the first one's script.
+    resumed_provider = env.bind([report_turn()])
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    assert wait_for(lambda: bool(resumed_provider.requests))
+    first = resumed_provider.requests[0]["body"]
+
+    assert first["system"] == last["system"]
+    assert first["system"]
+    assert first["tools"] == last["tools"]
+    assert first["model"] == last["model"]
+    assert first["max_tokens"] == last["max_tokens"]
+    assert first["messages"][: len(last["messages"])] == last["messages"]
 
 
 def test_bare_resume_refuses_while_active(dispatch_env, capsys):

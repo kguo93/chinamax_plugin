@@ -80,6 +80,26 @@ def test_logs_prints_the_progress_log_and_tails_it(dispatch_env, capsys):
     assert tailed.splitlines() == whole.splitlines()[-2:]
 
 
+def test_usage_lands_in_job_log(dispatch_env):
+    """Each completed turn's usage reaches the Job log through the reporter mirror.
+
+    The detached worker's stderr goes to the SPAWN log, so the usage counters
+    reach the Job log only because the reporter mirrors them there.
+    """
+    env = dispatch_env(bash_then_report_script())
+    code, job_id = env.dispatch()
+    assert code == 0
+    store = env.store
+    record = wait_for_status(store, job_id, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+
+    log = store.log_path(job_id).read_text(encoding="utf-8")
+    usage_lines = [line for line in log.splitlines() if '"event": "usage"' in line]
+    assert len(usage_lines) == 2
+    assert len([line for line in usage_lines if '"turn": 1' in line]) == 1
+    assert len([line for line in usage_lines if '"turn": 2' in line]) == 1
+
+
 def test_log_lines_are_escaped_to_one_line_each(dispatch_env, capsys):
     """Control characters in tool output can never forge a log entry."""
     env = dispatch_env()

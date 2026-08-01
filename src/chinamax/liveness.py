@@ -88,8 +88,8 @@ def emit_event(name: str, details: dict) -> None:
     """Emit one structured progress event as a single JSON line.
 
     stderr is the channel in this slice; a detached worker is spawned with its
-    stderr redirected into the Job log, so the reporter is what survives
-    detachment.
+    stderr redirected into the Job's spawn log, so the reporter is the channel
+    that reaches the Job log.
 
     Args:
         name: The event name (``retry``, ``failure``, ``warning``).

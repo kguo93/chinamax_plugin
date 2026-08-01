@@ -38,12 +38,17 @@ def tool_use_block(block_id: str, name: str, value: dict) -> dict:
     return {"type": "tool_use", "id": block_id, "name": name, "input": value}
 
 
-def turn(blocks: list[dict], stop_reason: str | None = None) -> dict:
+def turn(
+    blocks: list[dict], stop_reason: str | None = None, usage: dict | None = None
+) -> dict:
     """Build one scripted assistant turn.
 
     Args:
         blocks: The turn's content blocks.
         stop_reason: Overrides the reason derived from the blocks.
+        usage: Extra usage fields merged into the message_start usage (e.g. the
+            cache counters); the SDK accumulator carries them to the final
+            message.
 
     Returns:
         A scripted turn the server can serve.
@@ -52,7 +57,10 @@ def turn(blocks: list[dict], stop_reason: str | None = None) -> dict:
         stop_reason = (
             "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
         )
-    return {"blocks": blocks, "stop_reason": stop_reason}
+    scripted = {"blocks": blocks, "stop_reason": stop_reason}
+    if usage:
+        scripted["usage"] = dict(usage)
+    return scripted
 
 
 def status_fault(
@@ -319,8 +327,14 @@ class _Handler(BaseHTTPRequestHandler):
             if self._provider.closing.wait(PING_INTERVAL_S):
                 return
 
-    def _open_stream(self, body: dict) -> None:
-        """Send the 200 and the ``message_start`` every scripted stream opens with."""
+    def _open_stream(self, body: dict, usage: dict | None = None) -> None:
+        """Send the 200 and the ``message_start`` every scripted stream opens with.
+
+        Scripted ``usage`` fields (the cache counters) are merged over the default
+        message_start usage; the SDK accumulator seeds from this event and carries
+        them to the final message. Fault paths pass no usage, so an aborted attempt
+        carries only the default counters.
+        """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.end_headers()
@@ -336,7 +350,7 @@ class _Handler(BaseHTTPRequestHandler):
                     "content": [],
                     "stop_reason": None,
                     "stop_sequence": None,
-                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                    "usage": {"input_tokens": 1, "output_tokens": 1, **(usage or {})},
                 },
             },
         )
@@ -377,7 +391,7 @@ class _Handler(BaseHTTPRequestHandler):
         )
 
     def _send_stream(self, body: dict, scripted: dict) -> None:
-        self._open_stream(body)
+        self._open_stream(body, scripted.get("usage"))
         for index, block in enumerate(scripted["blocks"]):
             self._send_block(index, block)
         self._event(
