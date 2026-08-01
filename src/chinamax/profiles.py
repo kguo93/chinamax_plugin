@@ -6,8 +6,10 @@ overlays it field by field. There is no default Profile.
 
 Extending to more models: any provider that implements the Anthropic-compatible
 Messages API becomes a Profile through the overlay — a row with `name`,
-`base_url` (the provider's `/anthropic` endpoint), `model`, and `api_key_env` —
-plus the matching key line in `~/.claude/model-keys.env`. The setup doctor
+`base_url` (the provider's `/anthropic` endpoint), `model`, and `api_key_env`,
+optionally `request_extras` (a dict of extra Messages-request kwargs, e.g. an
+always-on reasoning knob, merged verbatim into every request) — plus the
+matching key line in `~/.claude/model-keys.env`. The setup doctor
 scaffolds that key file from the RESOLVED rows (`doctor.key_template_text`
 iterates `load_profiles()`), so a new overlay Profile's key line appears in the
 next scaffold with no code change here.
@@ -17,15 +19,32 @@ from __future__ import annotations
 
 import json
 import shlex
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from importlib import resources
 from pathlib import Path
 
 from chinamax import ChinamaxError
 
 DEFAULT_MAX_TOKENS = 32000
-ROW_FIELDS = ("name", "base_url", "model", "api_key_env", "max_tokens")
+ROW_FIELDS = ("name", "base_url", "model", "api_key_env", "max_tokens", "request_extras")
 REQUIRED_ROW_FIELDS = ("base_url", "model", "api_key_env")
+#: Request keys a Profile's ``request_extras`` may never carry — checked at the
+#: top level and one level inside an ``extra_body`` value. The first five are the
+#: Runtime-built request fields; the last four are client/transport-policy kwargs:
+#: ``timeout`` would override the watchdog-backstop client timeout, ``extra_headers``
+#: the Profile's bearer auth, ``extra_query`` its query policy, and ``stream`` the
+#: streaming contract (decision 3 records the per-key mechanism).
+RESERVED_REQUEST_KEYS = (
+    "model",
+    "max_tokens",
+    "system",
+    "tools",
+    "messages",
+    "stream",
+    "timeout",
+    "extra_headers",
+    "extra_query",
+)
 OVERLAY_FILENAME = "chinamax-profiles.json"
 KEYS_FILENAME = "model-keys.env"
 
@@ -39,6 +58,7 @@ class Profile:
     model: str
     api_key_env: str
     max_tokens: int = DEFAULT_MAX_TOKENS
+    request_extras: dict = field(default_factory=dict)
 
 
 def overlay_path() -> Path:
@@ -176,7 +196,9 @@ def _read_overlay(path: Path) -> list[dict]:
 
     Raises:
         ChinamaxError: On malformed JSON, a bad row shape, a duplicate name, an
-            unknown field, or a non-positive/non-integer ``max_tokens``.
+            unknown field, a non-positive/non-integer ``max_tokens``, or a
+            ``request_extras`` that is not a JSON object or carries a reserved
+            request key (at the top level or inside an ``extra_body`` value).
     """
     try:
         rows = json.loads(path.read_text(encoding="utf-8"))
@@ -210,5 +232,22 @@ def _read_overlay(path: Path) -> list[dict]:
             if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
                 raise ChinamaxError(
                     f"{path}: row {name!r} field 'max_tokens' must be a positive integer"
+                )
+        if "request_extras" in row:
+            extras = row["request_extras"]
+            if not isinstance(extras, dict):
+                raise ChinamaxError(
+                    f"{path}: row {name!r} field 'request_extras' must be a JSON object"
+                )
+            # The SDK merges an ``extra_body`` value into the JSON body ROOT with
+            # precedence, so a reserved key nested there overrides the Runtime on
+            # the wire exactly like a top-level one — check both levels.
+            bad = set(extras) & set(RESERVED_REQUEST_KEYS)
+            if isinstance(extras.get("extra_body"), dict):
+                bad |= set(extras["extra_body"]) & set(RESERVED_REQUEST_KEYS)
+            if bad:
+                raise ChinamaxError(
+                    f"{path}: row {name!r} 'request_extras' may not set reserved "
+                    f"key(s): {', '.join(sorted(bad))}"
                 )
     return rows

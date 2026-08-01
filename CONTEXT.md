@@ -17,7 +17,7 @@ The custom agent-loop process that owns the provider API conversation, tool exec
 _Avoid_: worker CLI, companion (reserve "companion" for the Codex plugin's runtime)
 
 **Profile**:
-A named provider configuration — base URL, model string, and API-key source — that a Job runs against (e.g. `deepseek`, `kimi`, `minimax`). One Bridge Agent serves all Profiles; a dispatch picks its Profile.
+A named provider configuration — base URL, model string, API-key source, and fixed request tuning (reasoning always on, at the provider's ceiling) — that a Job runs against (e.g. `deepseek`, `kimi`, `minimax`). One Bridge Agent serves all Profiles; a dispatch picks its Profile.
 _Avoid_: provider (the company), model (one field of a profile)
 
 **Job**:
@@ -33,5 +33,5 @@ A message sent to a running Job — an operator message the Bridge Agent classif
 _Avoid_: interrupt (cancellation is a different action), follow-up (a follow-up starts a new turn on a finished Thread)
 
 **Pro**:
-The only model tier the plugin offers, for every provider — each Profile pins its provider's strongest tier (deepseek-v4-pro, mimo-v2.5-pro, glm-5.2, MiniMax-M3, kimi-k3). Flash/ultraspeed tiers are never implemented as Profiles.
+The only model tier the plugin offers, for every provider — each Profile pins its provider's strongest tier (deepseek-v4-pro, mimo-v2.5-pro, glm-5.2, MiniMax-M3, kimi-k3) at that provider's maximum reasoning effort. Flash/ultraspeed tiers are never implemented as Profiles.
 _Avoid_: flash, ultraspeed (never offered)

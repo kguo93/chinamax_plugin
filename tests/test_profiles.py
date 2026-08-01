@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from chinamax import profiles
+from chinamax import ChinamaxError, profiles
 from conftest import OMIT, bash_then_report_script, write_keys, write_overlay
 
 SHIPPED = {
@@ -15,16 +15,35 @@ SHIPPED = {
     "kimi": ("https://api.moonshot.ai/anthropic", "kimi-k3", "KIMI_API_KEY"),
 }
 
+#: The exact always-on reasoning knob each shipped row ships (ground truth,
+#: live-verified 2026-08-01); every shipped Profile carries one.
+SHIPPED_EXTRAS = {
+    "deepseek": {"extra_body": {"reasoning": {"effort": "max"}}},
+    "mimo": {"extra_body": {"reasoning_effort": "high"}},
+    "glm": {"thinking": {"type": "enabled"}},
+    "minimax": {"thinking": {"type": "adaptive"}},
+    "kimi": {"extra_body": {"reasoning_effort": "max"}},
+}
+
 
 def test_five_shipped_rows():
     """Resolution with no overlay lists exactly the five pro Profiles."""
     resolved = profiles.load_profiles()
 
     assert set(resolved) == set(SHIPPED)
+    reserved = set(profiles.RESERVED_REQUEST_KEYS)
     for name, expected in SHIPPED.items():
         row = resolved[name]
         assert (row.base_url, row.model, row.api_key_env) == expected
         assert row.max_tokens == profiles.DEFAULT_MAX_TOKENS
+        assert row.request_extras == SHIPPED_EXTRAS[name]
+        # Shipped rows bypass _read_overlay (trusted package data), so THIS test
+        # is the reserved-key guard: no shipped row's extras collide with a
+        # reserved request key at the top level OR inside an extra_body value.
+        assert not set(row.request_extras) & reserved
+        extra_body = row.request_extras.get("extra_body")
+        if isinstance(extra_body, dict):
+            assert not set(extra_body) & reserved
 
 
 def test_override_merge(keyless_home):
@@ -65,6 +84,93 @@ def test_override_adds_and_partially_merges_row(keyless_home):
     assert set(resolved) == set(SHIPPED) | {"local"}
     assert resolved["local"].base_url == "http://127.0.0.1:9/anthropic"
     assert resolved["local"].max_tokens == profiles.DEFAULT_MAX_TOKENS
+
+
+def test_overlay_replaces_request_extras_wholesale(keyless_home):
+    """An overlay row's request_extras REPLACES the shipped dict — never merges."""
+    write_overlay(
+        keyless_home,
+        [{"name": "deepseek", "request_extras": {"thinking": {"type": "enabled"}}}],
+    )
+
+    resolved = profiles.load_profiles()
+
+    assert resolved["deepseek"].request_extras == {"thinking": {"type": "enabled"}}
+    # The shipped extra_body nesting is GONE, not merged under the new dict.
+    assert "extra_body" not in resolved["deepseek"].request_extras
+
+
+def test_overlay_empty_request_extras_disables_reasoning(keyless_home):
+    """An explicit empty object turns a shipped Profile's reasoning off."""
+    write_overlay(keyless_home, [{"name": "deepseek", "request_extras": {}}])
+
+    assert profiles.load_profiles()["deepseek"].request_extras == {}
+
+
+def test_overlay_non_object_request_extras_rejected(keyless_home):
+    """A non-object request_extras fails overlay load, naming the row."""
+    write_overlay(keyless_home, [{"name": "deepseek", "request_extras": "max"}])
+
+    with pytest.raises(ChinamaxError, match="deepseek.*must be a JSON object"):
+        profiles.load_profiles()
+
+
+def test_overlay_reserved_request_extras_key_rejected(keyless_home):
+    """A top-level reserved key in request_extras fails overlay load, naming it."""
+    write_overlay(keyless_home, [{"name": "deepseek", "request_extras": {"max_tokens": 64}}])
+
+    with pytest.raises(ChinamaxError, match="reserved key.*max_tokens"):
+        profiles.load_profiles()
+
+
+def test_overlay_nested_reserved_extra_body_key_rejected(keyless_home):
+    """A reserved key nested inside extra_body is rejected too (the wire backdoor)."""
+    write_overlay(
+        keyless_home,
+        [{"name": "deepseek", "request_extras": {"extra_body": {"max_tokens": 64}}}],
+    )
+
+    with pytest.raises(ChinamaxError, match="reserved key.*max_tokens"):
+        profiles.load_profiles()
+
+
+def test_overlay_reserved_client_policy_key_rejected(keyless_home):
+    """A client/transport-policy key (timeout) is reserved, naming it on rejection."""
+    write_overlay(keyless_home, [{"name": "deepseek", "request_extras": {"timeout": 5}}])
+
+    with pytest.raises(ChinamaxError, match="reserved key.*timeout"):
+        profiles.load_profiles()
+
+
+def test_overlay_reserved_credential_channel_key_rejected(keyless_home):
+    """extra_headers is reserved so extras can never carry credentials."""
+    write_overlay(
+        keyless_home,
+        [{"name": "deepseek", "request_extras": {"extra_headers": {"authorization": "x"}}}],
+    )
+
+    with pytest.raises(ChinamaxError, match="reserved key.*extra_headers"):
+        profiles.load_profiles()
+
+
+def test_overlay_new_profile_carries_request_extras(keyless_home):
+    """A brand-new overlay Profile may carry request_extras (the field is optional)."""
+    write_overlay(
+        keyless_home,
+        [
+            {
+                "name": "local",
+                "base_url": "http://127.0.0.1:9/anthropic",
+                "model": "local-1",
+                "api_key_env": "LOCAL_API_KEY",
+                "request_extras": {"thinking": {"type": "enabled"}},
+            }
+        ],
+    )
+
+    resolved = profiles.load_profiles()
+
+    assert resolved["local"].request_extras == {"thinking": {"type": "enabled"}}
 
 
 def test_keys_resolved_from_env_file(keyless_home):

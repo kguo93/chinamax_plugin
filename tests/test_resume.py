@@ -9,15 +9,19 @@ from chinamax.__main__ import DEFAULT_RESUME_PROMPT, main
 from chinamax.transcript import read_messages, write_messages
 from conftest import (
     PROFILE,
+    REPORT_PAYLOAD,
     REPORT_TOOL_USE_ID,
     aged,
     assert_wire_shape,
     bash_then_report_script,
     build_record,
     report_turn,
+    tool_use_block,
+    turn,
     wait_for,
     wait_for_status,
 )
+from fake_provider import thinking_block
 
 FOLLOW_UP = "Now summarize what you changed."
 
@@ -118,6 +122,37 @@ def test_resume_request_shares_cache_prefix(dispatch_env):
     assert first["model"] == last["model"]
     assert first["max_tokens"] == last["max_tokens"]
     assert first["messages"][: len(last["messages"])] == last["messages"]
+
+
+def test_resume_replays_thinking_block_across_boundary(dispatch_env):
+    """A source Thread's thinking block replays verbatim in the resumed Job's
+    first request, across the Job boundary (thinking is ordinary history)."""
+    reasoning = thinking_block("Source reasoning.", "sig-src")
+    env = dispatch_env(
+        [turn([reasoning, tool_use_block(REPORT_TOOL_USE_ID, "report_result", REPORT_PAYLOAD)])]
+    )
+    code, source = env.dispatch()
+    assert code == 0
+    store = env.store
+    workspace = str(env.workspace)
+    finished = wait_for_status(store, source, state.TERMINAL_STATUSES)
+    assert finished["status"] == state.STATUS_COMPLETED, finished.get("errorMessage")
+
+    # A fresh provider: the source Job exhausted the first one's script.
+    resumed_provider = env.bind([report_turn()])
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    assert wait_for(lambda: bool(resumed_provider.requests))
+
+    sent = resumed_provider.requests[0]["body"]["messages"]
+    replayed = [
+        block
+        for message in sent
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "thinking"
+    ]
+    assert replayed == [
+        {"type": "thinking", "thinking": "Source reasoning.", "signature": "sig-src"}
+    ]
 
 
 def test_bare_resume_refuses_while_active(dispatch_env, capsys):

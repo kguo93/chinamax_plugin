@@ -329,6 +329,7 @@ def _stream_turn(
         system=_system_prompt(spec),
         tools=registry.schemas,
         messages=messages,
+        request_extras=profile.request_extras,
         config=config,
         on_retry=transcript.append_retry,
     )

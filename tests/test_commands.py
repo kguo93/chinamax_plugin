@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from chinamax.__main__ import build_parser, main, normalize_argv
-from conftest import SYNTHETIC_KEYS
+from conftest import SYNTHETIC_KEYS, write_overlay
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = REPO_ROOT / "commands"
@@ -42,7 +42,7 @@ def _bang_tokens(verb: str) -> list[str]:
 
 
 @pytest.mark.parametrize("verb", sorted(SAMPLE_ARGS))
-def test_each_command_maps_verb(verb, capsys):
+def test_each_command_maps_verb(verb, capsys, keyless_home):
     """Each command invokes its verb through the launcher, quoting "$ARGUMENTS",
     with flags the CLI's own parser accepts (and profiles never leaks a key)."""
     tokens = _bang_tokens(verb)
@@ -65,6 +65,17 @@ def test_each_command_maps_verb(verb, capsys):
         assert "PRESENT" in out or "MISSING" in out
         for value in SYNTHETIC_KEYS.values():
             assert value not in out, "profiles leaked an API key value"
+        # The shipped deepseek row shows its resolved extras, compact and sorted.
+        deepseek_row = next(line for line in out.splitlines() if line.startswith("deepseek"))
+        assert 'extras={"extra_body":{"reasoning":{"effort":"max"}}}' in deepseek_row
+
+        # An overlay that empties the extras drops the suffix (empty ⇒ omitted).
+        write_overlay(keyless_home, [{"name": "deepseek", "request_extras": {}}])
+        assert main(["profiles"]) == 0
+        deepseek_row = next(
+            line for line in capsys.readouterr().out.splitlines() if line.startswith("deepseek")
+        )
+        assert "extras=" not in deepseek_row
 
 
 def test_argument_normalization():

@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 # httpx is already the SDK's transport, but the Runtime imports it directly —
 # for the structured request timeout, and to classify the raw transport errors
 # that escape mid-stream without SDK wrapping — so it is declared, not assumed.
-dependencies = ["anthropic>=0.37,<1", "httpx>=0.25,<1"]
+dependencies = ["anthropic>=0.118,<1", "httpx>=0.25,<1"]
 
 [project.optional-dependencies]
 test = ["pytest"]

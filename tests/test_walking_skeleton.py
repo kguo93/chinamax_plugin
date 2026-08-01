@@ -29,8 +29,9 @@ from conftest import (
     tool_results,
     tool_use_block,
     turn,
+    write_overlay,
 )
-from fake_provider import eof_fault
+from fake_provider import eof_fault, thinking_block
 
 #: A cache-hit usage reading, mirroring a DeepSeek second request: the cached
 #: prefix (768 = 12x64) dominates the small uncached delta.
@@ -201,6 +202,86 @@ def test_request_prefix_stable_across_turns(job_env):
         assert first["tools"] == second["tools"]
         assert first["model"] == second["model"]
         assert first["max_tokens"] == second["max_tokens"]
+        assert second["messages"][: len(first["messages"])] == first["messages"]
+        assert len(second["messages"]) > len(first["messages"])
+
+
+@pytest.mark.parametrize(
+    "extras, present, absent",
+    [
+        # A `thinking` extra rides through verbatim as a body key.
+        (
+            {"thinking": {"type": "enabled"}},
+            {"thinking": {"type": "enabled"}},
+            ["extra_body", "reasoning_effort", "reasoning"],
+        ),
+        # An `extra_body` extra merges into the body ROOT — the bare key, never
+        # an `extra_body` wrapper.
+        (
+            {"extra_body": {"reasoning_effort": "high"}},
+            {"reasoning_effort": "high"},
+            ["extra_body", "thinking"],
+        ),
+        # An explicit empty extras: the no-reasoning request path.
+        ({}, {}, ["thinking", "extra_body", "reasoning_effort", "reasoning"]),
+    ],
+)
+def test_request_extras_merged_into_wire_body(job_env, keyless_home, extras, present, absent):
+    """A Profile's request_extras reach the wire body: `thinking` verbatim,
+    `extra_body` keys merged into the root, and `{}` adds nothing."""
+    env = job_env([report_turn()])
+    # One overlay row carrying the fake base_url AND the extras: write_overlay
+    # replaces the whole file, so the base_url must ride along or the Job would
+    # dispatch at the real endpoint.
+    write_overlay(
+        keyless_home,
+        [{"name": PROFILE, "base_url": env.fake.base_url, "request_extras": extras}],
+    )
+
+    assert env.run() == 0
+
+    body = env.requests[0]["body"]
+    for key, value in present.items():
+        assert body[key] == value
+    for key in absent:
+        assert key not in body
+
+
+def test_thinking_block_replayed_verbatim_next_turn(job_env, keyless_home):
+    """A returned thinking block persists in the Thread and replays verbatim,
+    and the request prefix stays stable with extras present."""
+    reasoning = thinking_block("Let me reason about this step.", "sig-xyz")
+    env = job_env(
+        [
+            turn([reasoning, tool_use_block(BASH_TOOL_USE_ID, "bash", {"command": BASH_COMMAND})]),
+            report_turn(),
+        ]
+    )
+    write_overlay(
+        keyless_home,
+        [{"name": PROFILE, "base_url": env.fake.base_url,
+          "request_extras": {"thinking": {"type": "enabled"}}}],
+    )
+
+    assert env.run() == 0
+
+    # Turn 2's request replays the assistant turn's thinking block byte-for-byte,
+    # signature included — thinking blocks are ordinary Thread history.
+    assistant = env.requests[1]["body"]["messages"][1]
+    assert assistant["role"] == "assistant"
+    assert assistant["content"][0] == {
+        "type": "thinking",
+        "thinking": "Let me reason about this step.",
+        "signature": "sig-xyz",
+    }
+    # The growing-prefix guarantee holds with extras present: the stable head and
+    # the constant `thinking` extra are identical across turns.
+    bodies = [request["body"] for request in env.requests]
+    assert len(bodies) == 2
+    for first, second in zip(bodies, bodies[1:]):
+        assert first["system"] == second["system"]
+        assert first["tools"] == second["tools"]
+        assert first["thinking"] == second["thinking"] == {"type": "enabled"}
         assert second["messages"][: len(first["messages"])] == first["messages"]
         assert len(second["messages"]) > len(first["messages"])
 

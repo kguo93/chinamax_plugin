@@ -131,3 +131,36 @@ no overlay: both completed. The hermetic suite is green (181) after the change.
 | minimax | `MiniMax-M3[1m]` | ✅ smoke |
 | glm | `glm-5.2` *(was `glm-5.2[1m]`)* | ✅ smoke on shipped file |
 | mimo | `mimo-v2.5-pro` *(was `mimo-v2.5-pro[1m]`)* | ✅ smoke on shipped file |
+
+## 2026-08-01 — always-on reasoning (`request_extras`) probe rounds
+
+Two in-session live probe rounds established the recorded basis for the per-Profile
+`request_extras` reasoning round (ADRs 0001/0006 amended). Installed SDK: **anthropic 0.118.0**.
+All five real provider endpoints were exercised. The probe scripts were throwaway (session
+scratchpad, never committed); this section is their recorded evidence.
+
+Per-profile `request_extras` shapes verified (the exact shipped values):
+
+| Profile | `request_extras` |
+|---|---|
+| deepseek | `{"extra_body": {"reasoning": {"effort": "max"}}}` |
+| mimo | `{"extra_body": {"reasoning_effort": "high"}}` (mimo's ceiling — no "max") |
+| glm | `{"thinking": {"type": "enabled"}}` (budget-less — `budget_tokens` omitted, accepted) |
+| minimax | `{"thinking": {"type": "adaptive"}}` (its only "on"; no effort dial) |
+| kimi | `{"extra_body": {"reasoning_effort": "max"}}` |
+
+- **Round 1 — raw SDK shapes** (2-turn tool-use probe, toy tool). Established the five shapes
+  above, the `{type: "thinking", thinking: <str>, signature: <str>}` block shape, and glm's
+  budget-less acceptance. `Messages.stream` (0.118.0) accepts both `thinking` and `extra_body`
+  kwargs (signature inspection); `extra_body` keys merge into the JSON body ROOT (the wire body
+  carries e.g. `"reasoning_effort"` beside `"model"`, never an `"extra_body"` wrapper).
+- **Round 2 — the plan's method, end-to-end** (load-bearing). The installed Runtime ran unmodified
+  except for the exact seam this round edits: `request_extras` merged LAST into the ladder's request
+  dict, giving requests byte-identical to the shipped `stream_with_ladder` merge. Per profile a real
+  Job ran through `execute_spec` — production system prompt, full tool registry, bearer auth, real
+  `Transcript`, `report_result` termination, real workspace. **All five profiles**: completed via
+  `report_result` with the expected response; 3 assistant turns each; a thinking block on EVERY turn
+  (minimax `adaptive` included); the final request replayed both prior thinking blocks **verbatim**
+  (dict equality, signatures included); the file artifact was correct; **zero ladder retries**; and
+  later-turn `usage` events showed non-zero `cache_read_input_tokens` (1024–1728) — the prefix cache
+  survives extras plus replayed thinking.

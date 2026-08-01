@@ -23,8 +23,9 @@ Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md
 - **Runtime** — the custom agent-loop process that owns the provider API
   conversation, tool execution, and safety controls for one task.
 - **Profile** — a named provider configuration (base URL, model string, API-key
-  source) a Job runs against. One Bridge Agent serves every Profile; a dispatch
-  picks one explicitly. There is no default Profile.
+  source, and fixed request tuning via `request_extras` — reasoning always on, at
+  the provider's ceiling) a Job runs against. One Bridge Agent serves every
+  Profile; a dispatch picks one explicitly. There is no default Profile.
 - **Job** — one durable unit of dispatched work with persistent state, logs, and a
   lifecycle (`queued`, `running`, `completed`, `failed`, `cancelled`; a crashed
   worker's Job reads as `interrupted`). It is **session-scoped**: it is killed when
@@ -93,6 +94,10 @@ only, one per provider:
 | `minimax` | `https://api.minimax.io/anthropic`     | `MiniMax-M3[1m]`      | `MINIMAX_API_KEY`  |
 | `kimi`    | `https://api.moonshot.ai/anthropic`    | `kimi-k3`             | `KIMI_API_KEY`     |
 
+Every shipped row also enables its provider's reasoning always-on at that
+provider's ceiling, carried as a `request_extras` dict merged into every request
+(deepseek/kimi max, mimo high, glm and minimax their respective "on").
+
 Run [`/chinamax:profiles`](#chinamaxprofiles) to see the resolved rows and each
 key's presence at a glance.
 
@@ -105,6 +110,14 @@ array of rows; each row's `name` selects the Profile:
   (e.g. point `deepseek` at a proxy by giving just `name` and `base_url`).
 - A row with a new `name` adds a Profile, and must define `base_url`, `model`, and
   `api_key_env`. `max_tokens` is optional (a positive integer; default 32000).
+- `request_extras` is optional — a JSON object of extra Messages-request kwargs
+  (e.g. a reasoning knob) merged verbatim into every request. An overlay row
+  **replaces** a Profile's dict wholesale (never a deep merge); `{}` disables
+  reasoning for that Profile. Reserved keys are rejected with a named error — the
+  Runtime-built request keys and the client/transport-policy kwargs (`timeout`,
+  `extra_headers`, `extra_query`, `stream`), checked at the top level and inside
+  an `extra_body` value — so extras can never carry credentials or override the
+  Runtime on the wire.
 
 An unknown field, a duplicate name, or a malformed file is rejected with a named
 error, so a typo fails loudly rather than being silently dispatched.
@@ -185,7 +198,9 @@ advances, or the bound expires (`--timeout-ms`, default 240000 ms, clamped to a
 ### `/chinamax:profiles`
 
 List every configured Profile with its endpoint, model, and API-key presence
-(`PRESENT`/`MISSING` by variable name, never the value). Takes no arguments.
+(`PRESENT`/`MISSING` by variable name, never the value), plus the resolved
+`request_extras` as compact JSON (`extras={...}`) when non-empty. Takes no
+arguments.
 
 ### `/chinamax:setup`
 `[--json] [--workspace <dir>]`

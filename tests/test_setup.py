@@ -252,6 +252,7 @@ def test_setup_scaffolds_key_template(tmp_path, keyless_home, isolated, capsys):
     # The extension recipe: overlay row + key line, for any Anthropic-compatible model.
     assert "chinamax-profiles.json" in content
     assert "Anthropic-compatible" in content
+    assert "request_extras" in content
     assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
     # An existing file is never overwritten — and a healthy re-run fixes nothing.

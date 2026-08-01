@@ -38,6 +38,11 @@ def tool_use_block(block_id: str, name: str, value: dict) -> dict:
     return {"type": "tool_use", "id": block_id, "name": name, "input": value}
 
 
+def thinking_block(thinking: str, signature: str = "sig-fake") -> dict:
+    """Build a scripted thinking block (a reasoning block a provider returns)."""
+    return {"type": "thinking", "thinking": thinking, "signature": signature}
+
+
 def turn(
     blocks: list[dict], stop_reason: str | None = None, usage: dict | None = None
 ) -> dict:
@@ -420,6 +425,34 @@ class _Handler(BaseHTTPRequestHandler):
                     "type": "content_block_delta",
                     "index": index,
                     "delta": {"type": "text_delta", "text": block["text"]},
+                },
+            )
+        elif block["type"] == "thinking":
+            # A reasoning block: opens empty, then the SDK accumulator folds the
+            # thinking_delta/signature_delta into it. Never the partial path —
+            # that is tool_use-only.
+            self._event(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {"type": "thinking", "thinking": "", "signature": ""},
+                },
+            )
+            self._event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "thinking_delta", "thinking": block["thinking"]},
+                },
+            )
+            self._event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": {"type": "signature_delta", "signature": block["signature"]},
                 },
             )
         else:

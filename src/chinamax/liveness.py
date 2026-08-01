@@ -406,6 +406,7 @@ def stream_with_ladder(
     system: str,
     tools: list[dict],
     messages: Iterable[dict],
+    request_extras: dict | None = None,
     config: LoopConfig,
     on_retry: Callable[[dict], None] | None = None,
 ) -> object:
@@ -422,6 +423,8 @@ def stream_with_ladder(
         system: The Job's system prompt.
         tools: The advertised tool schemas.
         messages: The conversation so far.
+        request_extras: Extra Messages-request keywords merged into every
+            attempt's request verbatim — constant for the life of the Job.
         config: The Job's supervision configuration.
         on_retry: Called once per retry decision with that decision's fields.
 
@@ -440,6 +443,7 @@ def stream_with_ladder(
             "system": system,
             "tools": tools,
             "messages": list(snapshot),
+            **(request_extras or {}),
         }
         outcome = run_attempt(client, request, config)
         if outcome.completed:

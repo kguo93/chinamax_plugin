@@ -468,11 +468,13 @@ def run_steer(args: argparse.Namespace) -> int:
 
 
 def run_profiles(args: argparse.Namespace) -> int:
-    """List every configured Profile with endpoint, model and key presence.
+    """List every configured Profile with endpoint, model, key presence, request extras.
 
     Renders the api-key env-var NAME and PRESENT/MISSING per Profile — never the
     key VALUE, on any stream — so a misconfiguration is visible at a glance
-    without leaking a secret.
+    without leaking a secret. The resolved ``request_extras`` are appended as
+    compact JSON when non-empty; they are operator-authored tuning data carrying
+    no credentials (those ride ``api_key_env``/``model-keys.env`` only).
 
     Args:
         args: The parsed ``profiles`` arguments.
@@ -485,10 +487,15 @@ def run_profiles(args: argparse.Namespace) -> int:
     for name in sorted(resolved):
         profile = resolved[name]
         present = "PRESENT" if keys.get(profile.api_key_env, "").strip() else "MISSING"
-        print(
+        row = (
             f"{name}  endpoint={profile.base_url}  model={profile.model}  "
             f"key={present} ({profile.api_key_env})"
         )
+        if profile.request_extras:
+            row += "  extras=" + json.dumps(
+                profile.request_extras, separators=(",", ":"), sort_keys=True
+            )
+        print(row)
     return EXIT_TERMINAL
 
 
