@@ -83,8 +83,10 @@ conda run -n chinamax pip install -e '/path/to/chinamax_plugin[test]'
 ### Profiles
 
 Five Profiles ship inside the package
-([`src/chinamax/data/profiles.json`](src/chinamax/data/profiles.json)) — pro tiers
-only, one per provider:
+([`src/chinamax/data/profiles.json`](src/chinamax/data/profiles.json)), one per
+provider. Each Profile's shipped model is its DEFAULT model; a dispatch may name any
+model string its Profile's endpoint accepts via `model=<string>` (pro-only reversed
+2026-08-03):
 
 | Profile   | Endpoint (base URL)              | Model              | API-key variable   |
 |-----------|----------------------------------|--------------------|--------------------|
@@ -155,14 +157,15 @@ the Bridge maps them onto the CLI seam argv on the right:
 | Bridge-level              | CLI seam (`chinamax task`) | Meaning                                                             |
 |---------------------------|----------------------------|--------------------------------------------------------------------|
 | `profile=<name>`          | `--profile <name>`         | **Required.** No default — a profile-less dispatch is refused.      |
+| `model=<string>`          | `--model='<string>'`       | Optional. Any model string the Profile's endpoint accepts; omitted ⇒ the Profile's default model. Pinned to the Thread — resumes replay it. |
 | `--read-only`             | `--read-only`              | Opt out of write-capable tools. Write-capable is the default.      |
 | `bash_timeout=<seconds>`  | `--bash-timeout-s <seconds>` | Per-command bash timeout override (a non-numeric value is refused). |
 | `poll=<seconds>`          | *(poll loop, not a task flag)* | The Bridge's long-poll bound: `status --wait --timeout-ms <seconds×1000>` (default 120 s), with the Bash timeout kept above it. A non-numeric value is refused. |
 
 There are no `--resume`/`--fresh` routing controls. A dispatch is always a fresh
 Bridge on a fresh Thread; continuing a Thread is the live Bridge's own act when you
-follow up (see **Talking to a Bridge**), and a new Profile or a new unrelated task
-is a new `/chinamax:task`.
+follow up (see **Talking to a Bridge**), and a new Profile, a different model
+string, or a new unrelated task is a new `/chinamax:task`.
 
 ## Commands
 
@@ -173,7 +176,7 @@ The internal seam verbs (`result`, `logs`, `cancel`, `resume`, `steer`) are no
 longer exposed as commands — the Bridge drives them on your behalf.
 
 ### `/chinamax:task`
-`profile=<name> [--read-only] [bash_timeout=<seconds>] [poll=<seconds>] <what the worker model should do>`
+`profile=<name> [model=<string>] [--read-only] [bash_timeout=<seconds>] [poll=<seconds>] <what the worker model should do>`
 
 Dispatch a task through the Bridge Agent. Exactly one named haiku Bridge detaches a
 durable Job, then long-polls it (120 s default, or your `poll=<seconds>`) in
@@ -223,9 +226,10 @@ Bridge classifies each message and acts on its own Thread:
   posture. The Bridge relays that new Job's result when it ends.
 - **Cancel** — "stop the job", "cancel", "never mind" kills the run; the Bridge
   relays the cancelled report.
-- **Out of scope** — asking for a different model, or a brand-new unrelated task,
-  is refused with a pointer to dispatch a new `/chinamax:task` (a new Bridge). One
-  Bridge serves one Thread and never switches Profile.
+- **Out of scope** — a different model is chosen AT DISPATCH via `model=<string>`;
+  asking to CHANGE a live Thread's model or Profile, or to start a brand-new
+  unrelated task, is refused with a pointer to dispatch a new `/chinamax:task` (a new
+  Bridge). One Bridge serves one Thread and never switches its model or Profile.
 
 Main forwards a message to a Bridge **only when you address it**; anything else is
 Claude's own work. If several Bridges are live at once, name the one you mean.

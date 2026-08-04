@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from chinamax.spec import parse_spec
 from conftest import OMIT, bash_then_report_script
 
 CASES = {
@@ -16,6 +17,9 @@ CASES = {
     "non_positive_inactivity": ({"inactivity_timeout_s": 0}, "inactivity_timeout_s"),
     "empty_ladder": ({"ladder_attempts": 0}, "ladder_attempts"),
     "boolean_ladder": ({"ladder_attempts": True}, "ladder_attempts"),
+    # An explicit model must be a non-empty string; the provider judges validity.
+    "empty_model": ({"model": ""}, "model"),
+    "wrong_typed_model": ({"model": 3}, "model"),
 }
 
 
@@ -31,3 +35,11 @@ def test_spec_validation(job_env, capsys, case):
 
     assert field in capsys.readouterr().err
     assert env.requests == []
+
+
+def test_model_field_optional_and_carried(job_env):
+    """An explicit model rides the spec; absent leaves it None; it is a known field."""
+    env = job_env(bash_then_report_script())
+
+    assert parse_spec(env.spec()).model is None
+    assert parse_spec(env.spec(model="custom-m")).model == "custom-m"

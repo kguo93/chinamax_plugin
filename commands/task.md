@@ -1,6 +1,6 @@
 ---
 description: Dispatch a task to a non-Claude worker model (deepseek, mimo, glm, minimax, kimi) through the chinamax Bridge Agent — a persistent named teammate that detaches a durable Job, long-polls it, relays errors and the terminal result, and serves the Thread (steer / resume / cancel) for the session's life.
-argument-hint: "profile=<name> [--read-only] [bash_timeout=<seconds>] [poll=<seconds>] <what the worker model should do>"
+argument-hint: "profile=<name> [model=<string>] [--read-only] [bash_timeout=<seconds>] [poll=<seconds>] <what the worker model should do>"
 allowed-tools: Agent
 ---
 
@@ -61,12 +61,17 @@ the `prompt` of the Agent call. Carry these rules into it:
 - **A fresh `task` REQUIRES a Profile** (`profile=<name>`, from the mapping
   below). With none, REFUSE and list the five shipped Profiles (deepseek, mimo,
   glm, minimax, kimi) — there is no default.
+- **Optional `model=<string>`** — exactly one, non-empty, no spaces or quote
+  characters. Omitted ⇒ the Profile's default model. It is PINNED: the Thread
+  keeps it for life and you never change it.
 - **Refuse, making no seam call**, when more than one `profile=` is given,
   `bash_timeout=<v>` or `poll=<v>` is non-numeric or not a positive integer (zero
-  and negative are refused too), or the dispatch text is empty.
+  and negative are refused too), more than one model= is given, or its value is
+  empty or contains spaces or quote characters, or the dispatch text is empty.
 - **Dispatch:** `"$PY" -m chinamax task --profile <name> --bridge-name <your own
   teammate name>` (add `--read-only` only if the operator asked; `--bash-timeout-s
-  <s>` only if `bash_timeout=<s>` was given), prompt on the stdin heredoc. The
+  <s>` only if `bash_timeout=<s>` was given; `--model='<string>'` only if
+  `model=<string>` was given), prompt on the stdin heredoc. The
   seam prints the new Job id and returns immediately. Do NOT message the operator
   with it.
 - **Poll loop.** Repeat `"$PY" -m chinamax status <id> --wait --timeout-ms 120000`
@@ -93,9 +98,9 @@ the `prompt` of the Agent call. Carry these rules into it:
   1. **CANCEL** — the whole message says abandon the run ("cancel", "stop the
      job", "kill it", "never mind"). Run `"$PY" -m chinamax cancel <your-id>`,
      poll to terminal, relay the cancelled report.
-  2. **OUT-OF-SCOPE** — wants another model/profile or a new unrelated task. Make
-     NO seam call; send ONE SendMessage(to='main') saying it is out of scope and
-     to dispatch a new /chinamax:task.
+  2. **OUT-OF-SCOPE** — wants another model/profile, a different model string, or
+     a new unrelated task. Make NO seam call; send ONE SendMessage(to='main')
+     saying it is out of scope and to dispatch a new /chinamax:task.
   3. **STEER** — the Job is still running. Run `"$PY" -m chinamax steer <id>`
      (message on the stdin heredoc). Send NOTHING; keep polling.
   4. **RESUME** — the Job has ended. Run `"$PY" -m chinamax resume <id>` (message
@@ -117,6 +122,10 @@ the `prompt` of the Agent call. Carry these rules into it:
 The Bridge normalizes `$ARGUMENTS` onto the seam argv (`python -m chinamax`):
 
 - `profile=<name>` → `task --profile <name>`. Required on a fresh dispatch.
+- `model=<string>` → `task --model='<string>'` (attached `=` form, value
+  single-quoted — shipped-style strings carry `[..]` glob characters, and the
+  attached form survives a leading `-`). Optional; omitted ⇒ the Profile's
+  default model. Pinned to the Thread — resume never changes it.
 - `--read-only` → `--read-only`. Write-capable is the default; this is the opt-out.
 - `bash_timeout=<seconds>` → `--bash-timeout-s <seconds>` (non-numeric refused).
 - `poll=<seconds>` → the poll-loop `--timeout-ms <seconds×1000>` (non-numeric
@@ -126,5 +135,5 @@ The Bridge normalizes `$ARGUMENTS` onto the seam argv (`python -m chinamax`):
 
 A dispatch is ALWAYS a fresh Bridge + fresh Job (`profile=` required). There are no
 routing controls: continuing a Thread is the live Bridge's own act when the
-operator follows up on a finished Job, and a new task or a new Profile is a new
-/chinamax:task, hence a new Bridge.
+operator follows up on a finished Job, and a new task, a different model string,
+or a new Profile is a new /chinamax:task, hence a new Bridge.

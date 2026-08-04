@@ -20,8 +20,8 @@ reconcile by amending the ADR or fixing the code — never by trusting stale pro
 
 - **Filename**: `NNNN-kebab-slug.md`, four-digit zero-padded, sequential, no gaps. The next
   number is the highest in `adr/` plus one (currently → `0013`).
-- **Heading**: a bare prose title, e.g. `# One Bridge Agent, providers as Profiles, pro
-  tiers only, no default` (match the existing ADRs — no leading number).
+- **Heading**: a bare prose title, e.g. `# One Bridge Agent, providers as Profiles, no
+  default` (match the existing ADRs — no leading number).
 - **Amend in place; never fork a decision** (root `CLAUDE.md`): when a later decision changes
   an ADR, add a dated `**Amended <date>**` paragraph *in that same file*. When the change
   **reverses** the original, quote the original decision before overriding it (precedent:
@@ -46,7 +46,7 @@ twelve ADRs group into five themes.
 |---|---|---|
 | The Bridge contract — detach + quiet long-poll relay, exactly-one `SendMessage(to='main')`, the poll loop, Bridge naming/spawning, and the **bridge-death heartbeat reap** | **0003** | `agents/chinamax.md`, `commands/task.md`, `src/chinamax/__main__.py` (`_status_wait`), `src/chinamax/state.py` (`stamp_supervision`, `reap_stale_supervision`) |
 | Job / session ownership — SessionEnd kills the ending session's Jobs, SessionStart reaps dead-session orphans, the session registry, the bridge-death sweep | **0004** | `hooks/hooks.json`, `src/chinamax/hooks/session_start.py` + `session_end.py`, `src/chinamax/state.py` (`reap_session` / `reap_orphans` / `reap_stale_supervision`, session registry) |
-| Providers-as-Profiles — a single `chinamax` Bridge Agent, pro tiers only, no default, adding a provider/tier, Bridge instance naming | **0006** | `agents/chinamax.md`, `src/chinamax/profiles.py`, `src/chinamax/data/profiles.json` |
+| Providers-as-Profiles — a single `chinamax` Bridge Agent, per-dispatch pinned model (pro-only reversed 2026-08-03), no default, adding a provider/tier, Bridge instance naming | **0006** | `agents/chinamax.md`, `src/chinamax/profiles.py`, `src/chinamax/data/profiles.json`, `src/chinamax/spec.py`, `src/chinamax/state.py` (`new_record`/`create_resume`) |
 | Mid-run steering — the per-Job steer queue, drained/injected at loop-iteration boundaries | **0008** | `src/chinamax/loop.py` (`_drain_steers`…), `src/chinamax/state.py` (steer helpers), `src/chinamax/__main__.py` (`run_steer`), `src/chinamax/transcript.py` |
 
 ### 3 · Confinement & safety

@@ -22,6 +22,7 @@ from chinamax import ChinamaxError, profiles
 REQUIRED_FIELDS = ("workspace", "profile", "prompt", "transcript_path", "result_path")
 OPTIONAL_FIELDS = (
     "write",
+    "model",
     "job_id",
     "seed_transcript",
     "bash_timeout_s",
@@ -51,6 +52,7 @@ class JobSpec:
     transcript_path: Path
     result_path: Path
     write: bool = True
+    model: str | None = None
     job_id: str | None = None
     seed_transcript: bool = False
     bash_timeout_s: float = DEFAULT_BASH_TIMEOUT_S
@@ -141,6 +143,9 @@ def parse_spec(data: object) -> JobSpec:
     job_id = data.get("job_id")
     if job_id is not None and not isinstance(job_id, str):
         raise ChinamaxError("job spec field 'job_id' must be a string")
+    model = data.get("model")
+    if model is not None and (not isinstance(model, str) or not model):
+        raise ChinamaxError("job spec field 'model' must be a non-empty string")
 
     bash_timeout_s = data.get("bash_timeout_s")
     return JobSpec(
@@ -150,6 +155,7 @@ def parse_spec(data: object) -> JobSpec:
         transcript_path=transcript_path,
         result_path=result_path,
         write=write,
+        model=model,
         job_id=job_id,
         seed_transcript=seed_transcript,
         bash_timeout_s=(

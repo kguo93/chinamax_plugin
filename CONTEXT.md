@@ -17,7 +17,7 @@ The custom agent-loop process that owns the provider API conversation, tool exec
 _Avoid_: worker CLI, companion (reserve "companion" for the Codex plugin's runtime)
 
 **Profile**:
-A named provider configuration — base URL, model string, API-key source, and fixed request tuning (reasoning always on, at the provider's ceiling) — that a Job runs against (e.g. `deepseek`, `kimi`, `minimax`). One Bridge Agent serves all Profiles; a dispatch picks its Profile.
+A named provider configuration — base URL, default model string, API-key source, and fixed request tuning (reasoning always on, at the provider's ceiling) — that a Job runs against (e.g. `deepseek`, `kimi`, `minimax`). One Bridge Agent serves all Profiles; a dispatch picks its Profile and may name a model string of its own.
 _Avoid_: provider (the company), model (one field of a profile)
 
 **Job**:
@@ -32,6 +32,10 @@ _Avoid_: session, chat
 A message sent to a running Job — an operator message the Bridge Agent classified and forwarded. Steers land in the Job's steer queue; the Runtime drains the queue at its next loop iteration and injects each steer into the Thread as a user message.
 _Avoid_: interrupt (cancellation is a different action), follow-up (a follow-up starts a new turn on a finished Thread)
 
-**Pro**:
-The only model tier the plugin offers, for every provider — each Profile pins its provider's strongest tier (deepseek-v4-pro, mimo-v2.5-pro, glm-5.2, MiniMax-M3, kimi-k3) at that provider's maximum reasoning effort. Flash/ultraspeed tiers are never implemented as Profiles.
-_Avoid_: flash, ultraspeed (never offered)
+**Default model**:
+The model string a Profile resolves to (shipped row, overlay-adjustable) — what every dispatch that names no model runs against (deepseek-v4-pro[1m], mimo-v2.5-pro, glm-5.2, MiniMax-M3[1m], kimi-k3). A dispatch may name any other model string; the provider endpoint is the only judge of validity. Tier names (pro, flash, ultraspeed) are marketing labels, not plugin concepts.
+_Avoid_: pro/flash/ultraspeed as selection concepts (marketing labels), tier
+
+**Pinned model**:
+A model string a dispatch named explicitly, fixed to its Thread for life: every resume replays it and the Bridge Agent never changes it. A dispatch that names none pins nothing — its Thread follows the Profile's current default model.
+_Avoid_: model override (transient-sounding; the pin lasts the Thread's life)

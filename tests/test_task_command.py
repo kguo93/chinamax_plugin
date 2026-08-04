@@ -91,3 +91,21 @@ def test_contract_lockstep_three_way():
         assert stanza in command, f"missing from commands/task.md: {stanza!r}"
         assert stanza in contract, f"missing from agents/chinamax.md: {stanza!r}"
         assert stanza in hook, f"missing from bridge_contract.CONTRACT: {stanza!r}"
+
+
+def test_model_override_present_in_contract_copies():
+    """The per-dispatch model= feature is pinned in every contract copy, so no
+    copy can silently drop it (the existing tests assert only the prior flags)."""
+    # Both initial-dispatch copies carry the model= token and the --model seam
+    # mapping (single-line tokens, so a raw substring is enough).
+    for text in (COMMAND, CONTRACT):
+        assert "model=<string>" in text
+        assert "--model='<string>'" in text
+        assert "spaces or quote characters" in _normalized(text)
+    # The out-of-scope enumeration gains "a different model string" in ALL THREE
+    # copies and STILL names "a new unrelated task" — the step-6 insertion into
+    # the hook's CONTRACT must not have replaced the trailing case.
+    for text in (COMMAND, CONTRACT, HOOK_CONTRACT):
+        normalized = _normalized(text)
+        assert "a different model string" in normalized, "model out-of-scope case dropped"
+        assert "a new unrelated task" in normalized, "unrelated-task case dropped"

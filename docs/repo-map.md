@@ -26,7 +26,7 @@ whole file, including its `**Amended <date>**` notes).
 | 0003† | `0003-detached-jobs-with-poll-relay-bridge.md` | Every dispatch detaches; the Bridge is a quiet long-poll relay | Job lifecycle & Bridge |
 | 0004† | `0004-session-scoped-jobs.md` | Jobs are session-scoped — SessionEnd kills, SessionStart reaps orphans (reversed 2026-07-30) | Job lifecycle & Bridge |
 | 0005 | `0005-tool-layer-confinement.md` | Confinement is tool-layer, not OS sandbox | Confinement & safety |
-| 0006† | `0006-single-bridge-agent-with-profiles.md` | One Bridge Agent, providers as Profiles, pro tiers only, no default | Job lifecycle & Bridge |
+| 0006† | `0006-single-bridge-agent-with-profiles.md` | One Bridge Agent, providers as Profiles, no default (pro-only reversed 2026-08-03; per-dispatch pinned model) | Job lifecycle & Bridge |
 | 0007† | `0007-self-reported-results.md` | Final results are the worker's self-report, envelope stripped, prose untouched | Results & duplication guard |
 | 0008† | `0008-steer-queue.md` | Mid-run messages land in a steer queue | Job lifecycle & Bridge |
 | 0009† | `0009-anthropic-sdk-in-dedicated-conda-env.md` | Official anthropic SDK in a dedicated conda env | Runtime & wire |

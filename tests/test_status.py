@@ -257,6 +257,51 @@ def test_status_row_is_bridge_first(dispatch_env, capsys):
     assert unnamed_line.startswith("-  ") and unnamed in unnamed_line
 
 
+def test_status_shows_pinned_model_in_row_and_detail(dispatch_env, capsys):
+    """A pinned model shows in the row's profile cell, and `status <id>` adds a
+    `model:` detail line; an unpinned Job shows neither, and a bare listing shows
+    the pin once — the row cell only, never a per-row detail line."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    pinned = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING, model="custom-m"
+    )
+    unpinned = build_record(store, workspace=env.workspace, status=state.STATUS_RUNNING)
+
+    assert main(["status", pinned, "--workspace", workspace]) == 2
+    pinned_out = capsys.readouterr().out
+    assert f"{PROFILE} (custom-m)" in pinned_out
+    assert "    model: custom-m" in pinned_out
+
+    assert main(["status", unpinned, "--workspace", workspace]) == 2
+    unpinned_out = capsys.readouterr().out
+    assert "custom-m" not in unpinned_out
+    assert "model:" not in unpinned_out
+
+    # A bare listing shows the pin once — the row cell only, no detail line.
+    assert main(["status", "--workspace", workspace]) == 0
+    listing = capsys.readouterr().out
+    assert listing.count("custom-m") == 1
+    assert "model:" not in listing
+
+
+def test_status_escapes_control_char_in_pinned_model(dispatch_env, capsys):
+    """An operator-supplied pin with a control character renders escaped in BOTH
+    the row cell and the `model:` detail line — one row is always one line."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    pinned = build_record(
+        store, workspace=env.workspace, status=state.STATUS_RUNNING, model="custom-\x1bm"
+    )
+
+    assert main(["status", pinned, "--workspace", workspace]) == 2
+    out = capsys.readouterr().out
+    assert "\x1b" not in out, "a raw control character escaped into the rendering"
+    assert out.count("custom-\\x1bm") == 2, "escaped in the row cell AND the detail line"
+
+
 def test_resolution_error_exits_one(dispatch_env, capsys):
     """A named Job that is not found exits 1 listing candidates, never 0."""
     env = dispatch_env()

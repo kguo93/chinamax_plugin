@@ -25,6 +25,7 @@ import shlex
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from chinamax import ChinamaxError, doctor, profiles, provider, state
@@ -85,6 +86,8 @@ def execute_spec(
     provider.sanitize_environment()
     config = build_config(spec, config)
     profile = profiles.resolve_profile(spec.profile)
+    if spec.model:
+        profile = replace(profile, model=spec.model)
     client = provider.build_client(
         profile, profiles.resolve_key(profile), config.inactivity_timeout_s
     )
@@ -126,9 +129,9 @@ def run_exec(spec_path: str | Path, config: LoopConfig | None = None) -> int:
 def run_task(args: argparse.Namespace) -> int:
     """Dispatch a durable Job and return its id immediately.
 
-    Everything that can fail fast — the workspace, the prompt, the Profile —
-    fails on stderr BEFORE the record is written, so an unknown Profile never
-    becomes a `failed` Job the operator has to go read.
+    Everything that can fail fast — the workspace, the prompt, the Profile, the
+    model flag — fails on stderr BEFORE the record is written, so an unknown
+    Profile never becomes a `failed` Job the operator has to go read.
 
     Args:
         args: The parsed ``task`` arguments.
@@ -139,6 +142,8 @@ def run_task(args: argparse.Namespace) -> int:
     prompt = _read_prompt(args.prompt)
     store = state.open_store(args.workspace)
     profile = profiles.resolve_profile(args.profile)
+    if args.model is not None and not args.model:
+        raise ChinamaxError("--model must be a non-empty string")
 
     job_id = store.reserve_id()
     store.create(
@@ -150,6 +155,7 @@ def run_task(args: argparse.Namespace) -> int:
             workspace_root=store.workspace_root,
             log_file=store.log_path(job_id),
             bash_timeout_s=args.bash_timeout_s,
+            model=args.model,
             originating_session=state.session_id(),
             bridge_name=args.bridge_name,
         )
@@ -268,7 +274,7 @@ def run_status(args: argparse.Namespace) -> int:
     if args.wait:
         return _status_wait(store, job_id, args.timeout_ms)
     record = store.read(job_id)
-    _print_job(store, record)
+    _print_job(store, record, pinned_detail=True)
     return _exit_code(record)
 
 
@@ -631,6 +637,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="the owning Bridge teammate name (chinamax-<profile>-<task-slug>)",
     )
     task_parser.add_argument(
+        "--model",
+        default=None,
+        metavar="MODEL",
+        help="model string for this dispatch (default: the Profile's model); pinned to the Thread",
+    )
+    task_parser.add_argument(
         "prompt", nargs="*", help="the prompt; read from stdin when absent"
     )
 
@@ -872,6 +884,7 @@ def _worker_spec(
     data: dict = {
         "workspace": request.get("workspaceRoot"),
         "profile": request.get("profile"),
+        "model": request.get("model"),
         "prompt": request.get("prompt"),
         "transcript_path": str(transcript_path),
         "result_path": str(result_path),
@@ -1182,19 +1195,30 @@ def _status_wait(store: state.JobStore, job_id: str, timeout_ms: int) -> int:
                 state.log_signature(log_path),
             ) != snapshot or not state.is_active(record):
                 break
-    _print_job(store, record)
+    _print_job(store, record, pinned_detail=True)
     return _exit_code(record)
 
 
-def _print_job(store: state.JobStore, record: dict) -> None:
+def _print_job(store: state.JobStore, record: dict, *, pinned_detail: bool = False) -> None:
     """Print one Job's summary line and its progress preview.
 
     The rendered status is the EFFECTIVE one, so a crashed worker's Job reads
     `interrupted` while the record itself still says `running` — stale detection
     never rewrites a record behind a worker. The bridge-first row leads with the
     Bridge name via the shared `state.render_job_row`.
+
+    Args:
+        store: The Job store, for the Job's progress-log preview.
+        record: The Job record to render.
+        pinned_detail: When true, and the Job pinned a model at dispatch, print
+            an explicit ``model:`` detail line under the row. The single-Job
+            views set it; a bare listing leaves it False so the pin shows once,
+            in the row cell only.
     """
     print(state.render_job_row(record))
+    pinned = (record.get("request") or {}).get("model")
+    if pinned_detail and pinned:
+        print(f"    model: {state.escape_control(pinned)}")
     if record.get("errorMessage"):
         print(f"    error: {state.escape_control(record['errorMessage'])}")
     for line in state.tail_lines(store.log_path(record["id"]), PREVIEW_LINES):

@@ -34,7 +34,8 @@ CONTRACT = (
     '1. CANCEL — the whole message says abandon the run ("cancel", "stop the '
     'job", "kill it", "never mind"). Run `$PY -m chinamax cancel <your-id>`, '
     "poll to terminal, fetch result, relay.\n"
-    "2. OUT-OF-SCOPE — wants another model/profile or a new unrelated task. Make "
+    "2. OUT-OF-SCOPE — wants another model/profile, a different model string, or "
+    "a new unrelated task. Make "
     "NO seam call. Send ONE SendMessage(to='main'): out of scope, dispatch a new "
     "/chinamax:task.\n"
     "3. STEER — Job still running, message is an instruction. Run "

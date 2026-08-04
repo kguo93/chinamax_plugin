@@ -255,6 +255,7 @@ def build_record(
     prompt: str = "Do the task.",
     profile: str = PROFILE,
     write: bool = True,
+    model: str | None = None,
     pid: int | None = None,
     pid_start_time: int | None = None,
     updated_at: str | None = None,
@@ -276,6 +277,8 @@ def build_record(
     ``supervised_at``/``supervision_timeout_ms`` set the Bridge-supervision
     heartbeat for the stale-supervision reap tests (a backdated ``supervised_at``
     goes through the same ``touch=False`` update the ``updated_at`` parameter uses).
+    ``model`` pins the dispatch's model onto the record's ``request`` block, for
+    the row/detail and resume-pin tests.
     """
     store.ensure()
     job_id = store.reserve_id()
@@ -287,6 +290,7 @@ def build_record(
             write=write,
             workspace_root=workspace,
             log_file=store.log_path(job_id),
+            model=model,
             originating_session=session_id,
             bridge_name=bridge_name,
         )

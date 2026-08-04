@@ -85,6 +85,16 @@ def test_required_stanzas_present():
     assert "resume <id>" in text
     assert "unsure between cancel and steer" in lower
 
+    # Per-dispatch model override (ADR 0006, 2026-08-03): the model= token, the
+    # malformed-token refusal, the --model seam mapping, and the out-of-scope "a
+    # different model string" enumeration that still names "a new unrelated task"
+    # (guarding against the step-6 insertion dropping the trailing case).
+    assert "model=<string>" in text
+    assert "--model='<string>'" in text
+    assert "spaces or quote characters" in lower
+    assert "a different model string" in lower
+    assert "a new unrelated task" in lower
+
     # The finish-during-steer race re-routes to resume carrying the original
     # message; resume always passes an explicit id.
     assert "not delivered" in lower

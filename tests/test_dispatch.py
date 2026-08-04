@@ -8,7 +8,7 @@ import subprocess
 import sys
 import time
 
-from chinamax import state
+from chinamax import profiles, state
 from chinamax.__main__ import execute_spec, main
 from chinamax.liveness import PERMANENT
 from chinamax.spec import parse_spec
@@ -27,6 +27,17 @@ from fake_provider import status_fault
 
 #: Long enough that the worker is demonstrably still running when its parent dies.
 SLOW_COMMAND = "sleep 3; echo slow-turn-done"
+
+#: A pinned model carrying bracket glob characters, so byte fidelity through
+#: spec -> record -> wire is pinned too.
+PINNED_MODEL = "custom-m[1m]"
+#: A model string no endpoint accepts, and a realistic Anthropic-style 400 body
+#: naming it — the provider is the sole judge of a model's validity.
+BOGUS_MODEL = "chinamax-bogus-model"
+INVALID_MODEL_BODY = (
+    '{"type": "error", "error": {"type": "invalid_request_error", '
+    '"message": "invalid model: chinamax-bogus-model"}}'
+)
 
 
 def make_queued(store, prompt: str = "Do the task.") -> str:
@@ -256,6 +267,73 @@ def test_bash_timeout_reaches_the_spec(dispatch_env):
     # Accepted, stored, and actually applied: the command was cut short.
     observation = tool_results(read_messages(store.transcript_path(job_id)))[0]
     assert "TIMED OUT" in observation["content"]
+
+
+def test_pinned_model_reaches_record_and_wire(dispatch_env):
+    """`--model` is stored on the record AND sent as the request body's model."""
+    env = dispatch_env(bash_then_report_script())
+    provider = env.providers[PROFILE]
+
+    code, job_id = env.dispatch("--model", PINNED_MODEL)
+
+    assert code == 0
+    store = env.store
+    record = wait_for_status(store, job_id, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    assert record["request"]["model"] == PINNED_MODEL
+    # Byte-identical on the wire, bracket glob characters and all.
+    assert provider.requests[0]["body"]["model"] == PINNED_MODEL
+
+
+def test_unpinned_dispatch_uses_profile_default(dispatch_env):
+    """Without `--model` the record stores no pin and the wire uses the default."""
+    env = dispatch_env(bash_then_report_script())
+    provider = env.providers[PROFILE]
+
+    code, job_id = env.dispatch()
+
+    assert code == 0
+    store = env.store
+    record = wait_for_status(store, job_id, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    assert "model" not in record["request"]
+    assert provider.requests[0]["body"]["model"] == profiles.resolve_profile(PROFILE).model
+
+
+def test_empty_model_flag_refused(dispatch_env, capsys):
+    """An empty `--model` fails fast on stderr, creating no record."""
+    env = dispatch_env(bash_then_report_script())
+
+    code, printed = env.dispatch("--model", "")
+
+    assert code != 0
+    assert printed == ""
+    assert "--model must be a non-empty string" in capsys.readouterr().err
+    records, _ = env.store.load_records()
+    assert records == []
+
+
+def test_invalid_model_fails_after_one_attempt(dispatch_env):
+    """A pinned model the endpoint rejects fails the Job at its first request.
+
+    A 400 classifies PERMANENT (the ``400 <= status < 500`` arm), so there is no
+    retry ladder: exactly one request, the pinned string on it, and the
+    provider's error text on the record's ``errorMessage``.
+    """
+    env = dispatch_env([status_fault(400, body=INVALID_MODEL_BODY)])
+    provider = env.providers[PROFILE]
+
+    code, job_id = env.dispatch("--model", BOGUS_MODEL)
+
+    assert code == 0
+    store = env.store
+    record = wait_for_status(store, job_id, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_FAILED
+    assert len(provider.requests) == 1
+    assert provider.requests[0]["body"]["model"] == BOGUS_MODEL
+    message = record["errorMessage"]
+    for fragment in (PERMANENT, "after 1 attempt(s)", "HTTP 400", BOGUS_MODEL):
+        assert fragment in message, message
 
 
 def test_failure_payload_renders_onto_the_record(dispatch_env):

@@ -4,7 +4,7 @@ A Profile is a named provider configuration (base URL, model string, API-key
 source). The shipped set ships with the package; `~/.claude/chinamax-profiles.json`
 overlays it field by field. There is no default Profile.
 
-Extending to more models: any provider that implements the Anthropic-compatible
+Extending to more providers: any provider that implements the Anthropic-compatible
 Messages API becomes a Profile through the overlay — a row with `name`,
 `base_url` (the provider's `/anthropic` endpoint), `model`, and `api_key_env`,
 optionally `request_extras` (a dict of extra Messages-request kwargs, e.g. an

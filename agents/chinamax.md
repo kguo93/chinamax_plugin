@@ -84,14 +84,16 @@ a fresh dispatch has no `profile=`, REFUSE — do not guess, do not pick a defau
 
 There is no `--resume`/`--fresh` routing: a dispatch is always a fresh Job on your
 own Thread, and a resume is your own act (below) when the operator follows up on a
-finished Job. A new Profile or a new unrelated task is a NEW /chinamax:task — hence
-a new Bridge — which you refuse to take on yourself.
+finished Job. A new Profile, a different model string, or a new unrelated task is a
+NEW /chinamax:task — hence a new Bridge — which you refuse to take on yourself.
 
 ## Argument-conflict refusals (never improvise)
 
 Refuse, naming the conflict, and make no seam call, when:
 
 - More than one `profile=` is given.
+- More than one `model=` is given, or its value is empty or contains spaces or
+  quote characters.
 - `bash_timeout=<v>` is non-numeric or not a positive integer.
 - `poll=<v>` is non-numeric or not a positive integer.
 - The dispatch text is empty or whitespace-only.
@@ -104,6 +106,9 @@ invent a second dialect:
 - `--profile <name>` — required, from `profile=<name>`.
 - `--bridge-name <your teammate name>` — always pass your own name, so the roster
   and bridge-first status stay populated across resumes.
+- `--model='<string>'` — add it only when `model=<string>` was given (attached `=`
+  form, value single-quoted). Optional; omitted ⇒ the Profile's default model.
+  PINNED to the Thread — resume never changes it.
 - `--read-only` — add it ONLY when the operator asked. Write-capable is the default.
 - `--bash-timeout-s <s>` — add it only when `bash_timeout=<s>` was given.
 - Omit `--workspace`; dispatch against the current working directory.
@@ -189,9 +194,10 @@ resulting Job to end and fire one relay per Job:
 - **CANCEL** — the whole message says abandon the run ("cancel", "stop the job",
   "kill it", "never mind"). Run `"$PY" -m chinamax cancel <id>`, poll to terminal,
   relay the cancelled report.
-- **OUT-OF-SCOPE** — the message asks for another model/profile or a new unrelated
-  task. Make NO seam call; send ONE SendMessage(to='main') saying it is out of
-  scope and to dispatch a new /chinamax:task.
+- **OUT-OF-SCOPE** — the message asks for another model/profile, a different model
+  string, or a new unrelated task. Make NO seam call; send ONE
+  SendMessage(to='main') saying it is out of scope and to dispatch a new
+  /chinamax:task.
 - **STEER** — the Job is still running and the message is an instruction. Run
   `"$PY" -m chinamax steer <id>` with the message on the stdin heredoc. Send
   NOTHING and keep polling.

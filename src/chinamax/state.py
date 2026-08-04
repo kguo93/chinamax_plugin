@@ -569,7 +569,8 @@ def render_job_row(record: dict) -> str:
     THE shared row helper: `status`, the `reap` digests and both session-hook
     digests render through it, so the three cannot diverge. The Bridge name leads
     (``-`` for a record without one — a direct dispatch); the id, effective
-    status, phase, elapsed, profile and title follow in their prior order.
+    status, phase, elapsed, profile (with the pinned model in parentheses when
+    the dispatch named one) and title follow in their prior order.
 
     Args:
         record: The Job record.
@@ -577,6 +578,10 @@ def render_job_row(record: dict) -> str:
     Returns:
         The two-space-joined row.
     """
+    pinned = (record.get("request") or {}).get("model")
+    profile_cell = str(record.get("profile") or "-")
+    if pinned:
+        profile_cell = f"{profile_cell} ({escape_control(pinned)})"
     return "  ".join(
         [
             str(record.get("bridgeName") or "-"),
@@ -584,7 +589,7 @@ def render_job_row(record: dict) -> str:
             f"{effective_status(record):<11}",
             f"{(record.get('phase') or '-'):<14}",
             f"{elapsed(record):>8}",
-            str(record.get("profile") or "-"),
+            profile_cell,
             str(record.get("title") or ""),
         ]
     )
@@ -1404,6 +1409,7 @@ def new_record(
     workspace_root: Path,
     log_file: Path,
     bash_timeout_s: float | None = None,
+    model: str | None = None,
     originating_session: str | None = None,
     bridge_name: str | None = None,
 ) -> dict:
@@ -1421,6 +1427,7 @@ def new_record(
             pins bash to — it must not diverge from the state-dir key.
         log_file: The Job's progress log path.
         bash_timeout_s: The per-command bash timeout, when overridden.
+        model: The pinned model string, when the dispatch named one.
         originating_session: The owning Claude session id, or None.
         bridge_name: The persistent Bridge teammate that owns this Job's Thread
             (``chinamax-<profile>-<task-slug>``), or None for a direct dispatch.
@@ -1437,6 +1444,8 @@ def new_record(
     }
     if bash_timeout_s is not None:
         request["bashTimeoutSec"] = bash_timeout_s
+    if model is not None:
+        request["model"] = model
     record = dict(RECORD_DEFAULTS)
     record.update(
         {
@@ -1793,10 +1802,11 @@ class JobStore:
         The DISPATCHER writes the copy, never the worker — a worker only ever
         reads its own transcript, so nothing can pull the source out from under
         a rehydrating Job. The new Job inherits the source's Profile, write
-        posture, workspace root, bash timeout AND ``bridgeName``: a resume must
-        not silently change posture or provider, and one Bridge owns one Thread
-        lineage (ADR 0006), so the roster and bridge-first status stay populated
-        across resumes. It also records ``resumedFrom`` (the source id) and a
+        posture, workspace root, bash timeout, pinned model AND ``bridgeName``: a
+        resume must not silently change posture or provider, and one Bridge owns
+        one Thread lineage (ADR 0006), so the roster and bridge-first status stay
+        populated across resumes. It also records ``resumedFrom`` (the source id)
+        and a
         persisted ``lineageRoot`` (the source's ``lineageRoot``, else the source
         id) — the lineage-scoped resume guard compares ``lineageRoot`` values
         directly rather than walking ``resumedFrom`` chains, so a pruned ancestor
@@ -1869,6 +1879,7 @@ class JobStore:
                 ),
                 log_file=self.log_path(job_id),
                 bash_timeout_s=request.get("bashTimeoutSec"),
+                model=request.get("model"),
                 originating_session=originating_session,
                 bridge_name=source.get("bridgeName"),
             )

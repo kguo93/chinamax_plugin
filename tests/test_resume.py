@@ -20,6 +20,7 @@ from conftest import (
     turn,
     wait_for,
     wait_for_status,
+    write_overlay,
 )
 from fake_provider import thinking_block
 
@@ -153,6 +154,63 @@ def test_resume_replays_thinking_block_across_boundary(dispatch_env):
     assert replayed == [
         {"type": "thinking", "thinking": "Source reasoning.", "signature": "sig-src"}
     ]
+
+
+def test_resume_replays_pinned_model_over_overlay_edit(dispatch_env, capsys):
+    """A pinned model rides every resume verbatim, even when an overlay edit
+    changed the Profile's default model between Jobs — only the string is pinned."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    source = build_record(
+        store,
+        workspace=env.workspace,
+        status=state.STATUS_COMPLETED,
+        completed_at=aged(60),
+        model="custom-m",
+    )
+    seed_thread(store, source, "Source thread.")
+
+    # A fresh provider, then an overlay that ALSO edits the Profile's model. The
+    # overlay is the endpoint seam too, so the one row carries both fields.
+    provider = env.bind([report_turn()])
+    write_overlay(
+        env.home,
+        [{"name": PROFILE, "base_url": provider.base_url, "model": "overlay-model"}],
+    )
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    resumed = capsys.readouterr().out.strip()
+    record = wait_for_status(store, resumed, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    assert record["request"]["model"] == "custom-m"
+    assert provider.requests[0]["body"]["model"] == "custom-m"
+
+
+def test_unpinned_resume_follows_overlay_model_edit(dispatch_env, capsys):
+    """The documented re-resolution semantic: an UNpinned Thread's resume picks up
+    an overlay's new model — this must not silently change."""
+    env = dispatch_env()
+    store = env.store
+    workspace = str(env.workspace)
+    source = build_record(
+        store,
+        workspace=env.workspace,
+        status=state.STATUS_COMPLETED,
+        completed_at=aged(60),
+    )
+    seed_thread(store, source, "Source thread.")
+
+    provider = env.bind([report_turn()])
+    write_overlay(
+        env.home,
+        [{"name": PROFILE, "base_url": provider.base_url, "model": "overlay-model"}],
+    )
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    resumed = capsys.readouterr().out.strip()
+    record = wait_for_status(store, resumed, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    assert "model" not in record["request"]
+    assert provider.requests[0]["body"]["model"] == "overlay-model"
 
 
 def test_bare_resume_refuses_while_active(dispatch_env, capsys):
