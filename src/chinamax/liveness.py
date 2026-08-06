@@ -301,6 +301,15 @@ def run_attempt(client: anthropic.Anthropic, request: dict, config: LoopConfig) 
                 ),
             )
         return classify(error)
+    if watchdog is not None and watchdog.fired:
+        return AttemptOutcome(
+            classification=TRANSIENT,
+            failure_kind="inactivity",
+            exception_text=(
+                "no content-bearing stream event for "
+                f"{config.inactivity_timeout_s}s"
+            ),
+        )
     return AttemptOutcome(
         classification=TRANSIENT,
         failure_kind="premature_eof",

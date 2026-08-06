@@ -7,6 +7,7 @@ Repository for the `chinamax` worker-model plugin for Claude Code and Codex. The
 - `LICENSE` — the GPL-2.0 license text (verbatim `gpl-2.0.txt`) the repo is published under.
 - `.claude-plugin/` — the Claude plugin + marketplace manifest pair; see `.claude-plugin/repo-map.md`.
 - `.codex-plugin/` — the Codex plugin manifest and full interface metadata.
+- `.agents/plugins/marketplace.json` — the canonical Codex repo marketplace catalog; the legacy Claude marketplace remains under `.claude-plugin/`.
 - `agents/` — Claude Code agent definitions. The plugin loader auto-scans this dir and registers EVERY `.md` as an agent, so it holds only component files: `chinamax.md`, the Bash-only Bridge Agent (`chinamax:chinamax`). No `CLAUDE.md`/`repo-map.md` trio here (it would register as bogus agents) — its conventions live in the root `CLAUDE.md`.
 - `commands/` — Claude Code slash commands, likewise auto-scanned (component files only): `task.md` (`/chinamax:task`, the Bridge-dispatch command carrying the embedded persistent-Bridge contract) plus the thin `!`-launcher wrappers over `scripts/chinamax` — `status`, `profiles`, `setup`. The internal seam verbs (`result`/`logs`/`cancel`/`resume`/`steer`) are no longer exposed as commands (2026-07-30); the Bridge drives them on the operator's behalf. No trio here for the same reason; conventions in the root `CLAUDE.md`.
 - `hooks/` — shared Host-aware hook registration (`hooks.json`: Claude lifecycle,
@@ -18,7 +19,7 @@ Repository for the `chinamax` worker-model plugin for Claude Code and Codex. The
 - `src/` — the Runtime package (`chinamax`); see `src/repo-map.md`.
 - `tests/` — pytest suite driving the Runtime and the Job supervisor against the hermetic fake provider, with real detached workers, plus the plugin-manifest / Bridge-contract / Bridge-path / task-command surface tests; see `tests/repo-map.md`.
 - `README.md` — the dual-Host install-and-configure manual: Claude marketplace
-  install and Codex `/plugins` setup, disjoint Host paths, yolo/read-only
+  install, Codex CLI and `/plugins` setup, disjoint Host paths, yolo/read-only
   boundaries, five Profile rows, Host-specific overlays/keys, per-dispatch
   flags, exact-name Bridge routing, Host Session lifecycle, Codex orphan limits,
   and the setup doctor/provider troubleshooting.

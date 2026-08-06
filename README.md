@@ -95,11 +95,29 @@ names using `gpt-5.6-terra` at low reasoning with no fork history. Runtime
 `--read-only` remains the authoritative tool-layer policy; Codex sandboxing is
 not a replacement for it.
 
-Codex installation is through `/plugins`: add/select the same
-`kguo93/chinamax_plugin` marketplace, enable `chinamax`, start a new session,
-and run `$chinamax-setup`. Trust the plugin hooks in Codex when prompted. Run
-task or setup mutation only with `codex --yolo`; status and profiles remain
-diagnostic outside yolo. The compatibility assumptions are documented by the
+Codex CLI installation uses the same GitHub marketplace:
+
+```bash
+codex plugin marketplace add kguo93/chinamax_plugin
+codex plugin add chinamax@chinamax-plugin
+```
+
+For a local checkout, replace the GitHub source with the checkout path:
+
+```bash
+codex plugin marketplace add /path/to/chinamax_plugin
+codex plugin add chinamax@chinamax-plugin
+```
+
+The Codex-native repo catalog is `.agents/plugins/marketplace.json`; the
+`.claude-plugin/marketplace.json` file remains for Claude Code compatibility.
+
+In the Codex desktop app, add/select the same `kguo93/chinamax_plugin`
+marketplace through `/plugins`, enable `chinamax`, and start a new session.
+In either surface, trust the plugin hooks when prompted and run
+`$chinamax-setup`. Run task or setup mutation only with `codex --yolo`;
+status and profiles remain diagnostic outside yolo. The compatibility
+assumptions are documented by the
 [Codex plugin guide](https://developers.openai.com/plugins/build/plugins),
 [Codex hooks reference](https://learn.chatgpt.com/docs/hooks),
 [Codex subagents reference](https://learn.chatgpt.com/docs/agent-configuration/subagents),
