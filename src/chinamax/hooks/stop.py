@@ -17,7 +17,12 @@ import json
 import sys
 
 from chinamax import state
-from chinamax.hooks import read_event, resolve_workspace, sweep_stale_supervision
+from chinamax.hooks import (
+    read_event,
+    resolve_event_host,
+    resolve_workspace,
+    sweep_stale_supervision,
+)
 
 
 def main() -> int:
@@ -28,7 +33,10 @@ def main() -> int:
         stderr; a Stop hook never blocks.
     """
     try:
-        message = _build_notice(read_event())
+        event = read_event()
+        if resolve_event_host(event) is None:
+            return 0
+        message = _build_notice(event)
     except Exception as error:  # noqa: BLE001 - never block a turn
         print(f"chinamax stop hook: {type(error).__name__}: {error}", file=sys.stderr)
         return 0

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from pathlib import Path
 
 #: tests/ -> repo root; the manifests are pinned under `.claude-plugin/`.
@@ -19,7 +20,7 @@ KEBAB = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 
 
 def test_manifest_and_marketplace_valid():
-    """Both manifests parse and agree on names, version, owner, and self-source."""
+    """Claude and Codex manifests agree on the shipped plugin version."""
     # Both live under `.claude-plugin/`, NOT the repo root — `marketplace add`
     # reads `<path>/.claude-plugin/marketplace.json`, and a root-level file fails.
     plugin_path = MANIFEST_DIR / "plugin.json"
@@ -28,6 +29,10 @@ def test_manifest_and_marketplace_valid():
     assert marketplace_path.is_file()
     plugin = json.loads(plugin_path.read_text(encoding="utf-8"))
     marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+    codex = json.loads(
+        (REPO_ROOT / ".codex-plugin" / "plugin.json").read_text(encoding="utf-8")
+    )
+    project = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     # The plugin name is chinamax, kebab-case.
     assert plugin["name"] == "chinamax"
@@ -50,3 +55,7 @@ def test_manifest_and_marketplace_valid():
 
     # The marketplace entry's version equals plugin.json's, as the Codex pair does.
     assert entry["version"] == plugin["version"]
+    assert codex["name"] == plugin["name"] == "chinamax"
+    assert codex["version"] == plugin["version"] == "0.4.0"
+    assert project["project"]["version"] == "0.4.0"
+    assert (REPO_ROOT / "skills" / "chinamax-bridge" / "SKILL.md").is_file()

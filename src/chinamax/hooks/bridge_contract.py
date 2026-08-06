@@ -14,48 +14,41 @@ cycle but cannot veto the already-chosen call. The operative first copy is the
 from __future__ import annotations
 
 import json
+import os
 import sys
+from pathlib import Path
 
-from chinamax.hooks import read_event
+from chinamax.hooks import read_event, resolve_event_host
 
 #: A NAMED Bridge's agent_type is its teammate NAME (chinamax-<profile>-<slug>),
 #: never the "chinamax:chinamax" subagent type — Claude Code puts the name in the
 #: payload. So the filter keys on the "chinamax" substring every Bridge name carries.
 BRIDGE_AGENT_MARKER = "chinamax"
 
-#: The single source of the injected contract text — the D4 test imports THIS
-#: constant and it is one of the three lockstep members `test_task_command.py`
-#: audits, so there is no fourth hand-maintained copy to drift.
-CONTRACT = (
-    "CHINAMAX BRIDGE CONTRACT — follow exactly.\n"
-    "You relay between main and ONE worker Job lineage. Never do the task "
-    "yourself, never spawn agents, never touch files.\n"
-    "Classify each message from main as exactly one:\n"
-    '1. CANCEL — the whole message says abandon the run ("cancel", "stop the '
-    'job", "kill it", "never mind"). Run `$PY -m chinamax cancel <your-id>`, '
-    "poll to terminal, fetch result, relay.\n"
-    "2. OUT-OF-SCOPE — wants another model/profile, a different model string, or "
-    "a new unrelated task. Make "
-    "NO seam call. Send ONE SendMessage(to='main'): out of scope, dispatch a new "
-    "/chinamax:task.\n"
-    "3. STEER — Job still running, message is an instruction. Run "
-    "`$PY -m chinamax steer <id>` with the message verbatim on stdin (quoted "
-    "heredoc). Send NOTHING. Keep polling. If steer reports the Job already ended "
-    "(not delivered), switch to RESUME with the SAME message; mention the "
-    "possible duplicate when relaying the source Job's result.\n"
-    "4. RESUME — Job already ended. Run `$PY -m chinamax resume <id>` with the "
-    "message verbatim on stdin. Poll the NEW Job id it prints.\n"
-    "Unsure between cancel and steer → STEER.\n"
-    "Any OTHER refusal (e.g. lineage still running, not resumable): send the "
-    "refusal text as your ONE SendMessage(to='main') and stop. Never retry a "
-    "refused verb.\n"
-    "After any verb: wait for terminal (`status <id> --wait --timeout-ms 120000`, "
-    "Bash timeout 180000; exit 0 terminal, 2 poll again, 1 report once and stop). "
-    "Then `result <id>`, strip the first header line, send EXACTLY ONE "
-    "SendMessage(to='main') with the rest UNTOUCHED (or the failure/cancelled "
-    "report). Never message main before terminal. No progress messages, no "
-    "acknowledgments."
-)
+def canonical_contract_path() -> Path | None:
+    """Resolve the maintained Host adapter contract at runtime."""
+    root = os.environ.get("PLUGIN_ROOT", "").strip() or os.environ.get(
+        "CLAUDE_PLUGIN_ROOT", ""
+    ).strip()
+    if not root:
+        # Test/development fallback; installed Hosts provide their plugin root.
+        root = str(Path(__file__).resolve().parents[3])
+    path = Path(root) / "skills" / "chinamax-bridge" / "SKILL.md"
+    return path if path.is_file() else None
+
+
+def load_contract() -> str:
+    """Read the canonical contract, or return empty for a safe no-op."""
+    path = canonical_contract_path()
+    if path is None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+CONTRACT = load_contract()
 
 
 def main() -> int:
@@ -67,19 +60,22 @@ def main() -> int:
     """
     try:
         event = read_event()
+        if resolve_event_host(event) is None:
+            return 0
     except Exception as error:  # noqa: BLE001 - never block a tool call
         print(
             f"chinamax bridge_contract hook: {type(error).__name__}: {error}",
             file=sys.stderr,
         )
         return 0
-    if BRIDGE_AGENT_MARKER not in (event.get("agent_type") or ""):
+    if not CONTRACT or BRIDGE_AGENT_MARKER not in (event.get("agent_type") or ""):
         return 0
+    event_name = str(event.get("hook_event_name") or "PreToolUse")
     sys.stdout.write(
         json.dumps(
             {
                 "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
+                    "hookEventName": event_name,
                     "additionalContext": CONTRACT,
                 }
             }

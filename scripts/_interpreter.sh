@@ -15,15 +15,43 @@
 # chinamax env — precisely what the doctor exists to diagnose — every conda rung
 # fails, so without it /chinamax:setup could never start at all.
 
-# Data root = $CLAUDE_PLUGIN_DATA, else $XDG_STATE_HOME/chinamax, else the HOME
-# default (jobs/01's state-root rule minus /state). Empty or relative is unset.
+# Codex exposes the Claude-compatible plugin variables too, so native PLUGIN_*
+# evidence must win before the Claude family. The shims export this marker before
+# Python starts; the Runtime resolves the same precedence again from full input.
+chinamax_host_marker() {
+  if [ -n "${CHINAMAX_HOST:-}" ]; then
+    printf '%s\n' "${CHINAMAX_HOST}"
+  elif [ -n "${PLUGIN_ROOT:-}" ] || [ -n "${PLUGIN_DATA:-}" ]; then
+    printf '%s\n' codex
+  elif [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] || [ -n "${CLAUDE_PLUGIN_DATA:-}" ]; then
+    printf '%s\n' claude
+  fi
+}
+
+if [ -z "${CHINAMAX_HOST:-}" ]; then
+  CHINAMAX_HOST="$(chinamax_host_marker || true)"
+  [ -n "${CHINAMAX_HOST}" ] && export CHINAMAX_HOST
+fi
+
+# Data root = selected Host's plugin data, else the Host-specific XDG fallback.
+# Empty or relative values are unset.
 chinamax_data_root() {
-  if [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ "${CLAUDE_PLUGIN_DATA#/}" != "${CLAUDE_PLUGIN_DATA}" ]; then
+  if [ "${CHINAMAX_HOST:-}" = codex ] && [ -n "${PLUGIN_DATA:-}" ] && [ "${PLUGIN_DATA#/}" != "${PLUGIN_DATA}" ]; then
+    printf '%s\n' "${PLUGIN_DATA}"
+  elif [ "${CHINAMAX_HOST:-}" != codex ] && [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ "${CLAUDE_PLUGIN_DATA#/}" != "${CLAUDE_PLUGIN_DATA}" ]; then
     printf '%s\n' "${CLAUDE_PLUGIN_DATA}"
   elif [ -n "${XDG_STATE_HOME:-}" ] && [ "${XDG_STATE_HOME#/}" != "${XDG_STATE_HOME}" ]; then
-    printf '%s\n' "${XDG_STATE_HOME}/chinamax"
+    if [ "${CHINAMAX_HOST:-}" = codex ]; then
+      printf '%s\n' "${XDG_STATE_HOME}/chinamax-codex"
+    else
+      printf '%s\n' "${XDG_STATE_HOME}/chinamax"
+    fi
   else
-    printf '%s\n' "${HOME}/.local/state/chinamax"
+    if [ "${CHINAMAX_HOST:-}" = codex ]; then
+      printf '%s\n' "${HOME}/.local/state/chinamax-codex"
+    else
+      printf '%s\n' "${HOME}/.local/state/chinamax"
+    fi
   fi
 }
 

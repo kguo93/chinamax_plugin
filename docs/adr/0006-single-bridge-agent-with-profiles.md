@@ -1,5 +1,9 @@
 # One Bridge Agent, providers as Profiles, no default
 
+**Amended 2026-08-06.** The shared Profile model is exposed through thin Claude
+and Codex adapters. Codex task names use exact underscore-safe slugs and fixed
+`gpt-5.6-terra`/low/no-fork dispatch settings; Claude retains Haiku/kebab names.
+
 A single named subagent (`chinamax`) serves every provider; providers are config Profiles (deepseek, mimo, glm, minimax, kimi) rather than per-provider agents. Only pro tiers exist — flash/ultraspeed variants are never offered as Profiles — and there is no default Profile: every dispatch must name one explicitly, eliminating silent model selection.
 
 **Amended 2026-07-30**: still one agent TYPE, but Bridge instances are now named `chinamax-<profile>-<task-slug>` — the slug a short human-readable description of the task, never a random string — so concurrent persistent Bridges (ADR 0003) are addressable and distinguishable by the operator at a glance. The Profile is baked into the teammate name because one Bridge serves exactly one Thread, whose Profile is fixed at dispatch. No-default-Profile is unchanged and now bites only at `/chinamax:task`: resume inherits its Thread's Profile, and the Bridge refuses any ask to switch Profile mid-Thread (that is a new `/chinamax:task`, hence a new Bridge).

@@ -23,9 +23,16 @@ import os
 import shlex
 import sys
 import time
+import uuid
 
-from chinamax import state
-from chinamax.hooks import read_event, resolve_workspace, sweep_stale_supervision
+from chinamax import doctor, state
+from chinamax.hooks import (
+    read_event,
+    resolve_event_host,
+    resolve_workspace,
+    sweep_stale_supervision,
+)
+from chinamax.host import Host
 
 #: Exports appended for a dispatched Bash to inherit. ``CHINAMAX_SESSION_ID`` is
 #: provenance; ``CLAUDE_PLUGIN_DATA`` is load-bearing — the hooks and the Bridge's
@@ -33,6 +40,7 @@ from chinamax.hooks import read_event, resolve_workspace, sweep_stale_supervisio
 #: digest reads the other.
 SESSION_ID_EXPORT = "CHINAMAX_SESSION_ID"
 PLUGIN_DATA_EXPORT = "CLAUDE_PLUGIN_DATA"
+CODEX_PLUGIN_DATA_EXPORT = "PLUGIN_DATA"
 
 #: The digest cap, and the room reserved inside it for a trailing ``(+N more)``.
 DIGEST_CAP_BYTES = 2048
@@ -53,6 +61,11 @@ def main() -> int:
     digest = ""
     try:
         event = read_event()
+        context = resolve_event_host(event)
+        if context is None:
+            return 0
+        if context.host is Host.CODEX:
+            return _codex_session_start(event)
         _register_and_reap(event)
         digest = _build_digest(event)
     except Exception as error:  # noqa: BLE001 - never fail the session
@@ -67,6 +80,42 @@ def main() -> int:
         _export_env(event)
     except Exception as error:  # noqa: BLE001 - exports are best-effort
         print(f"chinamax session_start hook (env): {error}", file=sys.stderr)
+    return 0
+
+
+def _codex_session_start(event: dict) -> int:
+    """Register Codex without Claude predecessor/orphan repair."""
+    session = event.get("session_id")
+    # A restarted/resumed Codex Host Session may reuse its visible session id;
+    # always mint a new ownership token so an older detached reaper cannot touch
+    # Jobs created by this lifecycle.
+    token = uuid.uuid4().hex
+    os.environ[state.SESSION_TOKEN_VARIABLE] = token
+    if session:
+        owner = state.resolve_owner_process()
+        if owner is not None:
+            state.write_session_registry(str(session), owner[0], owner[1], token)
+    source = str(event.get("source") or event.get("hook_event_name") or "startup")
+    if source != "compact":
+        try:
+            warning = doctor.sync_managed_agent(source_name=source)
+        except Exception as error:  # noqa: BLE001 - sync never blocks startup
+            warning = f"Codex native agent sync failed: {type(error).__name__}: {error}"
+        if warning:
+            print(warning, file=sys.stderr)
+    digest = _build_digest(event)
+    if session:
+        sys.stdout.write(
+            "chinamax Codex Host Session "
+            f"{session}; token {token}; export CHINAMAX_SESSION_ID={session} "
+            f"CHINAMAX_SESSION_TOKEN={token} for each dispatch.\n"
+        )
+    if digest:
+        sys.stdout.write(digest)
+    try:
+        _export_env(event)
+    except Exception as error:  # noqa: BLE001 - exports are best-effort
+        print(f"chinamax Codex session_start hook (env): {error}", file=sys.stderr)
     return 0
 
 
@@ -171,9 +220,17 @@ def _export_env(event: dict) -> None:
     session = event.get("session_id")
     if session:
         exports.append((SESSION_ID_EXPORT, str(session)))
-    plugin_data = os.environ.get(PLUGIN_DATA_EXPORT, "")
+    plugin_name = (
+        CODEX_PLUGIN_DATA_EXPORT
+        if os.environ.get("CHINAMAX_HOST") == "codex"
+        else PLUGIN_DATA_EXPORT
+    )
+    plugin_data = os.environ.get(plugin_name, "")
     if plugin_data:
-        exports.append((PLUGIN_DATA_EXPORT, plugin_data))
+        exports.append((plugin_name, plugin_data))
+    token = os.environ.get(state.SESSION_TOKEN_VARIABLE, "")
+    if token:
+        exports.append((state.SESSION_TOKEN_VARIABLE, token))
     if not exports:
         return
     with open(env_file, "a", encoding="utf-8") as handle:

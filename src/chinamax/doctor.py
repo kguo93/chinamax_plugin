@@ -25,19 +25,25 @@ Messages API is an overlay row plus a key line — see ``key_template_text``.
 from __future__ import annotations
 
 import argparse
+import difflib
+import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Callable
 
 from chinamax import ChinamaxError, profiles, state
+from chinamax.host import Host, HostContext, current_host
 
 #: The three dependencies the doctor grades, in report order. ``pytest`` is in
 #: runtime/01's optional ``[test]`` extra, which is why the create advice below
 #: installs with that extra: the doctor's own advice must satisfy its own check.
-DEPS = ("chinamax", "anthropic", "pytest")
+DEPS = ("chinamax", "anthropic", "pytest", "tomlkit")
 
 #: The env the plugin's Runtime runs in, and the interpreter the shims prefer.
 ENV_NAME = "chinamax"
@@ -58,9 +64,11 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
+PLUGIN_VERSION = "0.4.0"
+MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
 
 
-def data_root() -> Path:
+def data_root(context: HostContext | None = None) -> Path:
     """Return the plugin data root the interpreter record lives under.
 
     jobs/01's state-root rule MINUS the ``/state`` suffix: ``$CLAUDE_PLUGIN_DATA``
@@ -68,18 +76,12 @@ def data_root() -> Path:
     which equals the state root there), else ``~/.local/state/chinamax``. An empty
     or relative value counts as unset, exactly as `state.state_root` treats them.
     """
-    plugin_data = state._absolute_env_dir("CLAUDE_PLUGIN_DATA")
-    if plugin_data is not None:
-        return plugin_data
-    xdg = state._absolute_env_dir("XDG_STATE_HOME")
-    if xdg is not None:
-        return xdg / ENV_NAME
-    return Path.home() / ".local" / "state" / ENV_NAME
+    return (context or current_host()).data_root
 
 
-def python_path_file() -> Path:
+def python_path_file(context: HostContext | None = None) -> Path:
     """Return the path the resolved env python is recorded at."""
-    return data_root() / PYTHON_PATH_FILENAME
+    return data_root(context) / PYTHON_PATH_FILENAME
 
 
 def source_repo_path() -> str:
@@ -97,11 +99,13 @@ def source_repo_path() -> str:
             return str(candidate)
     except (OSError, IndexError, ImportError):
         pass
-    root = os.environ.get("CLAUDE_PLUGIN_ROOT", "").strip()
+    root = os.environ.get("PLUGIN_ROOT", "").strip() or os.environ.get(
+        "CLAUDE_PLUGIN_ROOT", ""
+    ).strip()
     return root or "<the chinamax repo>"
 
 
-def key_template_text() -> str:
+def key_template_text(context: HostContext | None = None) -> str:
     """Render the commented ``model-keys.env`` template from the resolved Profiles.
 
     Comments only — an untouched template parses to zero keys under
@@ -111,7 +115,7 @@ def key_template_text() -> str:
     next scaffold. Keep this in lockstep with `profiles.load_profiles`.
     """
     env_names: list[str] = []
-    resolved = profiles.load_profiles()
+    resolved = profiles.load_profiles(context)
     for name in sorted(resolved):
         env_name = resolved[name].api_key_env
         if env_name not in env_names:
@@ -124,10 +128,10 @@ def key_template_text() -> str:
         "#",
         "# Extending to more models: any provider that implements the",
         "# Anthropic-compatible Messages API can be added as a Profile. Add a",
-        "# row to ~/.claude/chinamax-profiles.json — name, base_url (the",
+        "# row to the selected Host's chinamax-profiles.json — name, base_url (the",
         "# provider's /anthropic endpoint), model, api_key_env, and optionally",
         "# max_tokens and request_extras (extra Messages-request kwargs) — then",
-        "# add the matching <api_key_env>=<key> line below. /chinamax:profiles and",
+        "# add the matching <api_key_env>=<key> line below. The profiles and",
         "# /chinamax:setup report every resolved Profile's key as PRESENT or",
         "# MISSING by name; key values are never printed.",
         "#",
@@ -138,7 +142,7 @@ def key_template_text() -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_key_template() -> bool:
+def write_key_template(context: HostContext | None = None) -> bool:
     """Scaffold ``~/.claude/model-keys.env`` when absent; never touch an existing file.
 
     Creation is ``O_EXCL`` at mode 0600, so an existing file — the operator's
@@ -147,14 +151,14 @@ def write_key_template() -> bool:
     Returns:
         True when the template was created, False when the file already existed.
     """
-    path = profiles.keys_path()
+    path = profiles.keys_path(context)
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         return False
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-        handle.write(key_template_text())
+        handle.write(key_template_text(context))
     return True
 
 
@@ -164,6 +168,7 @@ def fix_missing(
     find_env_python: EnvPythonFinder,
     create_env: EnvCreator,
     install_deps: DepInstaller,
+    context: HostContext | None = None,
 ) -> list[dict]:
     """Fix what the diagnosis found missing; return the fix rows in run order.
 
@@ -172,9 +177,13 @@ def fix_missing(
     retried; nothing at all runs on a healthy machine.
     """
     fixes: list[dict] = []
-    if write_key_template():
+    if write_key_template(context):
         fixes.append(
-            {"action": "key-template", "ok": True, "detail": str(profiles.keys_path())}
+            {
+                "action": "key-template",
+                "ok": True,
+                "detail": str(profiles.keys_path(context)),
+            }
         )
     env_python = report["python"]
     if not report["env"]["present"]:
@@ -219,6 +228,7 @@ def diagnose(
     find_env_python: EnvPythonFinder | None = None,
     check_deps: DepChecker | None = None,
     record: bool = True,
+    context: HostContext | None = None,
 ) -> dict:
     """Run one full diagnosis and return the pinned ``--json`` document.
 
@@ -246,15 +256,16 @@ def diagnose(
         else {name: False for name in DEPS}
     )
 
-    root = state.state_root()
+    selected = context or current_host()
+    root = selected.state_root
     workspace_dir = _workspace_state_dir(root, workspace)
     writable = _state_writable(workspace_dir)
 
-    profile_rows = _profile_rows()
+    profile_rows = _profile_rows(selected)
     ok = env_present and all(deps[name] for name in DEPS) and writable
 
     if record and env_present:
-        _maybe_record_python(env_python)
+        _maybe_record_python(env_python, selected)
 
     return {
         "ok": ok,
@@ -306,6 +317,7 @@ def run_setup(
     check_deps: DepChecker | None = None,
     create_env: EnvCreator | None = None,
     install_deps: DepInstaller | None = None,
+    permission_mode: str | None = None,
 ) -> int:
     """Diagnose, fix what is missing, re-diagnose, and report; return the exit code.
 
@@ -327,6 +339,16 @@ def run_setup(
     create_env = create_env or _create_env
     install_deps = install_deps or _install_deps
 
+    if current_host().host is Host.CODEX:
+        return run_codex_setup(
+            args,
+            find_env_python=find_env_python,
+            check_deps=check_deps,
+            create_env=create_env,
+            install_deps=install_deps,
+            permission_mode=permission_mode,
+        )
+
     report = diagnose(
         args.workspace,
         find_env_python=find_env_python,
@@ -337,6 +359,7 @@ def run_setup(
         find_env_python=find_env_python,
         create_env=create_env,
         install_deps=install_deps,
+        context=current_host(),
     )
     if any(row["action"] != "key-template" for row in fixes):
         report = diagnose(
@@ -350,6 +373,444 @@ def run_setup(
     else:
         sys.stdout.write(render_fixes(fixes) + render_report(report))
     return 0 if report["ok"] else 1
+
+
+def codex_agent_path(context: HostContext | None = None) -> Path:
+    """Return the Host-owned native Codex agent target."""
+    selected = context or current_host()
+    return selected.keys_path.parent / "agents" / "chinamax_bridge.toml"
+
+
+def _agent_source_path(context: HostContext | None = None) -> Path:
+    selected = context or current_host()
+    root = selected.plugin_root
+    if root is None:
+        root = Path(__file__).resolve().parents[2]
+    return root / "agents" / "chinamax.md"
+
+
+def compile_codex_agent(
+    source: Path | None = None, *, version: str = PLUGIN_VERSION
+) -> str:
+    """Compile the shared Markdown agent adapter into deterministic TOML."""
+    source = source or _agent_source_path()
+    text = source.read_text(encoding="utf-8")
+    match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", text, re.S)
+    if not match:
+        raise ChinamaxError(f"{source}: missing Markdown frontmatter")
+    frontmatter, body = match.groups()
+    description = ""
+    for line in frontmatter.splitlines():
+        if line.startswith("description:"):
+            description = line.split(":", 1)[1].strip()
+            break
+    if not description:
+        raise ChinamaxError(f"{source}: missing agent description")
+    body = body.strip() + "\n"
+    # JSON's escaping is the TOML basic-string escape set for this generated
+    # body, and keeps delimiters/newlines from changing the TOML structure.
+    return (
+        f"{MANAGED_AGENT_MARKER} {version}\n"
+        'name = "chinamax_bridge"\n'
+        f"description = {json.dumps(description, ensure_ascii=False)}\n"
+        'model = "gpt-5.6-terra"\n'
+        'model_reasoning_effort = "low"\n'
+        f"developer_instructions = {json.dumps(body, ensure_ascii=False)}\n"
+    )
+
+
+def _agent_embedded_version(path: Path) -> str | None:
+    try:
+        with path.open(encoding="utf-8") as handle:
+            first = handle.readline().rstrip("\r\n")
+    except OSError:
+        return None
+    if not first.startswith(MANAGED_AGENT_MARKER):
+        return None
+    value = first[len(MANAGED_AGENT_MARKER) :].strip()
+    return value or None
+
+
+def _has_managed_agent_marker(path: Path) -> bool:
+    """Return whether the native-agent file claims the managed marker."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            return handle.readline().startswith(MANAGED_AGENT_MARKER)
+    except OSError:
+        return False
+
+
+def _atomic_text_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode & 0o777 if path.exists() else 0o600
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+    ) as handle:
+        temporary = Path(handle.name)
+        handle.write(text)
+        handle.flush()
+        os.fchmod(handle.fileno(), mode)
+    os.replace(temporary, path)
+
+
+def sync_managed_agent(
+    *, source: Path | None = None, target: Path | None = None, version: str = PLUGIN_VERSION,
+    source_name: str = "startup", context: HostContext | None = None
+) -> str:
+    """Force-sync an existing managed Codex agent after a plugin update."""
+    if source_name == "compact":
+        return ""
+    target = target or codex_agent_path(context)
+    if not target.exists():
+        return ""
+    old = _agent_embedded_version(target)
+    if not _has_managed_agent_marker(target):
+        return f"Codex native agent {target} is unmanaged or stale; rerun $chinamax-setup."
+    if old == version:
+        return ""
+    try:
+        _atomic_text_write(target, compile_codex_agent(source, version=version))
+    except Exception as error:  # noqa: BLE001 - SessionStart must continue
+        return (
+            f"Codex native agent sync failed for {target}: {type(error).__name__}: {error}; "
+            "the native agent may be stale; rerun $chinamax-setup."
+        )
+    old_label = old or "invalid"
+    return f"Codex native agent refreshed: {target} ({old_label} -> {version})."
+
+
+def codex_setup_plan(
+    workspace: str | Path | None = None,
+    *,
+    context: HostContext | None = None,
+    find_env_python: EnvPythonFinder | None = None,
+    check_deps: DepChecker | None = None,
+) -> dict:
+    """Build a redacted, non-mutating Codex setup preview and consent digest."""
+    selected = context or current_host()
+    find_env_python = find_env_python or _find_env_python
+    check_deps = check_deps or _check_deps
+    python = find_env_python()
+    deps = check_deps(python) if python else {name: False for name in DEPS}
+    config_path = selected.keys_path.parent / "config.toml"
+    try:
+        config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+    except OSError:
+        config_text = ""
+    try:
+        import tomllib
+
+        parsed = tomllib.loads(config_text) if config_text else {}
+    except (OSError, ValueError):
+        parsed = {}
+    features = parsed.get("features", {}) if isinstance(parsed, dict) else {}
+    agents = parsed.get("agents", {}) if isinstance(parsed, dict) else {}
+    if not isinstance(features, dict):
+        features = {}
+    if not isinstance(agents, dict):
+        agents = {}
+    target = codex_agent_path(selected)
+    if not target.exists():
+        status = "absent"
+    elif _has_managed_agent_marker(target):
+        status = (
+            "managed-current"
+            if _agent_embedded_version(target) == PLUGIN_VERSION
+            else "managed-stale"
+        )
+    else:
+        status = "unmanaged-collision"
+    proposed = {
+        "features.hooks": features.get("hooks") is not True,
+        "features.multi_agent": features.get("multi_agent") is not True,
+        "agents.enabled": agents.get("enabled") is not True,
+    }
+    observed = {
+        "features.hooks": features.get("hooks"),
+        "features.multi_agent": features.get("multi_agent"),
+        "agents.enabled": agents.get("enabled"),
+    }
+    config_diff = _codex_config_diff(config_path, observed, proposed)
+    keys_path = profiles.keys_path(selected)
+    overlay_path = profiles.overlay_path(selected)
+    interpreter_path = python_path_file(selected)
+    state_writable = _non_mutating_writable(selected.state_root)
+    data_writable = _non_mutating_writable(selected.data_root)
+    config_writable = _non_mutating_writable(config_path.parent)
+    recorded_python = _read_recorded_python(interpreter_path)
+    key_template = {
+        "path": str(keys_path),
+        "create": not keys_path.exists(),
+        "mode": "0600",
+    }
+    interpreter_change = {
+        "path": str(interpreter_path),
+        "recorded": recorded_python,
+        "update": bool(python and (recorded_python != python or not _is_executable(recorded_python or ""))),
+    }
+    digest_input = {
+        "host": selected.host.value,
+        "paths": {
+            "keys": str(keys_path),
+            "overlay": str(overlay_path),
+            "plugin_data": str(selected.data_root),
+            "state": str(selected.state_root),
+            "interpreter": str(interpreter_path),
+        },
+        "writable": {
+            "config": config_writable,
+            "plugin_data": data_writable,
+            "state": state_writable,
+        },
+        "config": {"observed": observed, "proposed": proposed, "diff": config_diff},
+        "agent": {"path": str(target), "status": status, "version": PLUGIN_VERSION},
+        "env": {"python": python, "deps": deps},
+        "key_template": key_template,
+        "interpreter": interpreter_change,
+        "workspace": str(workspace) if workspace is not None else None,
+    }
+    canonical = json.dumps(digest_input, sort_keys=True, separators=(",", ":"))
+    return {
+        "host": selected.host.value,
+        "python": python,
+        "env": {"present": python is not None, "path": python},
+        "deps": deps,
+        "config_path": str(config_path),
+        "config_diff": config_diff,
+        "agent_path": str(target),
+        "agent_status": status,
+        "keys_path": str(keys_path),
+        "overlay_path": str(overlay_path),
+        "data_root": str(selected.data_root),
+        "state_root": str(selected.state_root),
+        "state_writable": state_writable,
+        "plugin_data_writable": data_writable,
+        "config_writable": config_writable,
+        "key_template": key_template,
+        "interpreter": interpreter_change,
+        "proposed": proposed,
+        "workspace": str(workspace) if workspace is not None else None,
+        "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "digest_input": digest_input,
+    }
+
+
+def _toml_preview_value(value: object) -> str:
+    """Render one observed TOML scalar without exposing unrelated config."""
+    if value is None:
+        return "<absent>"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _codex_config_diff(
+    config_path: Path, observed: dict[str, object], proposed: dict[str, bool]
+) -> str:
+    """Return a bounded unified diff for only the three required Codex keys."""
+    before: list[str] = []
+    after: list[str] = []
+    tables: dict[str, list[tuple[str, str]]] = {
+        "features": [("hooks", "features.hooks"), ("multi_agent", "features.multi_agent")],
+        "agents": [("enabled", "agents.enabled")],
+    }
+    for table_name, rows in tables.items():
+        changed = [(key, qualified) for key, qualified in rows if proposed[qualified]]
+        if not changed:
+            continue
+        before.append(f"[{table_name}]")
+        after.append(f"[{table_name}]")
+        for key, qualified in changed:
+            current = observed[qualified]
+            if current is not None:
+                before.append(f"{key} = {_toml_preview_value(current)}")
+            after.append(f"{key} = true")
+    if not before:
+        return ""
+    return "".join(
+        difflib.unified_diff(
+            [line + "\n" for line in before],
+            [line + "\n" for line in after],
+            fromfile=str(config_path),
+            tofile=f"{config_path} (approved)",
+        )
+    )
+
+
+def _non_mutating_writable(path: Path) -> bool:
+    """Check writability without creating, modifying, or deleting anything."""
+    candidate = path
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+    return candidate.is_dir() and os.access(candidate, os.W_OK | os.X_OK)
+
+
+def run_codex_setup(
+    args: argparse.Namespace,
+    *,
+    find_env_python: EnvPythonFinder,
+    check_deps: DepChecker,
+    create_env: EnvCreator,
+    install_deps: DepInstaller,
+    permission_mode: str | None = None,
+) -> int:
+    """Render a Codex preview or apply one only with explicit consent."""
+    live_permission = permission_mode or getattr(args, "permission_mode", None) or os.environ.get(
+        "CODEX_PERMISSION_MODE"
+    )
+    if getattr(args, "apply", False) and live_permission != "bypassPermissions":
+        print(
+            "chinamax: Codex setup mutation requires codex --yolo "
+            "(bypassPermissions); yolo disables Codex approval/sandbox enforcement; "
+            "--read-only is enforced by the ChinamaX Runtime, not Codex's sandbox.",
+            file=sys.stderr,
+        )
+        return 1
+    plan = codex_setup_plan(
+        args.workspace, find_env_python=find_env_python, check_deps=check_deps
+    )
+    if getattr(args, "apply", False):
+        digest = getattr(args, "consent_digest", None)
+        if not digest:
+            print(
+                "chinamax: setup apply requires --consent-digest from a fresh preview",
+                file=sys.stderr,
+            )
+            return 1
+        try:
+            result = apply_codex_setup(
+                plan,
+                digest,
+                overwrite_unmanaged=getattr(args, "confirm_overwrite", False),
+                install_agent=not getattr(args, "no_agent", False),
+                find_env_python=find_env_python,
+                check_deps=check_deps,
+                create_env=create_env,
+                install_deps=install_deps,
+            )
+        except ChinamaxError as error:
+            print(f"chinamax: {error}", file=sys.stderr)
+            return 1
+        sys.stdout.write(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        return 0 if result.get("ok") else 1
+    plan["consent_required"] = True
+    plan["warning"] = "Preview only: no Codex configuration or key files were modified."
+    if getattr(args, "json", False):
+        sys.stdout.write(json.dumps(plan, indent=2, sort_keys=True) + "\n")
+    else:
+        sys.stdout.write(
+            "chinamax Codex setup preview (no writes)\n"
+            + json.dumps(plan, indent=2, sort_keys=True)
+            + "\nApprove this exact digest before applying: "
+            + plan["digest"]
+            + "\n"
+        )
+    return 0
+
+
+def apply_codex_setup(
+    plan: dict,
+    consent_digest: str | None,
+    *,
+    overwrite_unmanaged: bool = False,
+    install_agent: bool = True,
+    context: HostContext | None = None,
+    find_env_python: EnvPythonFinder | None = None,
+    check_deps: DepChecker | None = None,
+    create_env: EnvCreator | None = None,
+    install_deps: DepInstaller | None = None,
+) -> dict:
+    """Apply one previously previewed Codex plan after digest validation.
+
+    This low-level seam is intentionally non-interactive: the native skill owns
+    the yes/no and second overwrite confirmations, while this function enforces
+    their content-addressed boundary and performs each file mutation atomically.
+    """
+    if not consent_digest:
+        raise ChinamaxError("Codex setup apply requires the preview consent digest")
+    selected = context or current_host()
+    if selected.host is not Host.CODEX:
+        raise ChinamaxError("Codex setup apply requires the Codex Host")
+    fresh = codex_setup_plan(
+        plan.get("workspace"),
+        context=selected,
+        find_env_python=find_env_python,
+        check_deps=check_deps,
+    )
+    if consent_digest != fresh["digest"] or plan.get("digest") != fresh["digest"]:
+        raise ChinamaxError(
+            "target is changing between preview and apply; render a fresh Codex setup preview"
+        )
+    config_path = Path(fresh["config_path"])
+    changed: list[str] = []
+    fixes: list[dict] = []
+    find_env_python = find_env_python or _find_env_python
+    create_env = create_env or _create_env
+    install_deps = install_deps or _install_deps
+    env_python = fresh["python"]
+    if fresh["key_template"]["create"] and write_key_template(selected):
+        changed.append(str(profiles.keys_path(selected)))
+        fixes.append({"action": "key-template", "ok": True})
+    if not fresh["env"]["present"]:
+        ok, detail = create_env()
+        fixes.append({"action": "create-env", "ok": ok, "detail": detail})
+        if not ok:
+            return {"ok": False, "changed": changed, "fixes": fixes, "digest": fresh["digest"]}
+        env_python = find_env_python()
+    if env_python and not all(fresh["deps"].values()):
+        ok, detail = install_deps(env_python)
+        fixes.append({"action": "install-deps", "ok": ok, "detail": detail})
+        if not ok:
+            return {"ok": False, "changed": changed, "fixes": fixes, "digest": fresh["digest"]}
+    if env_python and (fresh["interpreter"]["update"] or fresh["interpreter"]["recorded"] != env_python):
+        _write_python_path(python_path_file(selected), env_python)
+        changed.append(str(python_path_file(selected)))
+    if any(fresh["proposed"].values()):
+        try:
+            import tomlkit
+        except ImportError as error:
+            raise ChinamaxError(
+                "tomlkit is required before Codex config can be edited; rerun setup"
+            ) from error
+        try:
+            original = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+            document = tomlkit.parse(original) if original else tomlkit.document()
+        except (OSError, ValueError) as error:
+            raise ChinamaxError(
+                f"Codex config {config_path} is not valid TOML; no config mutation applied"
+            ) from error
+        features = document.get("features")
+        if features is None:
+            features = tomlkit.table()
+            document["features"] = features
+        agents = document.get("agents")
+        if agents is None:
+            agents = tomlkit.table()
+            document["agents"] = agents
+        for key, table in (
+            ("hooks", features),
+            ("multi_agent", features),
+            ("enabled", agents),
+        ):
+            if table.get(key) is not True:
+                table[key] = True
+                changed.append(key)
+        if config_path.exists():
+            shutil.copy2(config_path, config_path.with_name(config_path.name + ".bak"))
+        _atomic_text_write(config_path, tomlkit.dumps(document))
+    target = Path(fresh["agent_path"])
+    if install_agent:
+        if fresh["agent_status"] == "unmanaged-collision" and not overwrite_unmanaged:
+            raise ChinamaxError(
+                f"unmanaged Codex agent collision at {target}; preview and confirm overwrite"
+            )
+        if fresh["agent_status"] != "managed-current":
+            _atomic_text_write(target, compile_codex_agent(_agent_source_path(selected)))
+            changed.append(str(target))
+    result = {"ok": True, "changed": changed, "digest": fresh["digest"], "fixes": fixes}
+    if not install_agent:
+        result["warning"] = f"Codex native agent was not installed at {target}; rerun setup to install it."
+    return result
 
 
 def _workspace_state_dir(root: Path, workspace: str | Path | None) -> Path:
@@ -376,10 +837,10 @@ def _state_writable(directory: Path) -> bool:
         return False
 
 
-def _profile_rows() -> list[dict]:
+def _profile_rows(context: HostContext | None = None) -> list[dict]:
     """Report every Profile's key env-var name and PRESENT/MISSING — never a value."""
-    resolved = profiles.load_profiles()
-    keys = profiles.load_keys()
+    resolved = profiles.load_profiles(context)
+    keys = profiles.load_keys(context)
     rows = []
     for name in sorted(resolved):
         profile = resolved[name]
@@ -394,13 +855,13 @@ def _profile_rows() -> list[dict]:
     return rows
 
 
-def _maybe_record_python(env_python: str) -> None:
+def _maybe_record_python(env_python: str, context: HostContext | None = None) -> None:
     """Record the resolved env python, re-recording only a stale entry.
 
     A stored path that still resolves to an executable is trusted (the Bridge and
     shims already read it); a missing or no-longer-resolving one is re-recorded.
     """
-    target = python_path_file()
+    target = python_path_file(context)
     stored = _read_recorded_python(target)
     if stored is not None and _is_executable(stored):
         return

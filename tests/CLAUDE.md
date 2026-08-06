@@ -2,6 +2,11 @@
 
 Inventory lives in `./repo-map.md`. Run the suite with the command in the root `CLAUDE.md` — it needs the `chinamax` conda env and the editable install.
 
+Host migration tests must cover explicit/env/evidence precedence, disjoint roots,
+host-tagged records, Codex yolo/name invariants, native-agent compilation, and
+manifest parity. Direct CLI tests must provide `--host claude` or Codex evidence;
+the no-marker failure is intentional.
+
 ## Gotchas
 
 - **The suite is keyless and endpoint-clean by construction.** The autouse `keyless_home` fixture points `HOME` at a temp dir and deletes the ambient `ANTHROPIC_*` variables, so tests added later inherit the guarantee instead of opting in. It only holds because the Runtime resolves `~/.claude/...` through `Path.home()`. `test_bearer_auth_and_advertised_tools` re-sets `ANTHROPIC_API_KEY` on purpose — that seeding IS the test; without it the assertion passes even on an implementation that never sanitizes the environment.
@@ -12,6 +17,8 @@ Inventory lives in `./repo-map.md`. Run the suite with the command in the root `
 - **Compare results parsed, never as bytes.** The SDK reparses `input_json_delta` into a dict, so a byte comparison asserts on serialization formatting rather than on payload fidelity.
 - **Assert external behavior at the seam** — files produced, transcript written, result stored, requests recorded — never internal call sequences. `JobEnv.observations()` reads the tool_results back out of the durable Thread, which is the seam for anything a tool reported.
 - **Script one tool call per turn** (`tool_script`, `bash_script`). A test that asserts the loop *continued* after a failed tool needs a later turn to have executed; packing calls into one turn cannot show that.
+- **Keep read-only coverage on common write shapes.** `test_readonly.py` checks both redirection and command-form writers such as `touch`; the sentinel must remain absent after every refused tool call.
+- **Adapter posture is part of the contract.** `test_codex_adapter.py` pins that the Codex task skill forwards an explicit `--read-only` request instead of letting yolo silently turn it into a write-capable Job.
 - **A negative assertion must not be satisfiable by the message itself.** `grep` echoes its pattern back in "no matches for 'X'", so asserting `"X" not in observation` passes vacuously — `test_recursive_symlink_not_followed` uses a different token for the pattern and for the outside file's contents on purpose.
 - **`JobEnv.tree()` walks with `followlinks=False`**, not `rglob`, for the same reason the Runtime does: on Python 3.12 `rglob` follows directory symlinks and a confinement test would walk out of its own workspace.
 - **The process-group test is only meaningful because an orphan normally survives.** `test_timeout_observation_continues` asserts a backgrounded descendant is dead; killing the child alone leaves it running, which is what makes the assertion bite.

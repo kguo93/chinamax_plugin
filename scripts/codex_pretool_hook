@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Shared PreToolUse registration; the Python handler is silent for Claude.
+set -euo pipefail
+CHINAMAX_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+. "${CHINAMAX_SCRIPT_DIR}/_interpreter.sh"
+chinamax_exec chinamax.hooks.codex_pretool "$@"

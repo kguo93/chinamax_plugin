@@ -13,11 +13,12 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from chinamax.hooks.bridge_contract import CONTRACT as HOOK_CONTRACT
-
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMAND = (REPO_ROOT / "commands" / "task.md").read_text(encoding="utf-8")
-CONTRACT = (REPO_ROOT / "agents" / "chinamax.md").read_text(encoding="utf-8")
+AGENT = (REPO_ROOT / "agents" / "chinamax.md").read_text(encoding="utf-8")
+CONTRACT = (REPO_ROOT / "skills" / "chinamax-bridge" / "SKILL.md").read_text(
+    encoding="utf-8"
+)
 
 #: Stanzas that MUST appear (whitespace-normalized) in ALL THREE Bridge-contract
 #: copies — the task command's embedded prompt, the agent contract, and the
@@ -81,16 +82,13 @@ def test_command_arg_mapping():
 
 
 def test_contract_lockstep_three_way():
-    """Each shared stanza is present in ALL THREE Bridge-contract copies — the task
-    prompt, the agent contract, and the hook-injected constant — so they cannot
-    silently drift apart."""
+    """The task adapter and canonical skill share the load-bearing contract."""
     command = _normalized(COMMAND)
     contract = _normalized(CONTRACT)
-    hook = _normalized(HOOK_CONTRACT)
     for stanza in SHARED_STANZAS:
         assert stanza in command, f"missing from commands/task.md: {stanza!r}"
-        assert stanza in contract, f"missing from agents/chinamax.md: {stanza!r}"
-        assert stanza in hook, f"missing from bridge_contract.CONTRACT: {stanza!r}"
+        assert stanza in contract, f"missing from canonical Bridge skill: {stanza!r}"
+    assert "skills/chinamax-bridge/skill.md" in _normalized(AGENT)
 
 
 def test_model_override_present_in_contract_copies():
@@ -103,9 +101,8 @@ def test_model_override_present_in_contract_copies():
         assert "--model='<string>'" in text
         assert "spaces or quote characters" in _normalized(text)
     # The out-of-scope enumeration gains "a different model string" in ALL THREE
-    # copies and STILL names "a new unrelated task" — the step-6 insertion into
-    # the hook's CONTRACT must not have replaced the trailing case.
-    for text in (COMMAND, CONTRACT, HOOK_CONTRACT):
+    # adapters and canonical skill and STILL names "a new unrelated task".
+    for text in (COMMAND, CONTRACT):
         normalized = _normalized(text)
         assert "a different model string" in normalized, "model out-of-scope case dropped"
         assert "a new unrelated task" in normalized, "unrelated-task case dropped"

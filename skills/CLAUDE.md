@@ -2,6 +2,16 @@
 
 Inventory lives in `./repo-map.md`.
 
+- `chinamax-bridge/SKILL.md` is the single maintained Host-neutral Bridge
+  contract. Claude's `agents/chinamax.md` and `commands/task.md` load it; Codex
+  root skills are thin adapters and must not copy the contract.
+- `chinamax-task` is mutation/yolo-gated; status, profiles, and setup are
+  diagnostic surfaces. The task adapter uses Codex's trusted YOLO status as the
+  permission signal and transports `bypassPermissions` explicitly to the
+  Runtime when the CLI leaves its mode environment variable empty. It must also
+  preserve the operator's optional `--read-only` posture when forwarding the
+  task. Keep exact underscore-safe Codex naming in the adapter.
+
 - **The loader discovers `skills/<name>/SKILL.md` only.** A file at this ROOT (this
   trio) is not a `SKILL.md`, so it is never mistaken for a skill — which is why the
   trio lives here and NOT inside `chinamax-results/`, where it would be bundled into

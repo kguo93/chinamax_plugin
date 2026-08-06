@@ -19,7 +19,7 @@ reconcile by amending the ADR or fixing the code — never by trusting stale pro
 ## ADR formatting rules
 
 - **Filename**: `NNNN-kebab-slug.md`, four-digit zero-padded, sequential, no gaps. The next
-  number is the highest in `adr/` plus one (currently → `0013`).
+number is the highest in `adr/` plus one (currently → `0015`).
 - **Heading**: a bare prose title, e.g. `# One Bridge Agent, providers as Profiles, no
   default` (match the existing ADRs — no leading number).
 - **Amend in place; never fork a decision** (root `CLAUDE.md`): when a later decision changes
@@ -32,7 +32,7 @@ reconcile by amending the ADR or fixing the code — never by trusting stale pro
 ## Read routing — which ADR to read for which purpose
 
 Match your change to a row and read that ADR (plus `../CONTEXT.md`) **before** editing. The
-twelve ADRs group into five themes.
+fourteen ADRs group into six themes.
 
 ### 1 · Runtime & provider wire
 | If your change / question touches… | Read | Governs |
@@ -66,9 +66,15 @@ twelve ADRs group into five themes.
 | Test harness — the hermetic fake Anthropic-Messages provider server; no API keys | **0011** | `tests/` |
 | Install source — GitHub canonical, rpi4 backup mirror, marketplace/manifest/versioning, git remotes | **0012** | `.claude-plugin/`, `src/chinamax/doctor.py` (`source_repo_path`) |
 
+### 6 · Host architecture
+| If your change / question touches… | Read | Governs |
+|---|---|---|
+| Host-neutral Runtime seams and thin Claude/Codex adapters | **0013** | `src/chinamax/host.py`, `src/chinamax/__main__.py`, `src/chinamax/codex.py` |
+| Codex yolo permission boundary and detached lifecycle backstop | **0014** | `src/chinamax/codex.py`, `src/chinamax/hooks/codex_pretool.py`, `scripts/codex_pretool_hook`, `skills/chinamax-*` |
+
 ## Edit routing — which ADR to amend when a decision changes
 
-- **A change inside one of the five themes** → amend that theme's ADR in place (dated
+- **A change inside one of the six themes** → amend that theme's ADR in place (dated
   `**Amended <date>**` paragraph), per the ADR formatting rules above.
 - **A reversal** (the new decision contradicts the old) → quote the original, then override,
   in the SAME file; `git mv` the slug if it now lies. (Precedent: ADR 0004.)

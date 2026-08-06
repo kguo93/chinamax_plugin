@@ -1,6 +1,6 @@
 # chinamax
 
-A Claude Code plugin that exposes non-Claude worker models — **deepseek**, **mimo**,
+A dual-Host plugin that exposes non-Claude worker models — **deepseek**, **mimo**,
 **glm**, **minimax**, **kimi** — as a first-class named subagent. You dispatch a task
 by naming a Profile; a thin Claude-facing bridge hands it to a detached, durable
 runtime that owns the provider conversation, runs the tools, and reports back. The
@@ -11,8 +11,8 @@ runtime speaks each provider's Anthropic-compatible Messages API (the proven
 
 Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md)):
 
-- **Bridge Agent** — the Claude-facing named subagent, registered as `chinamax`
-  (agent type `chinamax:chinamax`). Each `/chinamax:task` spawns a **persistent**
+- **Bridge Agent** — the Host-facing named subagent, registered as `chinamax`
+  (Claude agent type `chinamax:chinamax`). Each task adapter spawns a **persistent**
   Bridge named `chinamax-<profile>-<task-slug>` that owns one Thread for the
   session's life: it forwards one dispatch to the runtime, long-polls it in
   silence, relays the outcome exactly once when the Job ends (the worker's response
@@ -29,8 +29,8 @@ Five terms carry the whole design (full definitions in [`CONTEXT.md`](CONTEXT.md
 - **Job** — one durable unit of dispatched work with persistent state, logs, and a
   lifecycle (`queued`, `running`, `completed`, `failed`, `cancelled`; a crashed
   worker's Job reads as `interrupted`). It is **session-scoped**: it is killed when
-  the Claude session that started it ends — including `/clear` — and a Job orphaned
-  by a crashed session is reaped, never resumed.
+  the Host Session that started it ends. Claude synchronously reaps on SessionEnd;
+  Codex uses a detached token-safe reaper when that lifecycle event is available.
 - **Thread** — the persistent worker-model transcript belonging to a Job. Resuming
   carries the Thread forward; a Job's steers and follow-ups land in it. One Bridge
   serves one Thread for its whole life.
@@ -78,6 +78,33 @@ conda create -y -n chinamax python=3.12
 conda run -n chinamax pip install -e '/path/to/chinamax_plugin[test]'
 ```
 
+### Claude Code and Codex hosts
+
+The Runtime is shared by both Hosts, but each process resolves its Host before
+reading state. Use `--host claude|codex` or set `CHINAMAX_HOST`; native Codex
+`PLUGIN_*` evidence wins over Claude-compatible aliases. Claude uses
+`~/.claude`, `CLAUDE_PLUGIN_DATA`, and the `chinamax` XDG fallback. Codex uses
+`~/.codex`, `PLUGIN_DATA`, and the separate `chinamax-codex` fallback. A missing
+or malformed marker fails closed, and state is never read across Hosts.
+
+Claude retains `/chinamax:task` with one named Haiku Bridge. Codex exposes the
+root `chinamax-task`, `chinamax-status`, `chinamax-profiles`, and
+`chinamax-setup` skills; mutating task/setup operations require `codex --yolo`
+(`bypassPermissions`). Codex Bridge names are deterministic underscore-safe
+names using `gpt-5.6-terra` at low reasoning with no fork history. Runtime
+`--read-only` remains the authoritative tool-layer policy; Codex sandboxing is
+not a replacement for it.
+
+Codex installation is through `/plugins`: add/select the same
+`kguo93/chinamax_plugin` marketplace, enable `chinamax`, start a new session,
+and run `$chinamax-setup`. Trust the plugin hooks in Codex when prompted. Run
+task or setup mutation only with `codex --yolo`; status and profiles remain
+diagnostic outside yolo. The compatibility assumptions are documented by the
+[Codex plugin guide](https://developers.openai.com/plugins/build/plugins),
+[Codex hooks reference](https://learn.chatgpt.com/docs/hooks),
+[Codex subagents reference](https://learn.chatgpt.com/docs/agent-configuration/subagents),
+and [Codex approvals and sandboxing](https://learn.chatgpt.com/docs/agent-approvals-security).
+
 ## Configuration
 
 ### Profiles
@@ -103,10 +130,11 @@ provider's ceiling, carried as a `request_extras` dict merged into every request
 Run [`/chinamax:profiles`](#chinamaxprofiles) to see the resolved rows and each
 key's presence at a glance.
 
-### Overlay: `~/.claude/chinamax-profiles.json`
+### Profile overlays: Host-specific paths
 
-An optional user overlay merges over the shipped rows field by field. It is a JSON
-array of rows; each row's `name` selects the Profile:
+An optional user overlay merges over the shipped rows field by field. Claude reads
+`~/.claude/chinamax-profiles.json`; Codex reads `~/.codex/chinamax-profiles.json`.
+They are separate JSON arrays of rows; each row's `name` selects the Profile:
 
 - A row whose `name` matches a shipped Profile overrides only the fields it lists
   (e.g. point `deepseek` at a proxy by giving just `name` and `base_url`).
@@ -124,9 +152,10 @@ array of rows; each row's `name` selects the Profile:
 An unknown field, a duplicate name, or a malformed file is rejected with a named
 error, so a typo fails loudly rather than being silently dispatched.
 
-### API keys: `~/.claude/model-keys.env`
+### API keys: Host-specific files
 
-Keys are read from `~/.claude/model-keys.env`, one `NAME=value` per line, using the
+Claude keys are read from `~/.claude/model-keys.env`; Codex keys are read from
+`~/.codex/model-keys.env`. Both use one `NAME=value` per line, using the
 variable names in the table above. When the file does not exist,
 [`/chinamax:setup`](#chinamaxsetup) scaffolds it as a comments-only template — one
 commented `<api_key_env>=` line per resolved Profile (overlay-added Profiles
@@ -146,7 +175,7 @@ KIMI_API_KEY=...
 Key **values** are never printed on any stream — `profiles` and `setup` report each
 key only as `PRESENT` or `MISSING` by variable name. A Profile whose key is missing
 or empty fails its first dispatch with `missing API key: <NAME> is not set in
-~/.claude/model-keys.env`.
+the selected Host's model-keys.env`.
 
 ### Per-dispatch flags
 
@@ -214,9 +243,9 @@ The environment doctor — it diagnoses **and fixes** the install in one pass; s
 ## Talking to a Bridge
 
 Once a `/chinamax:task` is running, its Bridge is a live teammate named
-`chinamax-<profile>-<task-slug>`. You interact with the Job by **addressing that
-Bridge** — by its teammate name, its profile, or "the bridge"/"the worker". The
-Bridge classifies each message and acts on its own Thread:
+`chinamax-<profile>-<task-slug>`. You interact with the Job only by including
+that complete exact Bridge name in your message. The Bridge classifies each
+message and acts on its own Thread:
 
 - **Steer** a running Job — send an instruction ("also update the tests", "stop
   touching module X"). It lands in the Thread at the runtime's next loop boundary,
@@ -231,22 +260,24 @@ Bridge classifies each message and acts on its own Thread:
   unrelated task, is refused with a pointer to dispatch a new `/chinamax:task` (a new
   Bridge). One Bridge serves one Thread and never switches its model or Profile.
 
-Main forwards a message to a Bridge **only when you address it**; anything else is
-Claude's own work. If several Bridges are live at once, name the one you mean.
+Main forwards a message to a Bridge **only when you include one complete exact
+live Bridge name**; profile-only or generic references do not route. If zero or
+multiple exact names match, name exactly one Bridge.
 
 ## How Jobs live
 
-**A Job is session-scoped (ADR 0004, reversed 2026-07-30).** A Job never outlives
-the Claude session that started it:
+**A Job is Host-Session-scoped (ADR 0004, reversed 2026-07-30).** A Job never
+outlives the Host Session that started it:
 
-- **SessionEnd** — including `/clear` — kills the ending session's still-active
-  Jobs (the whole process tree) and marks their records `cancelled`.
-- **SessionStart** registers the live Claude process in a session-liveness registry,
-  then **reaps orphans**: any active Job whose owning session is no longer alive
-  (the crash path, where SessionEnd never fired) is marked `interrupted`. It then
-  injects a bounded, bridge-first digest of this workspace's running/recent Jobs (so
-  a fresh session — or one after `/clear` — sees what was just terminated and any
-  live Job mid-flight), and a non-blocking `Stop` hook notices still-running Jobs at
+- **Claude SessionEnd** — including `/clear` — synchronously kills the ending
+  session's still-active Jobs (the whole process tree) and marks their records
+  `cancelled`. Codex starts a detached token-safe reaper when its SessionEnd
+  lifecycle event is delivered.
+- **SessionStart** registers the live Host process and injects a bounded,
+  bridge-first digest of this workspace's running/recent Jobs (so a fresh Host
+  Session sees what was just terminated and any live Job mid-flight). Claude then
+  repairs predecessor/orphan state; Codex intentionally does not adopt stranded
+  orphan processes. A non-blocking `Stop` hook notices still-running Jobs at
   turn's end.
 - A dead session's Job ids are **never** resumed or re-attached. Continuing work is
   only ever a live Bridge Agent resuming its own Thread inside the owning session.
@@ -262,18 +293,15 @@ resume-created Job) `resumedFrom` and a `lineageRoot` — so one Bridge's whole 
 lineage stays addressable and a resume refuses only when its own lineage is still
 active, never workspace-wide.
 
-**State root.** Every per-workspace state directory lives under one root:
-
-- `$CLAUDE_PLUGIN_DATA/state` when `CLAUDE_PLUGIN_DATA` is set (as it usually is
-  inside Claude Code),
-- else `$XDG_STATE_HOME/chinamax`,
-- else `~/.local/state/chinamax`.
-
-An empty or relative value counts as unset. The session-liveness registry lives
-under a sibling `sessions/` directory. The `SessionStart` hook re-exports
-`CLAUDE_PLUGIN_DATA` so the hooks and the Bridge's dispatches agree on the root —
-otherwise Jobs would land under one root while the digest and the reaps read
-another.
+**State root.** Every per-workspace state directory lives under the selected
+Host's root. Claude uses `$CLAUDE_PLUGIN_DATA/state`, then
+`$XDG_STATE_HOME/chinamax`, then `~/.local/state/chinamax`. Codex uses
+`$PLUGIN_DATA/state`, then `$XDG_STATE_HOME/chinamax-codex`, then
+`~/.local/state/chinamax-codex`. An empty or relative value counts as unset; the
+two roots, interpreter records, registries, keys, overlays, and Jobs never cross.
+The session-liveness registry lives under each root's sibling `sessions/`
+directory. Host adapters export the selected data root and SessionStart emits
+the Codex session id/token needed for later dispatches.
 
 **Per-workspace layout.** Within the root, each workspace gets its own directory
 named `<repo-basename>-<sha256[:16]>`, keyed on the **git toplevel** of the
@@ -305,26 +333,27 @@ continuing via its Bridge.
 
 ### The setup doctor: `/chinamax:setup`
 
-Run it first, and whenever a dispatch misbehaves. In one pass it diagnoses — and
-**fixes** — what a first run needs:
+Run it first, and whenever a dispatch misbehaves. Claude setup diagnoses and
+**fixes** what a first run needs in one pass. Codex setup first renders a redacted,
+non-mutating preview and applies only after an explicit consent digest:
 
 - **conda env** — a missing `chinamax` env is created with
   `conda create -y -n chinamax python=3.12`. If conda itself is absent, that is
   reported once with install-miniconda advice, never retried.
-- **dependencies** — whether `chinamax`, `anthropic`, and `pytest` import **under
+- **dependencies** — whether `chinamax`, `anthropic`, `pytest`, and `tomlkit` import **under
   the resolved env python** (never the interpreter the doctor itself runs under, so
   a bootstrap run on a fresh machine does not grade itself); missing deps are
   installed with `pip install -e '<repo>[test]'` under that python.
 - **API keys** — each Profile's key entry as `PRESENT` or `MISSING`, by variable
-  name. A missing `~/.claude/model-keys.env` is scaffolded as a commented template
-  (an existing file is never touched); key presence is reported but never fails
-  the run — an unused Profile must not block setup.
-- **state directory** — the resolved state root, this workspace's state directory,
-  and whether it is writable.
+  name, using the selected Host's key file. A missing key file is scaffolded only
+  during approved setup (an existing file is never touched).
+- **state directory** — the resolved Host state root, this workspace's state
+  directory, and whether it is writable. Codex's preview checks this without
+  creating or deleting a probe file and includes the exact bounded config diff.
 
-A healthy machine's run mutates nothing and reports a pure diagnosis. It also
-records the resolved env python at `<data root>/python-path`, which the Bridge and
-the shell shims read first when resolving the interpreter.
+A healthy Claude run mutates nothing and reports a pure diagnosis. Codex's Phase A
+also mutates nothing; its approved Phase B records the interpreter at
+`<data root>/python-path`, which the Bridge and shell shims read first.
 
 `/chinamax:setup --json` emits a machine-readable document with the pinned fields
 `ok`, `python`, `state_root`, `workspace_state_dir`, `state_writable`, `env`
@@ -335,7 +364,7 @@ three deps import, state writable), and `1` otherwise.
 
 ### Common provider errors
 
-- **`missing API key: <NAME> is not set in ~/.claude/model-keys.env`** — the
+- **`missing API key: <NAME> is not set in the selected Host's model-keys.env`** — the
   Profile's key variable is absent or empty. Add it to `model-keys.env`. `setup` and
   `profiles` will show that Profile as `MISSING`.
 - **A present-but-revoked key still passes preflight.** `setup` and `profiles` check
@@ -358,8 +387,13 @@ the worker was killed mid-run while its session was still alive, the record's st
 status stays `running`/`queued` and the Thread is preserved — message the Job's
 Bridge to continue it (a resume). If instead the **owning session** ended and the
 Job was reaped, `interrupted` is written onto the record and that Thread is
-policy-dead — it is not resumable; dispatch a fresh `/chinamax:task`. And an
+policy-dead — it is not resumable; dispatch a fresh task. And an
 `interrupted` Job whose reason is `bridge terminated` means the Job's **Bridge**
 teammate died or stopped polling — the session hooks reaped the Job and that Thread
-is also stranded, so dispatch a fresh `/chinamax:task`. Either way, do not wait on
+is also stranded, so dispatch a fresh task. Either way, do not wait on
 an interrupted Job — it will never leave that state by itself.
+
+Codex has an additional lifecycle limitation: an abrupt close or `/clear` may not
+deliver SessionEnd. In that case a detached worker process can continue running
+and consuming provider credit, while its record remains visible to status; Codex
+SessionStart intentionally does not adopt or repair that orphan.

@@ -533,6 +533,10 @@ def keyless_home(tmp_path_factory, monkeypatch) -> Path:
     (home / ".claude").mkdir()
     write_keys(home, SYNTHETIC_KEYS)
     monkeypatch.setenv("HOME", str(home))
+    # Existing Runtime seam tests call library entrypoints directly; bind them
+    # explicitly to the Claude adapter while dedicated Host tests exercise the
+    # fail-closed no-marker behavior.
+    monkeypatch.setenv("CHINAMAX_HOST", "claude")
     for name in AMBIENT_VARIABLES:
         monkeypatch.delenv(name, raising=False)
     return home

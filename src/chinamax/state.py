@@ -51,6 +51,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
 from chinamax import ChinamaxError
+from chinamax.host import Host, HostContext, current_host
 from chinamax.transcript import merge_follow_up, read_repaired_messages, write_messages
 
 #: Bumped only for a breaking record change; the schema is additive otherwise —
@@ -116,9 +117,9 @@ _TERMINATE_CONFIRM_S = 5.0
 SESSION_REAP_GRACE_S = 2.0
 SESSION_REAP_CONFIRM_S = 2.0
 #: What a SessionEnd (or same-PID predecessor) reap stamps as a Job's reason.
-SESSION_REAP_REASON = "Reaped: the owning Claude session ended."
+SESSION_REAP_REASON = "Reaped: the owning Host Session ended."
 #: What an orphan reap stamps when a dead session's Job is marked `interrupted`.
-ORPHAN_REAP_REASON = "Interrupted: the owning Claude session is no longer alive."
+ORPHAN_REAP_REASON = "Interrupted: the owning Host Session is no longer alive."
 #: What a stale-supervision sweep stamps when a Job is reaped because its Bridge
 #: died or abandoned its poll loop — distinguishable from the dead-session reason.
 SUPERVISION_REAP_REASON = "bridge terminated"
@@ -149,6 +150,9 @@ FILE_MODE = 0o600
 #: This IS the owning-session field: `reap_session`/`reap_orphans` key a Job's
 #: lifecycle off the `sessionId` it populates (ADR 0004, reversed 2026-07-30).
 SESSION_ID_VARIABLE = "CHINAMAX_SESSION_ID"
+# Codex uses a persisted ownership token in addition to its session id. Claude
+# leaves this unset; the field remains additive and harmless in Claude records.
+SESSION_TOKEN_VARIABLE = "CHINAMAX_SESSION_TOKEN"
 #: Overrides the interpreter the detached worker runs under. Tests point it at a
 #: non-executable path to make a spawn fail for real, with no mocked process layer.
 WORKER_PYTHON_VARIABLE = "CHINAMAX_WORKER_PYTHON"
@@ -182,6 +186,8 @@ RECORD_DEFAULTS: dict[str, object] = {
     "write": True,
     "workspaceRoot": None,
     "sessionId": None,
+    "host": None,
+    "sessionToken": None,
     "bridgeName": None,
     "resumedFrom": None,
     "lineageRoot": None,
@@ -656,12 +662,18 @@ def worker_python() -> str:
 
 
 def session_id() -> str | None:
-    """Return the originating Claude session id, or None when absent."""
+    """Return the originating Host Session id, or None when absent."""
     value = os.environ.get(SESSION_ID_VARIABLE, "").strip()
     return value or None
 
 
-def state_root() -> Path:
+def session_token() -> str | None:
+    """Return the current Host Session ownership token, when exported."""
+    value = os.environ.get(SESSION_TOKEN_VARIABLE, "").strip()
+    return value or None
+
+
+def state_root(context: HostContext | None = None) -> Path:
     """Return the root every per-workspace state dir lives under.
 
     ``CLAUDE_PLUGIN_DATA`` wins when set, else ``XDG_STATE_HOME`` as the
@@ -669,13 +681,7 @@ def state_root() -> Path:
     relative root would resolve differently in the dispatcher and in the worker,
     which runs from a different cwd.
     """
-    plugin_data = _absolute_env_dir("CLAUDE_PLUGIN_DATA")
-    if plugin_data is not None:
-        return plugin_data / "state"
-    xdg = _absolute_env_dir("XDG_STATE_HOME")
-    if xdg is not None:
-        return xdg / "chinamax"
-    return Path.home() / ".local" / "state" / "chinamax"
+    return (context or current_host()).state_root
 
 
 #: Comms of the transient wrappers between a hook's python and the long-lived
@@ -696,19 +702,21 @@ _SHIM_COMMS = frozenset(
 )
 
 
-def sessions_dir() -> Path:
+def sessions_dir(context: HostContext | None = None) -> Path:
     """Return the session-liveness registry directory.
 
     A SIBLING of the state root (``<data root>/sessions``), deliberately OUTSIDE
     it so `iter_workspace_stores`'s ``state_root()/*`` walk never mistakes a
     registry file for a workspace store.
     """
-    return state_root().parent / "sessions"
+    return state_root(context).parent / "sessions"
 
 
-def session_registry_path(session_id_value: str) -> Path:
+def session_registry_path(
+    session_id_value: str, context: HostContext | None = None
+) -> Path:
     """Return one session's registry file path."""
-    return sessions_dir() / session_id_value
+    return sessions_dir(context) / session_id_value
 
 
 def read_comm(pid: int) -> str | None:
@@ -780,15 +788,37 @@ def session_alive(pid: int | None, start_time: int | None) -> bool:
 
 
 def write_session_registry(
-    session_id_value: str, pid: int, start_time: int | None
+    session_id_value: str,
+    pid: int,
+    start_time: int | None,
+    token: str | None = None,
 ) -> None:
-    """Record a live Claude session's ``(pid, start_time)`` atomically."""
+    """Record a live Host Session's owner and token atomically."""
     path = session_registry_path(session_id_value)
     make_dir(path.parent)
-    _write_file(
-        path,
-        json.dumps({"pid": pid, "pidStartTime": start_time}, sort_keys=True) + "\n",
-    )
+    with _session_registry_lock():
+        _write_file(
+            path,
+            json.dumps(
+                {"pid": pid, "pidStartTime": start_time, "token": token}, sort_keys=True
+            )
+            + "\n",
+        )
+
+
+@contextmanager
+def _session_registry_lock() -> Iterator[None]:
+    """Serialize registry writes and compare-and-delete operations."""
+    directory = sessions_dir()
+    make_dir(directory)
+    handle = os.open(directory / ".registry.lock", os.O_CREAT | os.O_RDWR, FILE_MODE)
+    try:
+        os.fchmod(handle, FILE_MODE)
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        os.close(handle)
 
 
 def read_session_registry(session_id_value: str) -> tuple[int, int | None] | None:
@@ -805,9 +835,26 @@ def read_session_registry(session_id_value: str) -> tuple[int, int | None] | Non
     return data["pid"], start if isinstance(start, int) else None
 
 
-def remove_session_registry(session_id_value: str) -> None:
-    """Remove one session's registry file, tolerating absence."""
-    _unlink(session_registry_path(session_id_value))
+def read_session_token(session_id_value: str) -> str | None:
+    """Return a Codex Session ownership token, when one is registered."""
+    try:
+        data = json.loads(
+            session_registry_path(session_id_value).read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return None
+    token = data.get("token") if isinstance(data, dict) else None
+    return token if isinstance(token, str) and token else None
+
+
+def remove_session_registry(
+    session_id_value: str, expected_token: str | None = None
+) -> None:
+    """Compare-and-delete one session registry file, tolerating absence."""
+    with _session_registry_lock():
+        if expected_token is not None and read_session_token(session_id_value) != expected_token:
+            return
+        _unlink(session_registry_path(session_id_value))
 
 
 def iter_session_registrations() -> Iterator[tuple[str, int, int | None]]:
@@ -862,7 +909,9 @@ def workspace_key(root: Path) -> str:
     return f"{root.name or 'root'}-{digest}"
 
 
-def open_store(workspace: str | Path | None = None) -> "JobStore":
+def open_store(
+    workspace: str | Path | None = None, context: HostContext | None = None
+) -> "JobStore":
     """Open the store for one workspace, resolving its root first.
 
     Args:
@@ -875,10 +924,17 @@ def open_store(workspace: str | Path | None = None) -> "JobStore":
         ChinamaxError: If the requested workspace is not an existing directory.
     """
     root = resolve_workspace_root(workspace)
-    return JobStore(state_root() / workspace_key(root), workspace_root=root)
+    selected = context or current_host()
+    return JobStore(
+        selected.state_root / workspace_key(root),
+        workspace_root=root,
+        host_context=selected,
+    )
 
 
-def list_jobs_tolerant(workspace: str | Path | None = None) -> tuple[list[dict], int]:
+def list_jobs_tolerant(
+    workspace: str | Path | None = None, context: HostContext | None = None
+) -> tuple[list[dict], int]:
     """Enumerate a workspace's Jobs, tolerating malformed or missing state.
 
     THE shared tolerant enumeration seam behind both session hooks and the same
@@ -896,11 +952,13 @@ def list_jobs_tolerant(workspace: str | Path | None = None) -> tuple[list[dict],
     Returns:
         The readable records, and the number that would not parse.
     """
-    records, malformed = open_store(workspace).load_records()
+    records, malformed = open_store(workspace, context=context).load_records()
     return records, len(malformed)
 
 
-def iter_workspace_stores() -> Iterator["JobStore"]:
+def iter_workspace_stores(
+    context: HostContext | None = None,
+) -> Iterator["JobStore"]:
     """Yield a JobStore for every per-workspace state dir under the state root.
 
     THE shared reap iteration: a session may own Jobs in several workspaces
@@ -909,13 +967,14 @@ def iter_workspace_stores() -> Iterator["JobStore"]:
     ``python-path`` record is a file, so a directory-only walk keeps both out of
     the sweep by construction.
     """
+    selected = context or current_host()
     try:
-        entries = sorted(state_root().glob("*"))
+        entries = sorted(selected.state_root.glob("*"))
     except OSError:
         return
     for entry in entries:
         if entry.is_dir():
-            yield JobStore(entry)
+            yield JobStore(entry, host_context=selected)
 
 
 @dataclass
@@ -980,6 +1039,7 @@ def _reap_record(
 def reap_session(
     session_id_value: str,
     *,
+    session_token: str | None = None,
     grace_s: float = SESSION_REAP_GRACE_S,
     confirm_s: float = SESSION_REAP_CONFIRM_S,
 ) -> ReapResult:
@@ -1000,6 +1060,8 @@ def reap_session(
     for store in iter_workspace_stores():
         for record in _stored_active_records(store):
             if record.get("sessionId") != session_id_value:
+                continue
+            if session_token is not None and record.get("sessionToken") != session_token:
                 continue
             marked, survivors = _reap_record(
                 store, record, STATUS_CANCELLED, SESSION_REAP_REASON, grace_s, confirm_s
@@ -1412,6 +1474,8 @@ def new_record(
     model: str | None = None,
     originating_session: str | None = None,
     bridge_name: str | None = None,
+    host: str | Host | None = None,
+    session_token: str | None = None,
 ) -> dict:
     """Build the first version of a Job record.
 
@@ -1428,7 +1492,7 @@ def new_record(
         log_file: The Job's progress log path.
         bash_timeout_s: The per-command bash timeout, when overridden.
         model: The pinned model string, when the dispatch named one.
-        originating_session: The owning Claude session id, or None.
+        originating_session: The owning Host Session id, or None.
         bridge_name: The persistent Bridge teammate that owns this Job's Thread
             (``chinamax-<profile>-<task-slug>``), or None for a direct dispatch.
 
@@ -1446,6 +1510,7 @@ def new_record(
         request["bashTimeoutSec"] = bash_timeout_s
     if model is not None:
         request["model"] = model
+    selected_host = str(host or current_host().host.value)
     record = dict(RECORD_DEFAULTS)
     record.update(
         {
@@ -1455,6 +1520,8 @@ def new_record(
             "write": write,
             "workspaceRoot": str(workspace_root),
             "sessionId": originating_session,
+            "host": selected_host,
+            "sessionToken": session_token,
             "bridgeName": bridge_name,
             "status": STATUS_QUEUED,
             "createdAt": now,
@@ -1499,7 +1566,9 @@ def resolve_selector(selector: str, known: Iterable[str]) -> str:
     raise ChinamaxError(f"no Job matching {selector!r}; known Jobs: {listed}")
 
 
-def normalize_record(record: dict) -> dict:
+def normalize_record(
+    record: dict, host_context: HostContext | None = None
+) -> dict:
     """Fill in missing optional fields, keeping every unknown one.
 
     That pair is what makes the schema additive: no field is ever removed or
@@ -1513,13 +1582,20 @@ def normalize_record(record: dict) -> dict:
     """
     merged = dict(RECORD_DEFAULTS)
     merged.update(record)
+    if merged.get("host") is None and (host_context or current_host()).host is Host.CLAUDE:
+        merged["host"] = Host.CLAUDE.value
     return merged
 
 
 class JobStore:
     """One workspace's durable Job store."""
 
-    def __init__(self, path: str | Path, workspace_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        workspace_root: Path | None = None,
+        host_context: HostContext | None = None,
+    ) -> None:
         """Bind a store to its per-workspace directory.
 
         Args:
@@ -1528,6 +1604,7 @@ class JobStore:
         """
         self.path = Path(path)
         self.workspace_root = workspace_root
+        self.host_context = host_context or current_host()
 
     @property
     def jobs_dir(self) -> Path:
@@ -1657,7 +1734,7 @@ class JobStore:
                 record["updatedAt"] = utc_now()
             self._publish(record)
             self._sync_index()
-            return normalize_record(record)
+            return normalize_record(record, self.host_context)
 
     def claim(self, job_id: str, changes: dict) -> dict | None:
         """Claim a queued record, or RECLAIM a crashed worker's non-terminal one.
@@ -1687,19 +1764,20 @@ class JobStore:
                 return None
             status = record.get("status")
             if status != STATUS_QUEUED and not (
-                status in ACTIVE_STATUSES and worker_gone(normalize_record(record))
+                status in ACTIVE_STATUSES
+                and worker_gone(normalize_record(record, self.host_context))
             ):
                 return None
             record.update(changes)
             record["updatedAt"] = utc_now()
             self._publish(record)
             self._sync_index()
-            return normalize_record(record)
+            return normalize_record(record, self.host_context)
 
     def try_read(self, job_id: str) -> dict | None:
         """Return one record, or None when it is missing, empty or unparsable."""
         record = self._read(job_id)
-        return None if record is None else normalize_record(record)
+        return None if record is None else normalize_record(record, self.host_context)
 
     def read(self, job_id: str) -> dict:
         """Return one record.
@@ -1732,8 +1810,14 @@ class JobStore:
             # The rebuild is a WRITE, so it obeys the same locking discipline as
             # every other write: an unlocked rebuild racing a mutator's
             # record-then-index pair would put a stale index over a fresh one.
-            with self._locked():
-                derived = self._sync_index()
+            try:
+                with self._locked():
+                    derived = self._sync_index()
+            except OSError:
+                # A non-yolo Codex diagnostic may be able to read derived
+                # filenames while its sandbox blocks the index rebuild write.
+                if self.host_context.host is not Host.CODEX:
+                    raise
         return sorted(derived)
 
     def load_records(self) -> tuple[list[dict], list[str]]:
@@ -1789,7 +1873,12 @@ class JobStore:
             return self._prune_locked(keep)
 
     def create_resume(
-        self, selector: str | None, prompt: str, *, originating_session: str | None = None
+        self,
+        selector: str | None,
+        prompt: str,
+        *,
+        originating_session: str | None = None,
+        session_token: str | None = None,
     ) -> dict:
         """Create a Job continuing a finished Job's Thread.
 
@@ -1866,6 +1955,10 @@ class JobStore:
             lineage_root = source.get("lineageRoot") or source["id"]
             messages = merge_follow_up(self._resume_thread(source["id"]), prompt)
             request = source.get("request") or {}
+            if session_token is None:
+                # Direct library callers use the same process-boundary token as
+                # the CLI dispatcher; Claude remains tokenless.
+                session_token = globals()["session_token"]()
             job_id = self.reserve_id()
             record = new_record(
                 job_id,
@@ -1882,13 +1975,16 @@ class JobStore:
                 model=request.get("model"),
                 originating_session=originating_session,
                 bridge_name=source.get("bridgeName"),
+                host=source.get("host") or self.host_context.host.value,
             )
+            if session_token is not None:
+                record["sessionToken"] = session_token
             record["resumedFrom"] = source["id"]
             record["lineageRoot"] = lineage_root
             write_messages(precreate(self.transcript_path(job_id)), messages)
             self._publish(record)
             self._sync_index()
-            return normalize_record(record)
+            return normalize_record(record, self.host_context)
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -1919,7 +2015,18 @@ class JobStore:
             data = json.loads(text)
         except json.JSONDecodeError:
             return None
-        return data if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        stored_host = data.get("host")
+        selected = self.host_context.host.value
+        # Hostless records are a supported legacy shape only in the original
+        # Claude state root. A Codex store must surface them as malformed and
+        # must never silently adopt Claude state.
+        if self.host_context.host is Host.CODEX and stored_host != Host.CODEX.value:
+            return None
+        if stored_host is not None and stored_host != selected:
+            return None
+        return data
 
     def _derived_ids(self) -> set[str]:
         """Return the id set the record FILENAMES imply."""
@@ -1974,7 +2081,7 @@ class JobStore:
         for job_id in sorted(self._derived_ids()):
             raw = self._read(job_id)
             if raw is not None:
-                records.append(normalize_record(raw))
+                records.append(normalize_record(raw, self.host_context))
         return records
 
     def _resume_source(self, selector: str | None, records: list[dict]) -> dict:
@@ -1990,7 +2097,7 @@ class JobStore:
             source = by_id[resolve_selector(selector, by_id)]
             if source.get("status") == STATUS_INTERRUPTED:
                 raise ChinamaxError(
-                    f"{source['id']} cannot be resumed: its owning Claude session "
+                    f"{source['id']} cannot be resumed: its owning Host Session "
                     "ended and the Job was reaped"
                 )
             return source

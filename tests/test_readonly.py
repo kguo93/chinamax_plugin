@@ -42,13 +42,13 @@ def test_unadvertised_write_tool_rejected_at_dispatch(job_env):
 
 
 def test_write_shaped_bash_blocked(job_env):
-    """Redirection onto a file and a move out of the workspace are both refused."""
-    env = job_env(bash_script("echo x > f", "echo x>f", "mv f /tmp/"))
+    """Common file-writing shell forms are refused in a read-only Job."""
+    env = job_env(bash_script("echo x > f", "echo x>f", "mv f /tmp/", "touch f"))
 
     assert env.run(env.spec(write=False)) == 0
 
     observations = env.observations()
-    assert [block["is_error"] for block in observations] == [True, True, True]
+    assert [block["is_error"] for block in observations] == [True, True, True, True]
     for observation in observations:
         assert "read-only" in observation["content"]
         assert "was not executed" in observation["content"]

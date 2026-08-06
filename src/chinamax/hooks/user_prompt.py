@@ -19,15 +19,17 @@ import json
 import sys
 
 from chinamax import state
-from chinamax.hooks import read_event, sweep_stale_supervision
+from chinamax.hooks import read_event, resolve_event_host, sweep_stale_supervision
 
 #: The routing rule injected alongside the roster: main forwards to a Bridge only
 #: when the operator addresses it, and never does a worker's task itself.
 ROUTING_RULE = (
     "Forward a message to a Bridge via SendMessage ONLY when the operator "
-    'addresses it — by teammate name, its profile, or "the bridge/worker". '
-    "Never act on a worker's task yourself; display each Bridge relay verbatim. "
-    "Anything not addressed to a Bridge is your own work."
+    "includes one complete exact live Bridge name. Profile-only and generic "
+    "references are not routing instructions. If zero or multiple exact names "
+    "match, ask the operator to name exactly one Bridge. Never act on a worker's "
+    "task yourself; display each Bridge relay verbatim. Anything not addressed "
+    "to one exact Bridge is your own work."
 )
 
 
@@ -39,7 +41,10 @@ def main() -> int:
         stderr, never a traceback into the prompt turn.
     """
     try:
-        context = _build_context(read_event())
+        event = read_event()
+        if resolve_event_host(event) is None:
+            return 0
+        context = _build_context(event)
     except Exception as error:  # noqa: BLE001 - never fail the prompt turn
         print(
             f"chinamax user_prompt hook: {type(error).__name__}: {error}",
@@ -73,7 +78,10 @@ def _build_context(event: dict) -> str | None:
     if not bridges:
         return None
     rows = ", ".join(_roster_row(record) for record in bridges)
-    return f"Live chinamax Bridges: {rows}. {ROUTING_RULE}"
+    return (
+        f"Live chinamax Bridges: {rows}. {ROUTING_RULE} "
+        "A generic reference such as 'the bridge/worker' without the complete Bridge name is not an exact address."
+    )
 
 
 def _session_bridges(session_id_value: str) -> list[dict]:
@@ -106,7 +114,7 @@ def _roster_row(record: dict) -> str:
     if status in state.ACTIVE_STATUSES:
         return f"{bridge} ({status})"
     if record.get("errorMessage") == state.SUPERVISION_REAP_REASON:
-        return f"{bridge} (dead — bridge terminated; dispatch a fresh /chinamax:task)"
+        return f"{bridge} (dead — bridge terminated; dispatch a fresh task)"
     return f"{bridge} (idle — {status}; message it to follow up)"
 
 

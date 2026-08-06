@@ -60,7 +60,7 @@ def test_each_command_maps_verb(verb, capsys, keyless_home):
 
     # profiles renders PRESENT/MISSING and NEVER a key value.
     if verb == "profiles":
-        assert main(["profiles"]) == 0
+        assert main(["--host", "claude", "profiles"]) == 0
         out = capsys.readouterr().out
         assert "PRESENT" in out or "MISSING" in out
         for value in SYNTHETIC_KEYS.values():
@@ -71,7 +71,7 @@ def test_each_command_maps_verb(verb, capsys, keyless_home):
 
         # An overlay that empties the extras drops the suffix (empty ⇒ omitted).
         write_overlay(keyless_home, [{"name": "deepseek", "request_extras": {}}])
-        assert main(["profiles"]) == 0
+        assert main(["--host", "claude", "profiles"]) == 0
         deepseek_row = next(
             line for line in capsys.readouterr().out.splitlines() if line.startswith("deepseek")
         )

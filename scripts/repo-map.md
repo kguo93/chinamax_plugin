@@ -1,5 +1,8 @@
 # repo-map — scripts/
 
+The shell shims are shared by both Hosts. `_interpreter.sh` selects the Host
+marker and its isolated data root before resolving the Runtime interpreter.
+
 The plugin's thin shell shims. Each resolves the `chinamax` conda interpreter and
 `exec`s a python entrypoint; interpreter discovery lives in exactly one place.
 
@@ -24,3 +27,5 @@ The plugin's thin shell shims. Each resolves the `chinamax` conda interpreter an
   WITHOUT launching python (this fires on every Bash call), then pipes the buffered
   payload into `chinamax_exec chinamax.hooks.bridge_contract`. Registered in
   `hooks/hooks.json`.
+- `codex_pretool_hook` — Codex Host-aware pre-tool guard shim for mutating
+  Agent/spawn/setup calls outside yolo.

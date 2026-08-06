@@ -15,7 +15,8 @@ from __future__ import annotations
 import sys
 
 from chinamax import state
-from chinamax.hooks import read_event
+from chinamax.hooks import read_event, resolve_event_host
+from chinamax.host import Host
 
 
 def main() -> int:
@@ -26,16 +27,60 @@ def main() -> int:
         whole-hook failure sends diagnostics to stderr and still exits 0.
     """
     try:
-        session = read_event().get("session_id")
+        event = read_event()
+        context = resolve_event_host(event)
+        if context is None:
+            return 0
+        session = event.get("session_id")
         if session:
-            state.reap_session(str(session))
-            state.remove_session_registry(str(session))
+            if context.host is Host.CODEX:
+                _detach_codex_reaper(
+                    str(session),
+                    state.read_session_token(str(session)) or state.session_token(),
+                )
+                return 0
+            else:
+                state.reap_session(str(session))
+            state.remove_session_registry(
+                str(session),
+                expected_token=(
+                    state.read_session_token(str(session))
+                    if context.host is Host.CODEX
+                    else None
+                ),
+            )
     except Exception as error:  # noqa: BLE001 - never block session end
         print(
             f"chinamax session_end hook: {type(error).__name__}: {error}",
             file=sys.stderr,
         )
     return 0
+
+
+def _detach_codex_reaper(session: str, token: str | None) -> None:
+    """Start the bounded Codex reaper without delaying SessionEnd."""
+    import subprocess
+
+    argv = [
+        state.worker_python(),
+        "-m",
+        "chinamax",
+        "reap",
+        "--session",
+        session,
+        "--lock-path",
+        str(state.sessions_dir() / "codex-reaper.lock"),
+    ]
+    if token:
+        argv.extend(["--token", token])
+    subprocess.Popen(
+        argv,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
 
 
 if __name__ == "__main__":

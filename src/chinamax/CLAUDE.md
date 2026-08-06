@@ -18,6 +18,23 @@ Inventory lives in `./repo-map.md`. Domain vocabulary lives in `../../CONTEXT.md
 
 ## Liveness supervision (ADR 0002)
 
+## Host boundaries (2026-08-06)
+
+- `host.py` is the only Host-resolution seam. Resolve and bind `HostContext` at
+  CLI/hook boundaries before accessing Profiles, keys, or state.
+- Claude paths (`~/.claude`, `CLAUDE_PLUGIN_*`, `chinamax`) and Codex paths
+  (`~/.codex`, `PLUGIN_*`, `chinamax-codex`) are intentionally disjoint.
+- `state.JobStore` records `host`; Codex rejects hostless/foreign records while
+  Claude normalizes hostless legacy records as Claude.
+- `doctor.codex_setup_plan()` is a genuinely non-mutating, redacted preview;
+  `apply_codex_setup()` is the explicit consent-digest transaction. Keep Codex
+  config edits TOML-preserving via `tomlkit`, use Host-owned key/overlay paths,
+  and never place credential bytes in a preview or digest.
+- Codex SessionEnd ownership is `sessionId` plus `sessionToken`; resumes must
+  copy both so a detached reaper cannot touch a newer same-id Host Session.
+- Keep Codex-specific naming/permission logic in `codex.py` or adapters. The
+  Runtime's `--read-only` remains independent of Codex's sandbox/yolo mode.
+
 - **No wall-clock bound and no turn cap, under any name.** `LoopConfig` is the whole configuration surface and `test_no_caps.py` asserts its field set against an exact allowlist, so a `max_duration` or `loop_limit` fails the suite rather than slipping past a name-pattern check. The 120-turn simulated-long-clock run is the real proof — a cap hidden as a module constant would slip past the allowlist.
 - **The watchdog resets ONLY on content-bearing events**, never on `ping`, SSE comments, or raw bytes. A `ping` keepalive is an ordinary parsed event on this wire format, so resetting on "any traffic" lets a healthy proxy mask a stalled model — the exact hang the watchdog exists to catch. The SDK happens to drop pings before they reach us; `CONTENT_BEARING_EVENTS` states the rule regardless, because a byte-level read timeout (which httpx's `read` is) demonstrably cannot do this job.
 - **`response.close()` alone does NOT unblock a parked read** — closing the fd leaves the loop thread stuck in `recv`. `InactivityWatchdog._close` reaches `response.extensions["network_stream"].get_extra_info("socket")` and calls `shutdown(SHUT_RDWR)` first; that is what breaks it. Removing the shutdown leaves every test green and every real hang eternal, which is why `test_midstream_hang_retried` asserts an elapsed-time bound as well as a retry count.
@@ -90,7 +107,7 @@ Inventory lives in `./repo-map.md`. Domain vocabulary lives in `../../CONTEXT.md
 - **The denylist matches at COMMAND POSITION through the shared `lex_command`, never with a regex over the raw line.** A word-boundary regex matches inside `grep -rn "git push" docs/` and `pytest -k test_shutdown` and blocks both; the lexer turns each quoted string into one non-command token. `denied_reason` and `write_shaped_reason` must keep consuming that single lexer — two parallel matchers over the same string is the classic divergence source.
 - **The lexer sets `commenters = ""` deliberately.** shlex's default treats `#` mid-word as a comment and discards the rest of the line, which would hide the `rm` in `echo a#b; rm -rf x` from the denylist entirely.
 - **Short-flag clusters are inspected as clusters.** `git clean -fd` and `-fdx` are as destructive as `-f`, and a `\b`-anchored `-f` pattern matches none of them.
-- **The read-only redirection check judges the TARGET, not the operator.** `2>&1`, `>&2` and `>/dev/null` are ordinary reads; only a redirection onto a real file is a write.
+- **The read-only write-shaped check judges the TARGET and known file writers.** `2>&1`, `>&2` and `>/dev/null` are ordinary reads; redirection onto a real file and commands such as `tee` and `touch` are writes.
 - **Read-only enforcement is the filtered registry, not the schema.** `build_registry(write)` produces one object serving both the advertised tools and the dispatch table, so a `write_file` call replayed from a resumed Thread is refused at dispatch. Omitting a tool from the schema alone stops only a model that reads the schema.
 - **Do not expand the denylist.** Network egress, process signalling and quoting/substitution evasions are out of scope by decision, as are the read-only bash bypasses (`python -c`, heredocs, `truncate`). ADR 0005 documents that residual risk rather than defending it; chasing it is how a tool-layer policy grows into a bad sandbox.
 - **A bad `bash_timeout_s` fails spec validation, never at command time** — it would otherwise kill every command the Job runs. `bool` is rejected explicitly there too.

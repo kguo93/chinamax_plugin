@@ -1,0 +1,23 @@
+{
+  "name": "chinamax",
+  "version": "0.4.0",
+  "description": "Dispatch worker models through a shared durable Bridge Runtime from Claude Code or Codex.",
+  "author": {
+    "name": "Kevin Guo"
+  },
+  "skills": "./skills",
+  "interface": {
+    "displayName": "ChinamaX",
+    "shortDescription": "Durable worker-model Bridge Jobs",
+    "longDescription": "Use a Host-native Bridge Agent to dispatch, supervise, steer, resume, and relay durable Anthropic-compatible Runtime Jobs.",
+    "developerName": "Kevin Guo",
+    "category": "developer_tools",
+    "capabilities": [
+      "dual-host-runtime",
+      "durable-jobs",
+      "bridge-relay",
+      "profile-based-models"
+    ],
+    "defaultPrompt": "Use ChinamaX when a durable delegated worker Job and exact Bridge relay are useful."
+  }
+}

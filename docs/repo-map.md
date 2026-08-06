@@ -11,7 +11,7 @@ Domain vocabulary lives in `../CONTEXT.md`.
 | `AGENTS.md` | `@CLAUDE.md` stub, so Codex and other agents read the same conventions. |
 | `repo-map.md` | This inventory. |
 | `verification-report.md` | Recorded live-verification run report. |
-| `adr/` | Architecture Decision Records 0001–0012 (table below). |
+| `adr/` | Architecture Decision Records 0001–0014 (table below). |
 | `agents/` | Issue-tracker & domain-modeling conventions: `issue-tracker.md`, `triage-labels.md`, `domain.md`. |
 
 ## adr/ — decision records
@@ -33,3 +33,5 @@ whole file, including its `**Amended <date>**` notes).
 | 0010† | `0010-duplication-guard.md` | Duplication guard: contract language + Stop notice, no hard blocks | Results & duplication guard |
 | 0011 | `0011-hermetic-fake-provider-tests.md` | Tests run against a hermetic fake provider server | Tests & install |
 | 0012 | `0012-github-canonical-install-source.md` | GitHub is the canonical install source; rpi4 is a backup mirror | Tests & install |
+| 0013 | `0013-dual-host-runtime-and-thin-adapters.md` | One Host-neutral Runtime with thin Claude and Codex adapters | Host architecture |
+| 0014 | `0014-codex-yolo-runtime-boundary-and-lifecycle-gaps.md` | Codex yolo boundary and detached lifecycle backstop | Host architecture |

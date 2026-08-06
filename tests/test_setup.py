@@ -103,7 +103,7 @@ def test_doctor_reports(tmp_path, keyless_home, isolated, monkeypatch, capsys):
         assert report["python"] is None
         assert report["env"] == {"present": False, "path": None}
         # Env absent -> deps reported missing WITHOUT running the (True) checker.
-        assert report["deps"] == {"chinamax": False, "anthropic": False, "pytest": False}
+        assert report["deps"] == {name: False for name in doctor.DEPS}
         assert report["state_writable"] is False
         # Both the root AND the per-workspace dir are named.
         assert report["state_root"]

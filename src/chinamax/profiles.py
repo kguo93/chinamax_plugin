@@ -24,6 +24,7 @@ from importlib import resources
 from pathlib import Path
 
 from chinamax import ChinamaxError
+from chinamax.host import HostContext, current_host
 
 DEFAULT_MAX_TOKENS = 32000
 ROW_FIELDS = ("name", "base_url", "model", "api_key_env", "max_tokens", "request_extras")
@@ -61,17 +62,17 @@ class Profile:
     request_extras: dict = field(default_factory=dict)
 
 
-def overlay_path() -> Path:
-    """Return the optional user overlay path (resolved through ``Path.home()``)."""
-    return Path.home() / ".claude" / OVERLAY_FILENAME
+def overlay_path(context: HostContext | None = None) -> Path:
+    """Return the selected Host's optional user overlay path."""
+    return (context or current_host()).overlay_path
 
 
-def keys_path() -> Path:
-    """Return the API-key file path (resolved through ``Path.home()``)."""
-    return Path.home() / ".claude" / KEYS_FILENAME
+def keys_path(context: HostContext | None = None) -> Path:
+    """Return the selected Host's API-key file path."""
+    return (context or current_host()).keys_path
 
 
-def load_profiles() -> dict[str, Profile]:
+def load_profiles(context: HostContext | None = None) -> dict[str, Profile]:
     """Resolve the shipped Profiles merged field-by-field with the user overlay.
 
     Returns:
@@ -81,7 +82,7 @@ def load_profiles() -> dict[str, Profile]:
         ChinamaxError: If the overlay file is malformed or an overlay row is invalid.
     """
     resolved = _load_shipped()
-    path = overlay_path()
+    path = overlay_path(context)
     if not path.exists():
         return resolved
     for row in _read_overlay(path):
@@ -99,7 +100,7 @@ def load_profiles() -> dict[str, Profile]:
     return resolved
 
 
-def resolve_profile(name: str) -> Profile:
+def resolve_profile(name: str, context: HostContext | None = None) -> Profile:
     """Look up one Profile by name.
 
     Args:
@@ -111,7 +112,7 @@ def resolve_profile(name: str) -> Profile:
     Raises:
         ChinamaxError: If no Profile carries that name.
     """
-    resolved = load_profiles()
+    resolved = load_profiles(context)
     if name not in resolved:
         raise ChinamaxError(
             f"unknown profile {name!r}; configured profiles: {format_available(resolved)}"
@@ -119,14 +120,16 @@ def resolve_profile(name: str) -> Profile:
     return resolved[name]
 
 
-def format_available(resolved: dict[str, Profile] | None = None) -> str:
+def format_available(
+    resolved: dict[str, Profile] | None = None, context: HostContext | None = None
+) -> str:
     """Return the configured Profile names as a comma-separated string."""
     if resolved is None:
-        resolved = load_profiles()
+        resolved = load_profiles(context)
     return ", ".join(sorted(resolved))
 
 
-def load_keys() -> dict[str, str]:
+def load_keys(context: HostContext | None = None) -> dict[str, str]:
     """Parse ``~/.claude/model-keys.env`` into an env-var name → value mapping.
 
     Blank lines and ``#`` comment lines are ignored. Values are unquoted by shell
@@ -136,7 +139,7 @@ def load_keys() -> dict[str, str]:
     Returns:
         The parsed variables; empty when the file does not exist.
     """
-    path = keys_path()
+    path = keys_path(context)
     if not path.exists():
         return {}
     keys: dict[str, str] = {}
@@ -155,7 +158,7 @@ def load_keys() -> dict[str, str]:
     return keys
 
 
-def resolve_key(profile: Profile) -> str:
+def resolve_key(profile: Profile, context: HostContext | None = None) -> str:
     """Return the API key a Profile authenticates with.
 
     Args:
@@ -167,10 +170,10 @@ def resolve_key(profile: Profile) -> str:
     Raises:
         ChinamaxError: If the Profile's env-var name is absent or empty there.
     """
-    value = load_keys().get(profile.api_key_env, "")
+    value = load_keys(context).get(profile.api_key_env, "")
     if not value:
         raise ChinamaxError(
-            f"missing API key: {profile.api_key_env} is not set in {keys_path()}"
+            f"missing API key: {profile.api_key_env} is not set in {keys_path(context)}"
         )
     return value
 

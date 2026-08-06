@@ -30,7 +30,7 @@ def _entry(event_name: str) -> dict:
 
 
 def test_registered_events():
-    """hooks.json registers the five session/enforcement events (ADR 0004 reversed).
+    """hooks.json registers lifecycle and Host-specific enforcement events.
 
     Jobs are session-scoped now, so SessionEnd IS registered — the inverse of the
     old no-SessionEnd invariant.
@@ -41,6 +41,7 @@ def test_registered_events():
         "Stop",
         "UserPromptSubmit",
         "PreToolUse",
+        "SubagentStart",
     }
 
     # The reversal rationale is recorded in hooks.json's own description.
@@ -55,12 +56,18 @@ def test_registered_events():
     assert _entry("SessionStart")["timeout"] == 10
     assert _entry("Stop")["timeout"] == 10
     assert _entry("UserPromptSubmit")["timeout"] == 10
-    assert _entry("PreToolUse")["timeout"] == 10
+    assert all(
+        hook["timeout"] == 10
+        for group in HOOKS["hooks"]["PreToolUse"]
+        for hook in group["hooks"]
+    )
     assert _entry("SessionEnd")["timeout"] == 30
     assert _entry("SessionStart")["type"] == "command"
 
     # PreToolUse is scoped to Bash (the Bridge's only tool).
     assert HOOKS["hooks"]["PreToolUse"][0]["matcher"] == "Bash"
+    assert HOOKS["hooks"]["PreToolUse"][1]["matcher"] == "Agent|Bash|spawn_agent"
+    assert HOOKS["hooks"]["SubagentStart"][0]["matcher"] == "chinamax_bridge|chinamax[-_]"
 
 
 def _run_registered(command: str, event: dict, extra_env: dict) -> subprocess.CompletedProcess:

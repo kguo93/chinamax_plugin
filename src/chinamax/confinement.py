@@ -217,8 +217,8 @@ def denied_reason(command: str) -> str | None:
 def write_shaped_reason(command: str) -> str | None:
     """Return why a read-only Job refuses this command, or None.
 
-    A conservative family: redirection onto a real file, `tee`, `mv`/`cp`,
-    `sed -i`, `git commit`/`git apply`, and `pip install`. Redirections are
+    A conservative family: redirection onto a real file, `tee`, `touch`,
+    `mv`/`cp`, `sed -i`, `git commit`/`git apply`, and `pip install`. Redirections are
     judged by their TARGET, so `2>&1`, `>&2` and `>/dev/null` stay allowed —
     `grep x f 2>&1 | head` is an ordinary read.
 
@@ -329,6 +329,8 @@ def _stage_write_shaped(stage: Stage) -> str | None:
         return None
     if name == "tee":
         return "'tee' writes its input to a file"
+    if name == "touch":
+        return "'touch' creates or updates files"
     if name in {"mv", "cp"}:
         return f"{name!r} creates or moves files, in either direction"
     if name == "sed" and any(

@@ -20,6 +20,27 @@ conda run -n chinamax python -m pytest /home/klg2138/chinamax_plugin/tests -q
 
 The editable install is what puts `chinamax` on the path; the suite imports the installed package, not a relative path. `pip install -e` leaves `src/chinamax.egg-info/` and `__pycache__/` byproducts behind — build artifacts, never committed.
 
+## Dual-Host migration (2026-08-06)
+
+The Runtime is shared by Claude Code and Codex. Process boundaries resolve a
+Host explicitly (`--host` or `CHINAMAX_HOST`); native `PLUGIN_*` evidence wins
+over Claude-compatible aliases. Claude keeps `~/.claude` and
+`CLAUDE_PLUGIN_DATA`; Codex uses `~/.codex`, `PLUGIN_DATA`, and its own
+`chinamax-codex` fallback. Job records carry `host`; Codex session records also
+carry an ownership token. Do not add cross-Host path fallbacks.
+
+The maintained Bridge contract is `skills/chinamax-bridge/SKILL.md`. Claude's
+agent/command files and Codex's root skills are thin adapters/loaders. Codex
+mutating task/setup actions require `codex --yolo` (`bypassPermissions`), while
+Runtime `--read-only` remains the authoritative tool-layer posture. Codex
+Bridge names are deterministic underscore-safe names using Terra at low
+reasoning with no fork history. Codex CLI 0.146.0 and plugin 0.4.0 were
+installed and live-tested in `/tmp/chinamax-codex-live`; DeepSeek is the current
+hard-gate evidence, while other endpoint smokes were intentionally skipped.
+The CLI still clamps the registered SessionEnd hook to 3 s and has no reliable
+native teammate-stop event; both limits remain documented in
+`docs/verification-report.md`.
+
 Design/implementation decisions:
 - Runtime is a custom agent loop modeled on the OpenAI Codex plugin's orchestration, written in Python 3 in a dedicated fresh conda env (not `py_automation`).
 - Runtime speaks the providers' Anthropic-compatible Messages API, reusing the proven `/anthropic` base URLs, model strings, and keys from the implement-handoff skill verbatim.
@@ -29,15 +50,15 @@ Design/implementation decisions:
 - Every dispatch detaches immediately into a durable Job; exactly one PERSISTENT named haiku Bridge (`chinamax-<profile>-<task-slug>`) long-polls it (`status --wait --timeout-ms 120000` default, per-dispatch `poll=<seconds>` override, Bash timeout kept above the seam bound) in silence (no progress messages, no Job-id ack; a successful steer is silent), fires exactly ONE `SendMessage(to='main')` relay when the Job ends — the worker's response untouched, or the failure report — and then STAYS AVAILABLE for its Thread, classifying each later operator message (steer / resume / cancel / out-of-scope refusal). Steering is only ever the Bridge forwarding an operator message it classified — there is no `/chinamax:steer` command.
 - Write-capable by default (--read-only opt-out); confinement is tool-layer (realpath-confined file tools, cwd-pinned bash + denylist + timeouts).
 - Duplication guard: bridge/skill contract language + non-blocking Stop-hook notice of running Jobs.
-- Durable state under ${CLAUDE_PLUGIN_DATA}/state/<repo-slug>-<hash>/, falling back to $XDG_STATE_HOME/chinamax when unset (Codex layout, INCLUDING its SessionEnd cleanup as of ADR 0004's reversal); a session-liveness registry lives under a sibling sessions/ dir.
+- Durable state is Host-scoped: Claude uses ${CLAUDE_PLUGIN_DATA}/state/<repo-slug>-<hash>/, then $XDG_STATE_HOME/chinamax; Codex uses ${PLUGIN_DATA}/state/<repo-slug>-<hash>/, then $XDG_STATE_HOME/chinamax-codex. Each has its own sibling sessions/ registry, interpreter record, keys, overlays, and Jobs.
 - Loop tools (rich set): bash, read_file, write_file, str_replace_edit, list_dir, grep, glob, apply_patch, report_result (mandatory completion; a single required `response` field carrying the worker's complete final answer, stored verbatim, no metadata fields, no runtime audit).
-- Hooks (2026-07-30; sweep added 2026-07-31): SessionStart (write the session-liveness registry → reap same-PID predecessor → reap dead-session orphans → sweep this session's stale-supervised Bridges → inject the bridge-first running/recent digest), SessionEnd (reap the ending session's active Jobs, remove its registry), Stop (stale-supervision sweep → non-blocking running-Jobs notice), UserPromptSubmit (stale-supervision sweep → inject the live-Bridge roster + explicit-addressing routing rule into main), PreToolUse(Bash) (re-inject the classification contract into the chinamax Bridge; shim fast-paths past non-Bridge calls). The three sweeps share `state.reap_stale_supervision` via `hooks.sweep_stale_supervision`.
+- Hooks (2026-07-30; sweep added 2026-07-31): shared Host-aware SessionStart/SessionEnd/Stop/UserPromptSubmit registration preserves Claude's synchronous lifecycle and adds Codex's token-safe detached reaper, SessionStart token export, and managed native-agent sync; PreToolUse loads the canonical Bridge contract and applies the Codex yolo backstop. The three Claude-side sweeps share `state.reap_stale_supervision` via `hooks.sweep_stale_supervision`; Codex deliberately does not adopt stranded orphan processes.
 - Env: conda env `chinamax` (python 3.12) with the official `anthropic` SDK + pytest; plugin scripts invoke the env's absolute python path.
 - Install: repo doubles as its own single-plugin marketplace (`.claude-plugin/marketplace.json` + plugin.json; agents/, commands/, hooks/, skills/, scripts/, src/, tests/); the canonical marketplace source is GitHub (kguo93/chinamax_plugin), the rpi4 git remote is a backup mirror only, and the local checkout stays the dev source (the editable Runtime install).
 - Tests: pytest in tests/ against a hermetic fake Anthropic-Messages provider server (background, persistence, resume, cancel, confinement, timeouts, API-failure injection, session lifecycle).
-- Live verification: full 3-part run on deepseek (simple dispatch; mid-run steer; 70+ min survival job) + one-shot smoke dispatch on mimo, glm, minimax, kimi — all in a throwaway repo at ~/chinamax-verification/.
-- Keys: all five profiles resolve from ~/.claude/model-keys.env (GLM_API_KEY and MINIMAX_API_KEY appended from the implement-handoff literals).
-- See docs/adr/ (0001–0012) for the recorded design decisions and their rejected alternatives.
+- Live verification: the historical Claude matrix remains in `docs/verification-report.md`; the current Codex gate is DeepSeek-only in `/tmp/chinamax-codex-live` and covers read-only dispatch, active steer, and same-Bridge resume. Other Codex endpoints are intentionally not run for this acceptance.
+- Keys: all five Profiles resolve from the selected Host's model-keys.env (`~/.claude` for Claude, `~/.codex` for Codex); values never cross Hosts.
+- See docs/adr/ (0001–0014) for the recorded design decisions and their rejected alternatives.
 - 2026-07-24 relay redesign (implemented in relay-01; recorded in amended ADRs 0003/0007/0008/0010): exactly one named haiku Bridge teammate per dispatch — explicit `model: haiku` override in the Agent call and the full contract in the spawn prompt (named spawns ignore agent frontmatter), Bridge forbidden to spawn subagents; long-poll default 900 s, per-dispatch `poll=<seconds>` (the `status --wait` `--timeout-ms` ceiling was lifted to 900 s while its 240 s default stayed put); mid-run relay errors only, terminal result with envelope stripped and worker prose untouched; new `/chinamax:steer` command for in-turn steering.
 - API keys resolve via `~/.claude/model-keys.env`.
 - 2026-07-27 relay-fidelity round (amended ADRs 0003/0007): `report_result` collapsed to a single required `response` field — the worker's complete final answer; the metadata fields (outcome/summary/lists) are gone and `result` renders the response bare under its `<id>  <status>` header. The Bridge relay is exactly ONE `SendMessage(to='main')` fired at terminal, never before (Job-id ack dropped; failures ride the same single relay; ending the turn without SendMessage(to='main') is not a relay), and the main agent regurgitates the relayed response verbatim.

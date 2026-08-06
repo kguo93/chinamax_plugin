@@ -2,11 +2,17 @@
 
 Inventory lives in `./repo-map.md`.
 
-- **`hooks.json` registers five events** (ADR 0004 reversed 2026-07-30 — Jobs are
+- **`hooks.json` registers lifecycle plus Host enforcement events** (ADR 0004 reversed 2026-07-30 — Jobs are
   now session-scoped): `SessionStart`, `SessionEnd`, `Stop`, `UserPromptSubmit`,
-  and `PreToolUse` (matcher `Bash`). `SessionEnd` is the reversal's core: a session
+  `PreToolUse` (Claude Bridge matcher `Bash` plus Codex mutation matcher), and
+  `SubagentStart` (Bridge contract loader). `SessionEnd` is the reversal's core: a session
   ending — including `/clear` — kills its still-active Jobs, so a Job no longer
   outlives the session that started it.
+- **Codex hooks are Host-aware.** They require explicit yolo permission for
+  mutating setup/Agent operations, use `PLUGIN_*` roots, and detach a
+  token-checked SessionEnd reaper; the SessionStart message carries the token
+  needed by every later dispatch. Claude paths and lifecycle semantics remain
+  unchanged.
 - **The `SessionStart` matcher is `startup|resume|clear|compact|fork`.** `clear`
   re-injects inherited-Job awareness after `/clear` wipes context (and its digest
   now reports what the orphan reap just terminated); `fork` matters because a

@@ -1,5 +1,5 @@
 {
-  "description": "chinamax session-lifecycle and Bridge-enforcement hooks. Jobs are session-scoped (ADR 0004, reversed 2026-07-30). SessionStart writes the session-liveness registry, reaps orphaned Jobs of dead sessions, and injects the running/recent Job digest (exporting CHINAMAX_SESSION_ID + CLAUDE_PLUGIN_DATA); its matcher includes clear (re-inject after /clear wipes context) and fork (a forked session must register its own owner). SessionEnd kills the ending session's active Jobs and removes its registry entry — clear reaps like an exit. Stop emits a non-blocking running-Jobs notice. UserPromptSubmit injects the live-Bridge roster and the explicit-addressing routing rule into main. PreToolUse (Bash) re-injects the Bridge classification contract into the chinamax Bridge as subagent-scoped context (ADR 0010, no hard blocks).",
+  "description": "chinamax Host-aware session-lifecycle and Bridge-enforcement hooks. Jobs are session-scoped (ADR 0004, reversed 2026-07-30). SessionStart resolves Claude or Codex, writes the Host session registry, injects the running/recent Job digest, and exports the Host session id/token plus the selected plugin-data root. Claude retains synchronous predecessor/orphan repair and SessionEnd cleanup; Codex uses a detached token-safe SessionEnd reaper and intentionally does not adopt stranded orphan processes. Stop emits a non-blocking running-Jobs notice. UserPromptSubmit injects the live-Bridge roster and exact-name routing rule. PreToolUse provides canonical Bridge reinforcement and the Codex yolo backstop. Codex hook trust is configured by the Host, never forged by setup.",
   "hooks": {
     "SessionStart": [
       {
@@ -49,6 +49,28 @@
     "PreToolUse": [
       {
         "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/bridge_contract_hook\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Bash|spawn_agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/codex_pretool_hook\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "chinamax_bridge|chinamax[-_]",
         "hooks": [
           {
             "type": "command",

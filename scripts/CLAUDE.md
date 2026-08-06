@@ -2,6 +2,11 @@
 
 Inventory lives in `./repo-map.md`.
 
+- `_interpreter.sh` exports/resolves the Host marker before selecting the
+  Host-specific data root. `PLUGIN_*` evidence wins over Claude aliases.
+- `codex_pretool_hook` is the Codex-only mutation backstop; preserve the Claude
+  no-op and Runtime `--read-only` boundary.
+
 - **Interpreter discovery lives ONLY in `_interpreter.sh`.** The launcher, the
   commands, and the hooks all go through `chinamax_exec`, so they never drift onto
   three different pythons. The Bridge Agent (`agents/chinamax.md`) documents the

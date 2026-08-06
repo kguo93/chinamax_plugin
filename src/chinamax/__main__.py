@@ -19,6 +19,7 @@ internal seam the session hooks call in-process.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import shlex
@@ -29,6 +30,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from chinamax import ChinamaxError, doctor, profiles, provider, state
+from chinamax.host import HostResolutionError, current_host, resolve_host, set_current_host
 from chinamax.liveness import LoopConfig, RunFailure, build_config, emit_event
 from chinamax.loop import PHASE_REPORTING, PHASE_STARTING, run_loop
 from chinamax.spec import JobSpec, load_spec, parse_spec
@@ -158,6 +160,8 @@ def run_task(args: argparse.Namespace) -> int:
             model=args.model,
             originating_session=state.session_id(),
             bridge_name=args.bridge_name,
+            host=current_host().host.value,
+            session_token=state.session_token(),
         )
     )
     state.make_dir(store.steer_dir(job_id))
@@ -408,7 +412,10 @@ def run_resume(args: argparse.Namespace) -> int:
     selector, words = _split_resume_args(args.args)
     prompt = _read_prompt(words, default=DEFAULT_RESUME_PROMPT)
     record = store.create_resume(
-        selector, prompt, originating_session=state.session_id()
+        selector,
+        prompt,
+        originating_session=state.session_id(),
+        session_token=state.session_token(),
     )
     job_id = record["id"]
     state.make_dir(store.steer_dir(job_id))
@@ -523,7 +530,29 @@ def run_reap(args: argparse.Namespace) -> int:
     Returns:
         0 always — reaping never fails the verb.
     """
-    result = state.reap_session(args.session) if args.session is not None else state.reap_orphans()
+    lock_handle = None
+    lock_path = getattr(args, "lock_path", None)
+    if lock_path:
+        path = Path(lock_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_handle = open(path, "a+", encoding="utf-8")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_handle.close()
+            return EXIT_TERMINAL
+    try:
+        result = (
+            state.reap_session(args.session, session_token=getattr(args, "token", None))
+            if args.session is not None
+            else state.reap_orphans()
+        )
+        if args.session is not None and getattr(args, "token", None):
+            state.remove_session_registry(args.session, expected_token=args.token)
+    finally:
+        if lock_handle is not None:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            lock_handle.close()
     for record in result.reaped:
         print(state.render_job_row(record))
     for job_id, survivors in result.survived:
@@ -581,14 +610,19 @@ def normalize_argv(argv: list[str]) -> list[str]:
     Returns:
         The normalized argument vector.
     """
-    if len(argv) != 2 or argv[0] not in _ARGUMENT_VERBS:
-        return argv
-    verb, raw = argv[0], argv[1]
+    prefix: list[str] = []
+    remaining = argv
+    if len(remaining) >= 2 and remaining[0] == "--host":
+        prefix = remaining[:2]
+        remaining = remaining[2:]
+    if len(remaining) != 2 or remaining[0] not in _ARGUMENT_VERBS:
+        return [*prefix, *remaining] if prefix else argv
+    verb, raw = remaining[0], remaining[1]
     if not raw.strip():
-        return [verb]
+        return [*prefix, verb]
     if verb in _PROMPT_VERBS:
-        return [verb, *_normalize_resume(raw)]
-    return [verb, *shlex.split(raw)]
+        return [*prefix, verb, *_normalize_resume(raw)]
+    return [*prefix, verb, *shlex.split(raw)]
 
 
 def _normalize_resume(raw: str) -> list[str]:
@@ -617,6 +651,12 @@ def build_parser() -> argparse.ArgumentParser:
         The parser for every verb.
     """
     parser = argparse.ArgumentParser(prog="chinamax", description=__doc__)
+    parser.add_argument(
+        "--host",
+        default=None,
+        metavar="HOST",
+        help="Host adapter: claude or codex (or CHINAMAX_HOST)",
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
     exec_parser = subcommands.add_parser("exec", help="run one Job from a job spec")
@@ -720,6 +760,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="emit the report (with fixes) as JSON"
     )
     setup_parser.add_argument("--workspace", default=None, help="workspace root (default: cwd)")
+    setup_parser.add_argument(
+        "--apply", action="store_true", help="apply a previously previewed Codex plan"
+    )
+    setup_parser.add_argument(
+        "--consent-digest", default=None, help="exact digest printed by the Codex preview"
+    )
+    setup_parser.add_argument(
+        "--confirm-overwrite",
+        action="store_true",
+        help="confirm replacement of an unmanaged Codex native agent",
+    )
+    setup_parser.add_argument(
+        "--no-agent", action="store_true", help="apply other setup changes without installing the agent"
+    )
 
     reap_parser = subcommands.add_parser(
         "reap",
@@ -734,6 +788,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="reap every dead-session orphan (interrupted)",
     )
+    reap_parser.add_argument("--token", default=None, help="Codex Session ownership token")
+    reap_parser.add_argument("--lock-path", default=None, help="single-instance reaper lock")
 
     worker_parser = subcommands.add_parser("task-worker", help="run a dispatched Job (internal)")
     worker_parser.add_argument("--job-id", required=True, help="the Job to run")
@@ -753,6 +809,8 @@ def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else list(argv)
     args = build_parser().parse_args(normalize_argv(raw))
     try:
+        context = resolve_host(args.host, os.environ)
+        set_current_host(context)
         if args.command == "exec":
             return run_exec(args.spec_path)
         if args.command == "task":
@@ -778,7 +836,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "setup":
             return doctor.run_setup(args)
         raise ChinamaxError(f"unknown command {args.command!r}")
-    except ChinamaxError as error:
+    except (ChinamaxError, HostResolutionError) as error:
         print(f"chinamax: {error}", file=sys.stderr)
         return EXIT_ERROR
     except Exception as error:  # provider/tool failures end the Job non-zero
@@ -807,6 +865,8 @@ def _spawn_worker(store: state.JobStore, job_id: str) -> int:
         spawn_log = state.precreate(store.spawn_log_path(job_id))
         handle = os.open(spawn_log, os.O_WRONLY | os.O_APPEND)
         try:
+            child_env = os.environ.copy()
+            child_env["CHINAMAX_HOST"] = current_host().host.value
             child = subprocess.Popen(
                 [
                     state.worker_python(),
@@ -827,6 +887,7 @@ def _spawn_worker(store: state.JobStore, job_id: str) -> int:
                 stdout=handle,
                 stderr=handle,
                 close_fds=True,
+                env=child_env,
             )
         finally:
             os.close(handle)
@@ -1000,10 +1061,10 @@ def _steer_refusal(
             return (
                 f"{job_id} cannot be steered: the Bridge supervising it terminated "
                 "and the Job was reaped; its Thread cannot be resumed — dispatch a "
-                "fresh /chinamax:task"
+                "a fresh task dispatch"
             )
         return (
-            f"{job_id} cannot be steered: its owning Claude session ended and the "
+            f"{job_id} cannot be steered: its owning Host Session ended and the "
             "Job was reaped; its Thread cannot be resumed"
         )
     reason_text = (
@@ -1128,11 +1189,11 @@ def _print_result(record: dict, status: str) -> None:
                 print(
                     "hint: the Bridge supervising this Job terminated and the Job "
                     "was reaped; its Thread cannot be resumed — dispatch a fresh "
-                    "/chinamax:task to continue"
+                    "a fresh task dispatch to continue"
                 )
             else:
                 print(
-                    "hint: the owning Claude session ended and this Job was reaped; "
+                    "hint: the owning Host Session ended and this Job was reaped; "
                     "its Thread cannot be resumed"
                 )
         else:

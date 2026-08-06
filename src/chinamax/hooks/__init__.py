@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from chinamax import ChinamaxError, state
+from chinamax.host import Host, HostContext, resolve_host, set_current_host
 
 
 def read_event() -> dict:
@@ -47,6 +48,23 @@ def read_event() -> dict:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def resolve_event_host(event: dict) -> HostContext | None:
+    """Resolve and bind the Host for one hook process, failing closed."""
+    try:
+        context = resolve_host(hook_event=event)
+    except Exception as error:  # noqa: BLE001 - hooks must never block a Host
+        print(f"chinamax hook Host resolution: {error}", file=sys.stderr)
+        return None
+    set_current_host(context)
+    return context
+
+
+def event_is_host(event: dict, expected: Host) -> bool:
+    """Return whether explicit event evidence names the expected Host."""
+    value = event.get("host") or event.get("host_name") or event.get("hostName")
+    return not value or str(value).strip().lower() == expected.value
 
 
 def resolve_workspace(event: dict) -> Path | None:

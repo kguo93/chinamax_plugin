@@ -1,5 +1,9 @@
 # Jobs are session-scoped — SessionEnd kills, SessionStart reaps orphans
 
+**Amended 2026-08-06.** Records now carry `host`; Codex records also carry a
+session ownership token. Claude lifecycle behavior is preserved, while Codex
+SessionEnd launches a detached token-safe reaper and never mixes host roots.
+
 **Reversed 2026-07-30** (the original decision is quoted below). A Job never
 outlives the Claude session that started it. Job records carry their owning
 session id; a SessionEnd hook — which fires on `/clear` as well as on a real

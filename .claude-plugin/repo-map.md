@@ -1,6 +1,7 @@
 # repo-map — .claude-plugin/
 
-The plugin manifest pair Claude Code reads to discover and install this plugin.
+The plugin manifest pair Claude Code reads to discover and install this plugin;
+the version stays aligned with `.codex-plugin/plugin.json`.
 The repo doubles as its own single-plugin marketplace, so both files live here.
 
 - `plugin.json` — the plugin manifest: `{name: "chinamax", version, description,
