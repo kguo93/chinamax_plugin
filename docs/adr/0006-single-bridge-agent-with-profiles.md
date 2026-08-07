@@ -4,6 +4,21 @@
 and Codex adapters. Codex task names use exact underscore-safe slugs and fixed
 `gpt-5.6-terra`/low/no-fork dispatch settings; Claude retains Haiku/kebab names.
 
+**Amended 2026-08-07** (Bridge model vs Profile model). Two similarly shaped
+spawn fields had grown overloaded names; this reconciles them under one
+vocabulary (see `CONTEXT.md`). The **Bridge model** is the model that runs the
+Bridge Agent itself — fixed per Host (Claude: Haiku; Codex: `gpt-5.6-terra` at
+low reasoning, no fork), never configurable by the task prompt. The **Profile
+model** is the worker model string dispatched to the Runtime: the operator's
+optional `/chinamax:task model=<string>` mapped to `--model`, or the Profile's
+default when omitted, pinned to the Thread. THE HARD RULE: the Bridge never
+feeds its own Bridge model into the Profile dispatch or to the worker — `--model`
+carries only the operator's `model=<string>`, and is omitted otherwise. The
+literal CLI-consumed fields stay spelled `model` (the Claude Agent `model:`, the
+Codex native-agent TOML `model =`, and the Runtime `--model`/`model=`); only the
+prose labels change (these Bridge/Profile-model prose names replace the earlier
+`codex_model`/`claude_model` labels).
+
 A single named subagent (`chinamax`) serves every provider; providers are config Profiles (deepseek, mimo, glm, minimax, kimi) rather than per-provider agents. Only pro tiers exist — flash/ultraspeed variants are never offered as Profiles — and there is no default Profile: every dispatch must name one explicitly, eliminating silent model selection.
 
 **Amended 2026-07-30**: still one agent TYPE, but Bridge instances are now named `chinamax-<profile>-<task-slug>` — the slug a short human-readable description of the task, never a random string — so concurrent persistent Bridges (ADR 0003) are addressable and distinguishable by the operator at a glance. The Profile is baked into the teammate name because one Bridge serves exactly one Thread, whose Profile is fixed at dispatch. No-default-Profile is unchanged and now bites only at `/chinamax:task`: resume inherits its Thread's Profile, and the Bridge refuses any ask to switch Profile mid-Thread (that is a new `/chinamax:task`, hence a new Bridge).
@@ -19,3 +34,16 @@ An explicit model is PINNED to the Thread: stored as `request.model` on the Job 
 Extras are unchanged (pure Profile data): `RESERVED_REQUEST_KEYS` bars a `model` key in OVERLAY `request_extras`, and the shipped rows — which bypass that validation as trusted package data — are guarded by `test_profiles.py`'s exact-dict assertions, so the pin is protected by overlay validation PLUS test-guarded shipped rows, not an absolute invariant at the merge seam; `stream_with_ladder` still merges extras LAST, and an incompatible extras+model combo is judged by the endpoint like any other bad request. Bridge naming is unchanged (`chinamax-<profile>-<task-slug>`, no model slug). Surfaces: `render_job_row` renders `profile (model)` when a pin exists (status lists, reap digests and both session digests inherit it) and the single-Job `status <id>` views add an explicit `model:` detail line; `result`/relay are untouched (ADR 0007).
 
 The H1 above is retitled from "...providers as Profiles, pro tiers only, no default" to "...providers as Profiles, no default" — the reversed "pro tiers only" clause must not survive in the title (precedent: ADR 0004's reversal rewrote its heading while the original decision survived as the quoted paragraph). The slug `0006-single-bridge-agent-with-profiles` stays truthful (one Bridge agent, providers as Profiles) — no `git mv`.
+
+**Amended 2026-08-07** (Bridge no longer refuses model/Profile-change asks): this
+ADR previously said "the Bridge refuses any ask to switch Profile mid-Thread (that is
+a new `/chinamax:task`, hence a new Bridge)" and "a mid-Thread model-change ask is
+OUT-OF-SCOPE (a new `/chinamax:task`, cross-ref ADR 0003)." With refusals removed
+(ADR 0003, amended 2026-08-07), the Bridge no longer REFUSES such a follow-up — it
+accepts it as a steer/resume on its own Thread. What is unchanged is the PIN: a
+Thread's model stays pinned (`request.model`, replayed by `create_resume`) and its
+Profile still re-resolves by name, so carrying a "switch model/Profile" ask into the
+Thread does NOT actually change them — the worker still runs on the Thread's pinned
+model and resolved Profile. Actually changing model or Profile still requires a fresh
+`/chinamax:task` (a new Bridge + Thread). No-default-Profile and per-dispatch model
+pinning are otherwise unchanged.

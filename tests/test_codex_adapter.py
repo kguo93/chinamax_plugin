@@ -76,7 +76,7 @@ def test_compiled_agent_has_codex_native_settings(tmp_path):
         encoding="utf-8",
     )
     compiled = compile_codex_agent(source)
-    assert "# chinamax-managed-plugin-version: 0.4.0" in compiled
+    assert "# chinamax-managed-plugin-version: 0.4.1" in compiled
     assert 'model = "gpt-5.6-terra"' in compiled
     assert 'model_reasoning_effort = "low"' in compiled
     assert "developer_instructions" in compiled
@@ -87,3 +87,8 @@ def test_codex_task_skill_preserves_read_only_posture():
     text = skill.read_text(encoding="utf-8")
     assert "optional `--read-only` posture" in text
     assert "Preserve `--read-only` in the Runtime dispatch" in text
+    assert "model: gpt-5.6-terra" in text
+    assert "Bridge model" in text
+    assert "Profile model" in text
+    assert "never" in text.lower()  # the never-feed rule is present
+    assert "Never copy it into the Runtime dispatch" in text

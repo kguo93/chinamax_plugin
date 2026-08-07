@@ -57,7 +57,7 @@ def test_manifest_and_marketplace_valid():
     # The marketplace entry's version equals plugin.json's, as the Codex pair does.
     assert entry["version"] == plugin["version"]
     assert codex["name"] == plugin["name"] == "chinamax"
-    assert codex["version"] == plugin["version"] == "0.4.0"
+    assert codex["version"] == plugin["version"] == "0.4.1"
     assert codex["homepage"] == "https://github.com/kguo93/chinamax_plugin"
     assert codex["repository"] == "https://github.com/kguo93/chinamax_plugin"
     assert codex["license"] == "GPL-2.0"
@@ -79,5 +79,5 @@ def test_manifest_and_marketplace_valid():
         "authentication": "ON_INSTALL",
     }
     assert codex_entry["category"] == "Developer tools"
-    assert project["project"]["version"] == "0.4.0"
+    assert project["project"]["version"] == "0.4.1"
     assert (REPO_ROOT / "skills" / "chinamax-bridge" / "SKILL.md").is_file()

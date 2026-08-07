@@ -1,6 +1,6 @@
 # repo-map
 
-Repository for the `chinamax` worker-model plugin for Claude Code and Codex. The shared Runtime owns Profiles, detached Jobs, confinement, liveness, state, and result fidelity; thin Host adapters own native routing, paths, lifecycle, manifests, and setup. Claude retains its persistent Haiku Bridge, while Codex uses root skills, deterministic underscore-safe Terra/low/no-fork Bridges, yolo mutation guards, and token-safe detached lifecycle cleanup.
+Repository for the `chinamax` worker-model plugin for Claude Code and Codex. The shared Runtime owns Profiles, detached Jobs, confinement, liveness, state, and result fidelity; thin Host adapters own native routing, paths, lifecycle, manifests, and setup. Claude retains its persistent Haiku Bridge, while Codex uses root skills, deterministic underscore-safe Bridges with the fixed Codex **Bridge model** `gpt-5.6-terra`/low/no-fork settings, yolo mutation guards, and token-safe detached lifecycle cleanup. The Runtime's **Profile model** (`--model`) is the worker selection, distinct from the **Bridge model**.
 
 - `pyproject.toml` — packaging for the `chinamax` Runtime: src layout, `anthropic` and `httpx` runtime deps, `[test]` extra, and the `data/*.json` package-data rule that ships the shipped Profiles.
 - `.gitignore` — the editable install's byproducts (`__pycache__/`, `*.pyc`, `*.egg-info/`), which are never committed.

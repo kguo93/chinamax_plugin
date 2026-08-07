@@ -33,9 +33,8 @@ def test_required_stanzas_present():
     assert "user-invocable: false" in text
     assert "description:" in text
 
-    # Profile-required refusal, resolved by the selected Host's profiles data.
+    # Profile-required refusal.
     assert "profile=" in text
-    assert "profiles" in lower
     assert "refuse" in lower or "reject" in lower
 
     # The prohibition block: never does the task, never substitutes its own
@@ -74,22 +73,24 @@ def test_required_stanzas_present():
     assert "strip the header line and relay the response untouched" in lower
 
     # The persistent classification lifecycle: classify each later message as one
-    # of cancel / out-of-scope / steer / resume; unsure cancel-vs-steer → steer.
+    # of cancel / steer / resume; unsure cancel-vs-steer → steer.
     assert "classify each message from main" in lower
-    assert "out of scope" in lower
     assert "steer <id>" in text
     assert "resume <id>" in text
     assert "unsure between cancel and steer" in lower
 
-    # Per-dispatch model override (ADR 0006, 2026-08-03): the model= token, the
-    # malformed-token refusal, the --model seam mapping, and the out-of-scope "a
-    # different model string" enumeration that still names "a new unrelated task"
-    # (guarding against the step-6 insertion dropping the trailing case).
+    # Per-dispatch Profile model override (ADR 0006, 2026-08-03): the model= token, the
+    # malformed-token rejection, and the --model seam mapping.
     assert "model=<string>" in text
     assert "--model='<string>'" in text
+    assert "Profile model" in text
     assert "spaces or quote characters" in lower
-    assert "a different model string" in lower
-    assert "a new unrelated task" in lower
+
+    # Bridge model vs Profile model, and the never-feed rule: the Bridge model
+    # never enters the Runtime --model dispatch or reaches the worker.
+    assert "bridge model" in lower
+    assert "profile model" in lower
+    assert "never put the bridge model into `--model` or send it to the worker." in lower
 
     # The finish-during-steer race re-routes to resume carrying the original
     # message; resume always passes an explicit id.

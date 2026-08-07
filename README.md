@@ -204,7 +204,7 @@ the Bridge maps them onto the CLI seam argv on the right:
 | Bridge-level              | CLI seam (`chinamax task`) | Meaning                                                             |
 |---------------------------|----------------------------|--------------------------------------------------------------------|
 | `profile=<name>`          | `--profile <name>`         | **Required.** No default — a profile-less dispatch is refused.      |
-| `model=<string>`          | `--model='<string>'`       | Optional. Any model string the Profile's endpoint accepts; omitted ⇒ the Profile's default model. Pinned to the Thread — resumes replay it. |
+| `model=<string>`          | `--model='<string>'`       | **Profile model.** Any model string the Profile's endpoint accepts; omitted → the Profile's default model. Pinned to the Thread — resumes replay it. |
 | `--read-only`             | `--read-only`              | Opt out of write-capable tools. Write-capable is the default.      |
 | `bash_timeout=<seconds>`  | `--bash-timeout-s <seconds>` | Per-command bash timeout override (a non-numeric value is refused). |
 | `poll=<seconds>`          | *(poll loop, not a task flag)* | The Bridge's long-poll bound: `status --wait --timeout-ms <seconds×1000>` (default 120 s), with the Bash timeout kept above it. A non-numeric value is refused. |
@@ -233,7 +233,8 @@ report), untouched. The task text is delivered to the runtime on stdin, so quote
 newlines, and leading dashes arrive byte-identical. The final response you read is
 the worker's `response` exactly as the worker wrote it — as if you had dispatched
 the worker model yourself. The Bridge then **stays available** for the Thread (see
-**Talking to a Bridge**).
+**Talking to a Bridge**). The Bridge model (Haiku on Claude, `gpt-5.6-terra` on
+Codex) runs the Bridge itself and is never dispatched as the Profile model.
 
 ### `/chinamax:status`
 `[job-id] [--wait] [--timeout-ms <ms>] [--workspace <dir>]`
@@ -273,10 +274,11 @@ message and acts on its own Thread:
   posture. The Bridge relays that new Job's result when it ends.
 - **Cancel** — "stop the job", "cancel", "never mind" kills the run; the Bridge
   relays the cancelled report.
-- **Out of scope** — a different model is chosen AT DISPATCH via `model=<string>`;
-  asking to CHANGE a live Thread's model or Profile, or to start a brand-new
-  unrelated task, is refused with a pointer to dispatch a new `/chinamax:task` (a new
-  Bridge). One Bridge serves one Thread and never switches its model or Profile.
+- **Model or Profile change** — a different model is chosen AT DISPATCH via
+  `model=<string>`; a live Thread's model and Profile are pinned, so a follow-up
+  asking to change them is carried into the Thread but cannot switch them. Dispatch a
+  new `/chinamax:task` (a new Bridge) to actually change the model or Profile. One
+  Bridge serves one Thread and never switches its model or Profile.
 
 Main forwards a message to a Bridge **only when you include one complete exact
 live Bridge name**; profile-only or generic references do not route. If zero or

@@ -19,8 +19,8 @@ Runtime tool layer. The explicit marker is an adapter-to-Runtime transport detai
 not a persistent setting or a substitute for the Codex UI permission check.
 
 Require exactly one `profile=` and apply the shared task grammar for the
-optional `--read-only` posture, `model=`, `bash_timeout=`, `poll=`, duplicates,
-and an empty prompt. Preserve `--read-only` in the Runtime dispatch when the
+optional `--read-only` posture, **Profile model** `model=`, `bash_timeout=`,
+`poll=`, duplicates, and an empty prompt. Preserve `--read-only` in the Runtime dispatch when the
 operator supplies it; it is independent of Codex yolo and must never be
 dropped by the adapter. Lowercase names,
 replace non `[a-z0-9_]` characters with `_`, collapse and trim runs, bound the
@@ -32,10 +32,15 @@ background Bridge with:
 
 ```text
 task_name: chinamax_<profile>_<task_slug>
-model: gpt-5.6-terra
+model: gpt-5.6-terra   # Bridge model (fixed) — NOT the Profile model
 reasoning_effort: low
 fork_turns: none
 ```
+
+`model` here is the Codex **Bridge model** (fixed) — the model that runs the
+Bridge, NOT the **Profile model**. Never copy it into the Runtime dispatch:
+`--model` carries only the operator's Profile model (`model=<string>`), and is
+omitted when the operator gave none.
 
 Export `CHINAMAX_HOST=codex`; include the parsed dispatch, the canonical
 contract path, the no-subordinate-agent prohibition, Terra/low requirement, and

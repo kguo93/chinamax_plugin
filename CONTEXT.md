@@ -5,11 +5,11 @@ A dual-Host plugin that exposes non-Claude worker models (DeepSeek, MiMo, GLM, M
 ## Language
 
 **Bridge Agent**:
-The Host-facing persistent teammate — Claude agent type `chinamax:chinamax` or a Codex native Bridge, exactly one instance per Thread, named by the selected Host's safe convention — that dispatches a task to the Runtime and then serves its Thread for the Thread's whole life: it classifies every later operator message (Steer while the Job runs; resume when it has ended; cancel on explicit abandon intent; a refusal when the ask cannot be honored inside its Thread), always waits for the resulting Job to end, and delivers exactly one Relay per Job it supervises. It stays silent otherwise and never edits files, runs the task itself, or spawns another agent. A Bridge that dies or abandons its poll loop forfeits its Jobs: each is reaped (interrupted) and its Thread stranded, continued only by a fresh dispatch.
+The Host-facing persistent teammate — Claude agent type `chinamax:chinamax` or a Codex native Bridge, exactly one instance per Thread, named by the selected Host's safe convention — that dispatches a task to the Runtime and then serves its Thread for the Thread's whole life: it classifies every later operator message (Steer while the Job runs; resume when it has ended; cancel on explicit abandon intent), always waits for the resulting Job to end, and delivers exactly one Relay per Job it supervises. It stays silent otherwise and never edits files, runs the task itself, or spawns another agent. A Bridge that dies or abandons its poll loop forfeits its Jobs: each is reaped (interrupted) and its Thread stranded, continued only by a fresh dispatch.
 _Avoid_: wrapper agent, proxy, "the deepseek agent" (DeepSeek is one Profile among many)
 
 **Relay**:
-The Bridge Agent's single terminal message delivering a Job's outcome to the operator: the worker's final response untouched when the Job completed, or the failure report otherwise. Exactly one per Job, sent only when the Job ends — never a progress update, never an acknowledgment. A refusal (a message the Bridge cannot honor inside its Thread) is not a Relay — a Relay always reports a Job's end. The operator reads the worker's response as if they had dispatched the worker model themselves.
+The Bridge Agent's single terminal message delivering a Job's outcome to the operator: the worker's final response untouched when the Job completed, or the failure report otherwise. Exactly one per Job, sent only when the Job ends — never a progress update, never an acknowledgment. The operator reads the worker's response as if they had dispatched the worker model themselves.
 _Avoid_: progress message, notification, status update (none of these are ever sent)
 
 **Runtime**:
@@ -19,6 +19,14 @@ _Avoid_: worker CLI, companion (reserve "companion" for the Codex plugin's runti
 **Profile**:
 A named provider configuration — base URL, default model string, API-key source, and fixed request tuning (reasoning always on, at the provider's ceiling) — that a Job runs against (e.g. `deepseek`, `kimi`, `minimax`). One Bridge Agent serves all Profiles; a dispatch picks its Profile and may name a model string of its own.
 _Avoid_: provider (the company), model (one field of a profile)
+
+**Bridge model**:
+The model that runs the Bridge Agent itself — fixed per Host (Claude: Haiku; Codex: `gpt-5.6-terra`), never configurable by the task prompt. Distinct from the Profile model and never sent to the worker or provider endpoint.
+_Avoid_: conflating with the Profile's `model`, "the worker model"
+
+**Profile model**:
+The worker model string dispatched to the Runtime — the operator's optional `model=<string>` (→ `--model='<string>'`), or the Profile's default when omitted; pinned to the Thread.
+_Avoid_: the Bridge model
 
 **Job**:
 One durable unit of dispatched work with persistent state, logs, and a lifecycle (queued, running, completed, failed, cancelled; a crashed worker's Job is reported as interrupted). Owned by the Host Session that started it AND supervised by its Bridge, and never outlives either when the Host lifecycle is delivered: Claude reaps synchronously; Codex uses a token-safe detached reaper and may leave an orphan process after abrupt close. A Job whose Bridge dies or stops serving it is likewise reaped (interrupted) and its Thread stranded.

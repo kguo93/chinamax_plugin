@@ -4,7 +4,10 @@ Inventory lives in `./repo-map.md`. Domain vocabulary lives in `./CONTEXT.md` �
 
 ## Important things to note
 
-- When launching your bridge agent, always use haiku or whatever is the cheapest model
+- When launching the Claude Bridge, always use the Haiku **Bridge model** (the
+  cheapest). The Bridge model runs the Bridge itself and is distinct from the
+  **Profile model** (the worker string dispatched via `--model`); never pass the
+  Bridge model into the Runtime dispatch.
 - Prompt/contract text aimed at the haiku Bridge (spawn prompt, hook-injected contract) must be very explicit and stepwise — numbered, one action per rule — BUT token-lean: verbosity confuses it.
 - When a decision conflicts with an existing ADR, amend that ADR in place (dated `**Amended <date>**` paragraph; quote the original when reversing; `git mv` the slug if it now contradicts the content). Never create a new ADR file for a reversal.
 
@@ -33,8 +36,10 @@ The maintained Bridge contract is `skills/chinamax-bridge/SKILL.md`. Claude's
 agent/command files and Codex's root skills are thin adapters/loaders. Codex
 mutating task/setup actions require `codex --yolo` (`bypassPermissions`), while
 Runtime `--read-only` remains the authoritative tool-layer posture. Codex
-Bridge names are deterministic underscore-safe names using Terra at low
-reasoning with no fork history. Codex CLI 0.146.0 and plugin 0.4.0 were
+Bridge names are deterministic underscore-safe names using the fixed Codex
+**Bridge model** `gpt-5.6-terra` at low reasoning with no fork history. The
+Runtime's **Profile model** (`--model`) is a separate worker selection and never
+receives the Bridge model. Codex CLI 0.146.0 and plugin 0.4.0 were
 installed and live-tested in `/tmp/chinamax-codex-live`; DeepSeek is the current
 hard-gate evidence, while other endpoint smokes were intentionally skipped.
 The CLI still clamps the registered SessionEnd hook to 3 s and has no reliable
