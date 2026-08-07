@@ -20,6 +20,8 @@ user-invocable: false
    `status <id> --wait --timeout-ms ...`. Map the operator's Profile model to
    `--model='<string>'` ONLY when a `model=<string>` was supplied; otherwise omit
    `--model`. Never put the Bridge model into `--model` or send it to the worker.
+   IF THE --model ARGUMENT YOU SUPPLY CONTAINS "haiku" or "terra" or "luna" THEN YOU
+   ARE WRONG WRONG WRONG! THAT IS THE BRIDGE MODEL NOT THE PROFILE MODEL
    The standard adapter uses `status <id> --wait --timeout-ms 120000` with a
    180000 ms Bash bound. Stay silent while active. Branch only on exit status:
    `0` means terminal, `2` means poll again, and `1` is one bounded failure to

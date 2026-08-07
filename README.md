@@ -349,6 +349,45 @@ reason `bridge terminated` — the Thread is stranded, so continuing is a fresh
 `/chinamax:task`. `status` surfaces all three and points a resumable one at
 continuing via its Bridge.
 
+## Host-specific usage
+
+The Bridge Agent is a live teammate, but how you address it differs by Host.
+
+### Claude Code
+
+Start a task with `/chinamax:task`:
+
+```
+/chinamax:task profile=deepseek write a function that…
+```
+
+Once the Bridge spawns, it is a named teammate like
+`chinamax-deepseek-task-abc123`. To steer, resume, or cancel, include
+`@chinamax-deepseek-task-abc123` **in the main thread** — the `@` routes your
+message to the Bridge through the hooks. Never message the agent directly;
+every message must originate from the main thread so the hooks can inject the
+Bridge contract and route the steer correctly.
+
+```
+@chinamax-deepseek-task-abc123 now also add tests
+```
+
+### Codex
+
+Start a task with `$chinamax-task`:
+
+```
+$chinamax-task profile=deepseek write a function that…
+```
+
+Codex has a known issue with spawning correctly named subagents. To steer or
+resume, first find the correct agent name with `$chinamax-status`, then tell
+the **main thread** to message that `agent_name` directly. Never message the
+agent yourself — every message must be directly addressed to it from the main
+thread so the hooks can work. Use the `chinamax` plugin namespace for all
+commands (`$chinamax-task`, `$chinamax-status`, `$chinamax-setup`,
+`$chinamax-profiles`).
+
 ## Troubleshooting
 
 ### The setup doctor: `/chinamax:setup`
