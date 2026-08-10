@@ -83,6 +83,8 @@ When changing identity, description, or version, update these deliberately:
 4. `.claude-plugin/marketplace.json` plugin entry, including its `version`.
 5. `.agents/plugins/marketplace.json` only for its Codex-specific `interface`, `category`, `source`, or `policy` fields; it has no version field to update.
 
+IMPORTANT: Any changes to src/ skills/ hooks/ tests/ commands/ agents/ requires a version bump in the plugin configuration file so that it will get picked up in an update
+
 Before publishing, validate both formats from the repository root:
 
 ```bash
