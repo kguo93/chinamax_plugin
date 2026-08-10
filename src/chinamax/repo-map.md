@@ -1,5 +1,14 @@
 # repo-map — src/chinamax/
 
+Portability note (0.4.3): `host.py` selects native Linux/XDG,
+macOS/Application Support, or Windows/Local AppData roots. `state.py` keeps the
+Linux `/proc`/`fcntl`/POSIX path, uses psutil inspection with POSIX signals on
+macOS, and uses psutil tree termination plus filelock sidecars and guarded ACL
+mode operations on Windows. `_set_mode()` centralizes POSIX mode application,
+while `atomic_replace()` centralizes temporary-file publication and bounded
+Windows sharing-violation retries. `doctor.py` reports
+conditional dependencies and new-platform Bash/Git/cygpath prerequisites.
+
 The Host-neutral Runtime — the agent loop that owns one Job's conversation with a provider — plus the Job supervisor that makes a dispatch durable and detached. `host.py` resolves Claude/Codex boundaries and `codex.py` contains native adapter invariants.
 
 - `host.py` — Host enum/context, explicit/env/plugin-evidence resolution, and isolated Claude/Codex roots.

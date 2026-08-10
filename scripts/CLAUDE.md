@@ -25,3 +25,10 @@ Inventory lives in `./repo-map.md`.
   `${VAR:-}` so `set -u` never trips.
 - **`chmod +x` the three entrypoints** (`chinamax`, `session_start_hook`,
   `stop_hook`); `_interpreter.sh` is sourced, so it need not be executable.
+
+On native Windows `_interpreter.sh` converts native roots with `cygpath`, probes
+the per-user Miniconda installation, and selects Git Bash. On macOS
+(`uname -s = Darwin`) it routes the fallback data root to
+`~/Library/Application Support/{chinamax,chinamax-codex}`, ignoring `XDG_STATE_HOME`, to
+match `host.py`. Keep the Windows/macOS branches narrow and preserve the Linux resolution
+order exactly.

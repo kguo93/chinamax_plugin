@@ -281,7 +281,7 @@ def _consume_steer(path: Path, consumed_subdir: Path) -> None:
     """Move one drained steer into ``consumed/`` (created if absent)."""
     try:
         state.make_dir(consumed_subdir)
-        os.replace(path, consumed_subdir / path.name)
+        state.atomic_replace(path, consumed_subdir / path.name, cleanup_source=False)
     except OSError:
         pass
 

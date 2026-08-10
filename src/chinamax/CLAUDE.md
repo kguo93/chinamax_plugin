@@ -12,13 +12,24 @@ Inventory lives in `./repo-map.md`. Domain vocabulary lives in `../../CONTEXT.md
 - **A tool_use must never raise.** Unknown tool names and schema violations come back as error `tool_result` blocks, so no model-chosen name can kill a Job. `validate_input` deliberately accepts undeclared fields: the schemas do not set `additionalProperties: false`, and rejecting extras would let an embellished `report_result` payload block the only way to finish.
 - **The result is verbatim** (ADR 0007): no normalization, no field synthesis, no audit. "Verbatim" is semantic JSON equality, not byte equality — the SDK reparses `input_json_delta`, so the file is written `sort_keys=True` and compared parsed.
 - **The transcript is write-ahead.** Append and flush the outgoing delta BEFORE the API call, the assembled assistant turn after. Later slices depend on this ordering; batching the writes silently breaks them. Records carry `{v, ts, kind}`; only `kind: "message"` replays.
-- **bash drains both pipes concurrently.** Reading one to EOF first deadlocks once the other fills its OS buffer — which is exactly the runaway case the bounded tail buffers exist for. The readers are joined only AFTER a timeout has killed the process group: a backgrounded descendant inherits the pipes, so EOF arrives only once the whole group is gone.
+- **bash drains both pipes concurrently.** Reading one to EOF first deadlocks once the other fills its OS buffer — which is exactly the runaway case the bounded tail buffers exist for. POSIX readers are joined after the process group dies; Windows readers are daemonized and joined only for the bounded grace window, then their parent pipe handles close so a surviving descendant cannot hang the Runtime.
 - **Never inject per-request-varying bytes into `system`, `tools`, or any already-sent message.** Provider context caching (ADR 0001) is exact-prefix-matched: a timestamp or job id formatted into the system prompt, a reordered tool list, or an edit to sent history silently forfeits the ~10x cache-hit discount on every later turn. The variable `{workspace}`/`{posture}` slots live in the system prompt's TAIL for this reason. The regression shows up in the per-turn `usage` events — `cache_read_input_tokens` collapsing to ~0 from turn 2 on. Those events reach the Job log through the REPORTER; the worker's bare stderr lands in the spawn log, which `logs` hides whenever the progress log is non-empty.
 - **`request_extras` merges LAST and is constant per Job** (ADR 0006). `stream_with_ladder` unpacks `profile.request_extras` after the five Runtime-built request keys, so it can only add keys, never reorder the prefix — constant by convention, not by deep-freeze (the frozen dataclass does not freeze the dict; nothing mutates it, the merge only unpacks it). The SDK merges an `extra_body` value into the JSON body ROOT, so on the wire you assert the BARE key (e.g. `"reasoning_effort"`), never an `"extra_body"` wrapper. Thinking blocks the provider returns are ordinary Thread history — `_block_to_dict` keeps them, they replay verbatim on every later turn and across resume, and they are NEVER stripped or filtered (live-verified all five providers 2026-08-01).
 
 ## Liveness supervision (ADR 0002)
 
 ## Host boundaries (2026-08-06)
+
+### Platform portability (0.4.3)
+
+- `Platform` is orthogonal to `Host`: Linux keeps `/proc`/`fcntl`/POSIX process
+  groups; macOS uses psutil inspection with native POSIX locks/signals; Windows
+  uses psutil tree operations, filelock sidecars, Windows process creation flags,
+  and inherited ACLs.
+- Guard Unix-only imports and mode operations. Do not move platform branching into
+  adapters or duplicate Runtime lifecycle logic.
+- `pidStartTime` remains an integer; Windows/macOS psutil creation seconds are
+  normalized to integer microseconds and checked before destructive operations.
 
 - `host.py` is the only Host-resolution seam. Resolve and bind `HostContext` at
   CLI/hook boundaries before accessing Profiles, keys, or state.

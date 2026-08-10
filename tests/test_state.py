@@ -255,3 +255,135 @@ def test_resolve_job_refuses_a_miss_and_an_ambiguous_prefix(dispatch_env):
     with pytest.raises(Exception) as ambiguous:
         store.resolve_job("task-")
     assert first in str(ambiguous.value) and second in str(ambiguous.value)
+
+
+def test_non_linux_process_identity_uses_integer_creation_time(monkeypatch):
+    """The portable backend keeps the persisted integer PID identity contract."""
+    class FakeProcess:
+        pid = 4242
+
+        def ppid(self):
+            return 7
+
+        def create_time(self):
+            return 123.456789
+
+        def status(self):
+            return "running"
+
+        def name(self):
+            return "python.exe"
+
+    class FakePsutil:
+        STATUS_ZOMBIE = "zombie"
+        NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+        ZombieProcess = type("ZombieProcess", (Exception,), {})
+        AccessDenied = type("AccessDenied", (Exception,), {})
+
+        @staticmethod
+        def Process(_pid):
+            return FakeProcess()
+
+    monkeypatch.setattr(state.sys, "platform", "win32")
+    monkeypatch.setattr(state, "_psutil_module", lambda: FakePsutil)
+    assert state.read_pid_start_time(4242) == 123456789
+    info = state.read_process(4242)
+    assert info is not None
+    assert info.start_time == 123456789
+    assert state.read_comm(4242) == "python"
+
+
+def test_non_linux_worker_gone_rejects_pid_reuse(monkeypatch):
+    class FakeProcess:
+        def status(self):
+            return "running"
+
+        def create_time(self):
+            return 2.0
+
+    class FakePsutil:
+        STATUS_ZOMBIE = "zombie"
+        NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+        ZombieProcess = type("ZombieProcess", (Exception,), {})
+        AccessDenied = type("AccessDenied", (Exception,), {})
+
+        @staticmethod
+        def Process(_pid):
+            return FakeProcess()
+
+    monkeypatch.setattr(state.sys, "platform", "darwin")
+    monkeypatch.setattr(state, "_psutil_module", lambda: FakePsutil)
+    assert state.worker_gone({"pid": 4242, "pidStartTime": 1_000_000}) is True
+
+
+def test_non_linux_access_denied_process_is_alive_unknown(monkeypatch):
+    """AccessDenied never becomes a false gone result for lifecycle callers."""
+    class FakeProcess:
+        def status(self):
+            raise FakePsutil.AccessDenied()
+
+    class FakePsutil:
+        STATUS_ZOMBIE = "zombie"
+        NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+        ZombieProcess = type("ZombieProcess", (Exception,), {})
+        AccessDenied = type("AccessDenied", (Exception,), {})
+
+        @staticmethod
+        def Process(_pid):
+            return FakeProcess()
+
+    monkeypatch.setattr(state.sys, "platform", "win32")
+    monkeypatch.setattr(state, "_psutil_module", lambda: FakePsutil)
+    info = state.read_process(4242)
+    assert info == state.ProcessInfo(4242, 0, 0, None, False)
+    assert state.worker_gone({"pid": 4242, "pidStartTime": 1}) is False
+
+
+def test_windows_atomic_replace_retries_and_cleans_temporary(monkeypatch, tmp_path):
+    """Windows sharing violations retry five times and failed temps are removed."""
+    source = tmp_path / "staged.tmp"
+    destination = tmp_path / "published.txt"
+    source.write_text("payload", encoding="utf-8")
+    calls = []
+
+    def fake_replace(source_name, destination_name):
+        calls.append((source_name, destination_name))
+        if len(calls) < 3:
+            raise PermissionError("sharing violation")
+        destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        source.unlink()
+
+    monkeypatch.setattr(state.sys, "platform", "win32")
+    monkeypatch.setattr(state.os, "replace", fake_replace)
+    monkeypatch.setattr(state.time, "sleep", lambda _seconds: None)
+    state.atomic_replace(source, destination)
+    assert len(calls) == 3
+    assert destination.read_text(encoding="utf-8") == "payload"
+    assert not source.exists()
+
+    source.write_text("discard", encoding="utf-8")
+
+    def always_locked(_source_name, _destination_name):
+        raise PermissionError("sharing violation")
+
+    monkeypatch.setattr(state.os, "replace", always_locked)
+    with pytest.raises(PermissionError):
+        state.atomic_replace(source, destination)
+    assert not source.exists()
+
+
+def test_windows_termination_refuses_unreadable_root(monkeypatch):
+    """An unknown root identity is never eligible for destructive signaling."""
+    class FakeProcess:
+        pid = 4242
+        terminate_calls = 0
+
+        def terminate(self):
+            self.terminate_calls += 1
+
+    process = FakeProcess()
+    monkeypatch.setattr(state.sys, "platform", "win32")
+    monkeypatch.setattr(state, "_windows_snapshot", lambda _pid: {4242: (process, None)})
+    assert state._windows_identity_holds(process, None) is False
+    assert state._terminate_tree_windows(4242, 1_000_000, 0, 0) == [4242]
+    assert process.terminate_calls == 0

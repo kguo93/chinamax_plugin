@@ -58,3 +58,8 @@ Inventory lives in `./repo-map.md`. Domain vocabulary lives in `../../../CONTEXT
 - **`CLAUDE_PLUGIN_DATA` is re-exported for a reason:** the hooks and the Bridge's
   dispatches must agree on the state root, or Jobs land in one root while the digest,
   the registry and the reaps read another.
+
+Claude and Codex registrations are separate: `hooks/hooks.json` remains the
+Claude file, while `hooks/codex-hooks.json` supplies Codex `commandWindows`
+handlers that explicitly enter Git Bash on native Windows. Hook logic stays in
+this directory and must remain Host-neutral after event resolution.

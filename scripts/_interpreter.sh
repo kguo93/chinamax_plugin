@@ -28,18 +28,73 @@ chinamax_host_marker() {
   fi
 }
 
+chinamax_windows() {
+  [ "${OS:-}" = Windows_NT ]
+}
+
+chinamax_macos() {
+  [ "$(uname -s 2>/dev/null)" = Darwin ]
+}
+
+chinamax_shell_path() {
+  local value="${1:-}"
+  [ -n "${value}" ] || return 0
+  if chinamax_windows && command -v cygpath >/dev/null 2>&1; then
+    cygpath -u -- "${value}"
+  else
+    printf '%s\n' "${value}"
+  fi
+}
+
+chinamax_absolute() {
+  local value="${1:-}"
+  if [ -z "${value}" ]; then
+    return 1
+  fi
+  if chinamax_windows; then
+    case "${value}" in
+      [A-Za-z]:[\\/]*|[\\/][\\/]*) return 0 ;;
+      /*) return 0 ;;
+    esac
+    return 1
+  fi
+  [ "${value#/}" != "${value}" ]
+}
+
 if [ -z "${CHINAMAX_HOST:-}" ]; then
   CHINAMAX_HOST="$(chinamax_host_marker || true)"
   [ -n "${CHINAMAX_HOST}" ] && export CHINAMAX_HOST
 fi
 
-# Data root = selected Host's plugin data, else the Host-specific XDG fallback.
+# Data root = selected Host's plugin data, else the native per-Platform fallback
+# (Windows LocalAppData, macOS Application Support, else XDG / ~/.local/state).
 # Empty or relative values are unset.
 chinamax_data_root() {
-  if [ "${CHINAMAX_HOST:-}" = codex ] && [ -n "${PLUGIN_DATA:-}" ] && [ "${PLUGIN_DATA#/}" != "${PLUGIN_DATA}" ]; then
-    printf '%s\n' "${PLUGIN_DATA}"
-  elif [ "${CHINAMAX_HOST:-}" != codex ] && [ -n "${CLAUDE_PLUGIN_DATA:-}" ] && [ "${CLAUDE_PLUGIN_DATA#/}" != "${CLAUDE_PLUGIN_DATA}" ]; then
-    printf '%s\n' "${CLAUDE_PLUGIN_DATA}"
+  if [ "${CHINAMAX_HOST:-}" = codex ] && chinamax_absolute "${PLUGIN_DATA:-}"; then
+    chinamax_shell_path "${PLUGIN_DATA}"
+  elif [ "${CHINAMAX_HOST:-}" != codex ] && chinamax_absolute "${CLAUDE_PLUGIN_DATA:-}"; then
+    chinamax_shell_path "${CLAUDE_PLUGIN_DATA}"
+  elif chinamax_windows; then
+    local local_appdata userprofile
+    local_appdata="$(chinamax_shell_path "${LOCALAPPDATA:-}")"
+    userprofile="$(chinamax_shell_path "${USERPROFILE:-${HOME:-}}")"
+    if [ -n "${local_appdata}" ]; then
+      if [ "${CHINAMAX_HOST:-}" = codex ]; then
+        printf '%s\n' "${local_appdata}/chinamax-codex"
+      else
+        printf '%s\n' "${local_appdata}/chinamax"
+      fi
+    elif [ "${CHINAMAX_HOST:-}" = codex ]; then
+      printf '%s\n' "${userprofile}/AppData/Local/chinamax-codex"
+    else
+      printf '%s\n' "${userprofile}/AppData/Local/chinamax"
+    fi
+  elif chinamax_macos; then
+    if [ "${CHINAMAX_HOST:-}" = codex ]; then
+      printf '%s\n' "${HOME}/Library/Application Support/chinamax-codex"
+    else
+      printf '%s\n' "${HOME}/Library/Application Support/chinamax"
+    fi
   elif [ -n "${XDG_STATE_HOME:-}" ] && [ "${XDG_STATE_HOME#/}" != "${XDG_STATE_HOME}" ]; then
     if [ "${CHINAMAX_HOST:-}" = codex ]; then
       printf '%s\n' "${XDG_STATE_HOME}/chinamax-codex"
@@ -63,20 +118,32 @@ chinamax_resolve_python() {
   recorded_file="$(chinamax_data_root)/python-path"
   if [ -f "${recorded_file}" ]; then
     recorded="$(head -n1 "${recorded_file}" 2>/dev/null | tr -d '\r\n' || true)"
-    if [ -n "${recorded}" ] && [ "${recorded#/}" != "${recorded}" ] && [ -x "${recorded}" ]; then
+    recorded="$(chinamax_shell_path "${recorded}")"
+    if chinamax_absolute "${recorded}" && [ -x "${recorded}" ]; then
       printf '%s\n' "${recorded}"
       return 0
     fi
   fi
 
-  if [ -n "${CHINAMAX_PYTHON:-}" ] && [ "${CHINAMAX_PYTHON#/}" != "${CHINAMAX_PYTHON}" ] && [ -x "${CHINAMAX_PYTHON}" ]; then
-    printf '%s\n' "${CHINAMAX_PYTHON}"
+  local explicit
+  explicit="$(chinamax_shell_path "${CHINAMAX_PYTHON:-}")"
+  if chinamax_absolute "${explicit}" && [ -x "${explicit}" ]; then
+    printf '%s\n' "${explicit}"
     return 0
   fi
 
-  if [ -x "${HOME}/miniconda3/envs/chinamax/bin/python" ]; then
-    printf '%s\n' "${HOME}/miniconda3/envs/chinamax/bin/python"
-    return 0
+  local home
+  home="$(chinamax_shell_path "${USERPROFILE:-${HOME:-}}")"
+  if chinamax_windows; then
+    if [ -x "${home}/miniconda3/envs/chinamax/python.exe" ]; then
+      printf '%s\n' "${home}/miniconda3/envs/chinamax/python.exe"
+      return 0
+    fi
+  else
+    if [ -x "${home}/miniconda3/envs/chinamax/bin/python" ]; then
+      printf '%s\n' "${home}/miniconda3/envs/chinamax/bin/python"
+      return 0
+    fi
   fi
 
   return 1
@@ -87,16 +154,35 @@ chinamax_resolve_python() {
 chinamax_exec() {
   local module="$1"
   shift
-  local plugin_root py
+  local plugin_root py home
   plugin_root="$(dirname "${CHINAMAX_SCRIPT_DIR}")"
+  home="$(chinamax_shell_path "${USERPROFILE:-${HOME:-}}")"
 
   if py="$(chinamax_resolve_python)"; then
     exec "${py}" -m "${module}" "$@"
   fi
 
-  if command -v conda >/dev/null 2>&1 && conda run -n chinamax python -c '' >/dev/null 2>&1; then
-    exec conda run -n chinamax python -m "${module}" "$@"
+  local conda_cmd
+  conda_cmd="$(command -v conda || true)"
+  if chinamax_windows && [ -x "${home}/miniconda3/Scripts/conda.exe" ]; then
+    conda_cmd="${home}/miniconda3/Scripts/conda.exe"
+  fi
+  if [ -n "${conda_cmd}" ] && "${conda_cmd}" run -n chinamax python -c '' >/dev/null 2>&1; then
+    exec "${conda_cmd}" run -n chinamax python -m "${module}" "$@"
   fi
 
-  exec env "PYTHONPATH=${plugin_root}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 -m "${module}" "$@"
+  local path_sep python_cmd bootstrap_python
+  if chinamax_windows; then
+    path_sep=';'
+    python_cmd=python
+    bootstrap_python="${home}/miniconda3/python.exe"
+  else
+    path_sep=':'
+    python_cmd=python3
+    bootstrap_python="${home}/miniconda3/bin/python"
+  fi
+  if [ -x "${bootstrap_python}" ]; then
+    exec env "PYTHONPATH=${plugin_root}/src${PYTHONPATH:+${path_sep}${PYTHONPATH}}" "${bootstrap_python}" -m "${module}" "$@"
+  fi
+  exec env "PYTHONPATH=${plugin_root}/src${PYTHONPATH:+${path_sep}${PYTHONPATH}}" "${python_cmd}" -m "${module}" "$@"
 }

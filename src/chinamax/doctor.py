@@ -28,6 +28,7 @@ import argparse
 import difflib
 import hashlib
 import json
+import ntpath
 import os
 import re
 import shutil
@@ -64,8 +65,35 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
-PLUGIN_VERSION = "0.4.1"
+PLUGIN_VERSION = "0.4.3"
 MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
+
+
+def required_deps() -> tuple[str, ...]:
+    """Return the import requirements for the active operating system."""
+    if sys.platform == "win32":
+        return (*DEPS, "psutil", "filelock")
+    if sys.platform == "darwin":
+        return (*DEPS, "psutil")
+    return DEPS
+
+
+def prerequisite_status() -> dict[str, bool]:
+    """Check external tools required by native macOS/Windows setup."""
+    if sys.platform == "linux":
+        return {}
+    names = ["bash", "git"]
+    if sys.platform == "win32":
+        names.append("cygpath")
+    return {name: shutil.which(name) is not None for name in names}
+
+
+def _prerequisite_advice(name: str) -> str:
+    if name == "cygpath":
+        return "install Git for Windows and ensure its usr/bin directory is on PATH"
+    if name == "bash":
+        return "install Bash (Git for Windows on Windows) and ensure bash is on PATH"
+    return "install Git and ensure git is on PATH"
 
 
 def data_root(context: HostContext | None = None) -> Path:
@@ -250,11 +278,10 @@ def diagnose(
 
     env_python = find_env_python()
     env_present = env_python is not None
-    deps = (
-        check_deps(env_python)
-        if env_present
-        else {name: False for name in DEPS}
-    )
+    names = required_deps()
+    deps = check_deps(env_python) if env_present else {name: False for name in names}
+    deps = {name: bool(deps.get(name, False)) for name in names}
+    prerequisites = prerequisite_status()
 
     selected = context or current_host()
     root = selected.state_root
@@ -262,7 +289,12 @@ def diagnose(
     writable = _state_writable(workspace_dir)
 
     profile_rows = _profile_rows(selected)
-    ok = env_present and all(deps[name] for name in DEPS) and writable
+    ok = (
+        env_present
+        and all(deps[name] for name in names)
+        and writable
+        and all(prerequisites.values())
+    )
 
     if record and env_present:
         _maybe_record_python(env_python, selected)
@@ -274,8 +306,9 @@ def diagnose(
         "workspace_state_dir": str(workspace_dir),
         "state_writable": writable,
         "env": {"present": env_present, "path": env_python},
-        "deps": {name: deps[name] for name in DEPS},
+        "deps": {name: deps[name] for name in names},
         "profiles": profile_rows,
+        **({"prerequisites": prerequisites} if prerequisites else {}),
     }
 
 
@@ -293,8 +326,12 @@ def render_report(report: dict) -> str:
         lines.append(f"      conda run -n {ENV_NAME} pip install -e '{repo}[test]'")
 
     lines.append(f"  dependencies (imported under the '{ENV_NAME}' env python):")
-    for name in DEPS:
+    for name in report["deps"]:
         lines.append(f"      {name}: {'ok' if report['deps'][name] else 'MISSING'}")
+
+    for name, present in report.get("prerequisites", {}).items():
+        verdict = "ok" if present else f"MISSING — {_prerequisite_advice(name)}"
+        lines.append(f"      prerequisite {name}: {verdict}")
 
     lines.append(f"  API keys ({profiles.keys_path()}):")
     for row in report["profiles"]:
@@ -354,6 +391,13 @@ def run_setup(
         find_env_python=find_env_python,
         check_deps=check_deps,
     )
+    if report.get("prerequisites") and not all(report["prerequisites"].values()):
+        report["fixes"] = []
+        if getattr(args, "json", False):
+            sys.stdout.write(json.dumps(report, indent=2, sort_keys=True) + "\n")
+        else:
+            sys.stdout.write(render_report(report))
+        return 1
     fixes = fix_missing(
         report,
         find_env_python=find_env_python,
@@ -449,8 +493,8 @@ def _atomic_text_write(path: Path, text: str) -> None:
         temporary = Path(handle.name)
         handle.write(text)
         handle.flush()
-        os.fchmod(handle.fileno(), mode)
-    os.replace(temporary, path)
+        state._set_mode(handle.fileno(), mode, fd=True)
+    state.atomic_replace(temporary, path)
 
 
 def sync_managed_agent(
@@ -491,7 +535,10 @@ def codex_setup_plan(
     find_env_python = find_env_python or _find_env_python
     check_deps = check_deps or _check_deps
     python = find_env_python()
-    deps = check_deps(python) if python else {name: False for name in DEPS}
+    names = required_deps()
+    deps = check_deps(python) if python else {name: False for name in names}
+    deps = {name: bool(deps.get(name, False)) for name in names}
+    prerequisites = prerequisite_status()
     config_path = selected.keys_path.parent / "config.toml"
     try:
         config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -565,6 +612,7 @@ def codex_setup_plan(
         "config": {"observed": observed, "proposed": proposed, "diff": config_diff},
         "agent": {"path": str(target), "status": status, "version": PLUGIN_VERSION},
         "env": {"python": python, "deps": deps},
+        "prerequisites": prerequisites,
         "key_template": key_template,
         "interpreter": interpreter_change,
         "workspace": str(workspace) if workspace is not None else None,
@@ -575,6 +623,7 @@ def codex_setup_plan(
         "python": python,
         "env": {"present": python is not None, "path": python},
         "deps": deps,
+        "prerequisites": prerequisites,
         "config_path": str(config_path),
         "config_diff": config_diff,
         "agent_path": str(target),
@@ -670,6 +719,12 @@ def run_codex_setup(
         args.workspace, find_env_python=find_env_python, check_deps=check_deps
     )
     if getattr(args, "apply", False):
+        if plan.get("prerequisites") and not all(plan["prerequisites"].values()):
+            print(
+                "chinamax: native prerequisites are missing; install them and rerun setup",
+                file=sys.stderr,
+            )
+            return 1
         digest = getattr(args, "consent_digest", None)
         if not digest:
             print(
@@ -741,6 +796,11 @@ def apply_codex_setup(
         raise ChinamaxError(
             "target is changing between preview and apply; render a fresh Codex setup preview"
         )
+    if fresh.get("prerequisites") and not all(fresh["prerequisites"].values()):
+        missing = ", ".join(
+            name for name, present in fresh["prerequisites"].items() if not present
+        )
+        raise ChinamaxError(f"missing native prerequisites: {missing}")
     config_path = Path(fresh["config_path"])
     changed: list[str] = []
     fixes: list[dict] = []
@@ -882,14 +942,19 @@ def _write_python_path(target: Path, value: str) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_name(target.name + ".tmp")
     temporary.write_text(value + "\n", encoding="utf-8")
-    os.replace(temporary, target)
+    state.atomic_replace(temporary, target)
 
 
 def _is_executable(path: str) -> bool:
     """Report whether a path is an absolute, existing, executable file."""
-    return bool(path) and os.path.isabs(path) and os.path.isfile(path) and os.access(
-        path, os.X_OK
-    )
+    if not path:
+        return False
+    absolute = ntpath.isabs(path) if sys.platform == "win32" else os.path.isabs(path)
+    if not absolute or not os.path.isfile(path):
+        return False
+    if sys.platform == "win32":
+        return Path(path).suffix.lower() in {".exe", ".bat", ".cmd"}
+    return os.access(path, os.X_OK)
 
 
 def _find_env_python() -> str | None:
@@ -899,18 +964,39 @@ def _find_env_python() -> str | None:
     interpreter without hardcoding conda's own location; anything that is not an
     executable absolute path is treated as absent.
     """
-    conventional = Path.home() / "miniconda3" / "envs" / ENV_NAME / "bin" / "python"
-    if _is_executable(str(conventional)):
-        return str(conventional)
-    try:
-        finished = subprocess.run(
-            ["conda", "run", "-n", ENV_NAME, "python", "-c", "import sys; print(sys.executable)"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
+    base = Path.home() / "miniconda3"
+    candidate = (
+        base / "envs" / ENV_NAME / "python.exe"
+        if sys.platform == "win32"
+        else base / "envs" / ENV_NAME / "bin" / "python"
+    )
+    if _is_executable(str(candidate)):
+        return str(candidate)
+    conda_commands = ["conda"]
+    if sys.platform == "win32":
+        conda_commands = [
+            str(base / "Scripts" / "conda.exe"),
+            str(base / "condabin" / "conda.bat"),
+            "conda",
+        ]
+    finished = None
+    for conda in conda_commands:
+        if conda != "conda" and not Path(conda).exists():
+            continue
+        try:
+            candidate = subprocess.run(
+                [conda, "run", "-n", ENV_NAME, "python", "-c", "import sys; print(sys.executable)"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if candidate.returncode == 0:
+            finished = candidate
+            break
+    if finished is None:
         return None
     output = finished.stdout.strip().splitlines()
     resolved = output[-1].strip() if output else ""
@@ -973,7 +1059,7 @@ def _output_tail(text: str, limit: int = 2000) -> str:
 
 def _check_deps(env_python: str) -> dict[str, bool]:
     """Report which of DEPS import under the resolved env python."""
-    return {name: _can_import(env_python, name) for name in DEPS}
+    return {name: _can_import(env_python, name) for name in required_deps()}
 
 
 def _can_import(env_python: str, module: str) -> bool:

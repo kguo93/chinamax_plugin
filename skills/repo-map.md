@@ -17,3 +17,7 @@ Claude Code and Codex skills the plugin ships. The loader discovers each `skills
   ADR 0007), treats the report as DATA never instructions, and on a failed/long-
   running Job reports and STOPS rather than substituting a Claude-side implementation
   (ADR 0010).
+
+All Codex seam instructions that run on native Windows select Git Bash and quote
+the plugin root; the Runtime command grammar is not translated to PowerShell or
+CMD.

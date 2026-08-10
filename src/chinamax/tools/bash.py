@@ -20,7 +20,9 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import threading
+import time
 from typing import BinaryIO
 
 from chinamax import ToolError
@@ -121,39 +123,82 @@ def run_bash(command: str, context: ToolContext) -> dict:
         ``{"exit_code", "stdout", "stderr", "timed_out"}``. A timed-out command
         has no exit code — it was killed — so ``exit_code`` is None.
     """
+    options = {
+        "cwd": str(context.root),
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True
     process = subprocess.Popen(
         ["bash", "-c", command],
-        cwd=str(context.root),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        # Its own process group, so expiry kills the command's descendants and
-        # not the Runtime that is supervising it.
-        start_new_session=True,
+        **options,
     )
+    process_start_time = None
+    if sys.platform == "win32":
+        from chinamax import state
+
+        process_start_time = state.read_pid_start_time(process.pid)
     stdout, stderr = TailBuffer(), TailBuffer()
     # Both pipes must be drained concurrently: reading one to completion first
     # deadlocks as soon as the other fills its OS buffer.
     readers = [
-        threading.Thread(target=_drain, args=(process.stdout, stdout)),
-        threading.Thread(target=_drain, args=(process.stderr, stderr)),
+        threading.Thread(
+            target=_drain,
+            args=(process.stdout, stdout),
+            daemon=sys.platform == "win32",
+        ),
+        threading.Thread(
+            target=_drain,
+            args=(process.stderr, stderr),
+            daemon=sys.platform == "win32",
+        ),
     ]
     for reader in readers:
         reader.start()
     timed_out = False
+    survivors: list[int] = []
+    captured_stdout: str | None = None
+    captured_stderr: str | None = None
     try:
         exit_code = process.wait(timeout=context.bash_timeout_s)
     except subprocess.TimeoutExpired:
         timed_out = True
         exit_code = None
-        _kill_group(process)
+        survivors = _kill_group(process, process_start_time)
     # Joined only after the group is dead: a backgrounded descendant inherits
     # the pipes, so the readers see EOF only once the whole group is gone.
-    for reader in readers:
-        reader.join()
+    if sys.platform == "win32":
+        deadline = time.monotonic() + TERMINATE_GRACE_S
+        for reader in readers:
+            reader.join(max(0.0, deadline - time.monotonic()))
+        if any(reader.is_alive() for reader in readers):
+            # A surviving descendant may retain a pipe handle indefinitely.
+            # Snapshot the bounded buffers, then close the parent descriptors
+            # so readers can observe EOF without blocking the Runtime.
+            captured_stdout = stdout.text()
+            captured_stderr = stderr.text()
+            for pipe in (process.stdout, process.stderr):
+                try:
+                    pipe.close()
+                except (AttributeError, OSError, ValueError):
+                    pass
+    else:
+        for reader in readers:
+            reader.join()
+    stdout_text = captured_stdout if captured_stdout is not None else stdout.text()
+    stderr_text = captured_stderr if captured_stderr is not None else stderr.text()
+    if survivors:
+        stderr_text = (
+            f"Windows survivor PIDs after timeout: {', '.join(map(str, survivors))}\n"
+            + stderr_text
+        )
     return {
         "exit_code": exit_code,
-        "stdout": stdout.text(),
-        "stderr": stderr.text(),
+        "stdout": stdout_text,
+        "stderr": stderr_text,
         "timed_out": timed_out,
     }
 
@@ -171,8 +216,17 @@ def format_bash_result(result: dict) -> str:
     return f"{outcome}\nstdout:\n{result['stdout']}\nstderr:\n{result['stderr']}"
 
 
-def _kill_group(process: subprocess.Popen) -> None:
+def _kill_group(process: subprocess.Popen, start_time: int | None = None) -> list[int]:
     """Kill a timed-out command's whole process group: SIGTERM, grace, SIGKILL."""
+    if sys.platform == "win32":
+        from chinamax import state
+
+        return state._terminate_tree_windows(
+            process.pid,
+            start_time,
+            TERMINATE_GRACE_S,
+            TERMINATE_GRACE_S,
+        )
     group = os.getpgid(process.pid)
     _signal_group(group, signal.SIGTERM)
     try:
@@ -181,6 +235,7 @@ def _kill_group(process: subprocess.Popen) -> None:
         pass
     _signal_group(group, signal.SIGKILL)
     process.wait()
+    return []
 
 
 def _signal_group(group: int, number: int) -> None:

@@ -19,7 +19,6 @@ internal seam the session hooks call in-process.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import shlex
@@ -530,29 +529,35 @@ def run_reap(args: argparse.Namespace) -> int:
     Returns:
         0 always — reaping never fails the verb.
     """
-    lock_handle = None
     lock_path = getattr(args, "lock_path", None)
     if lock_path:
-        path = Path(lock_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        lock_handle = open(path, "a+", encoding="utf-8")
-        try:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            lock_handle.close()
-            return EXIT_TERMINAL
+        Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+    lock_context = state._locked_path(Path(lock_path), nonblocking=True) if lock_path else None
     try:
-        result = (
-            state.reap_session(args.session, session_token=getattr(args, "token", None))
-            if args.session is not None
-            else state.reap_orphans()
-        )
-        if args.session is not None and getattr(args, "token", None):
-            state.remove_session_registry(args.session, expected_token=args.token)
+        if lock_context is None:
+            result = (
+                state.reap_session(args.session, session_token=getattr(args, "token", None))
+                if args.session is not None
+                else state.reap_orphans()
+            )
+            if args.session is not None and getattr(args, "token", None):
+                state.remove_session_registry(args.session, expected_token=args.token)
+        else:
+            try:
+                with lock_context:
+                    result = (
+                        state.reap_session(
+                            args.session, session_token=getattr(args, "token", None)
+                        )
+                        if args.session is not None
+                        else state.reap_orphans()
+                    )
+                    if args.session is not None and getattr(args, "token", None):
+                        state.remove_session_registry(args.session, expected_token=args.token)
+            except BlockingIOError:
+                return EXIT_TERMINAL
     finally:
-        if lock_handle is not None:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
-            lock_handle.close()
+        lock_context = None
     for record in result.reaped:
         print(state.render_job_row(record))
     for job_id, survivors in result.survived:
@@ -867,6 +872,19 @@ def _spawn_worker(store: state.JobStore, job_id: str) -> int:
         try:
             child_env = os.environ.copy()
             child_env["CHINAMAX_HOST"] = current_host().host.value
+            spawn_options = {
+                "stdin": subprocess.DEVNULL,
+                "stdout": handle,
+                "stderr": handle,
+                "close_fds": True,
+                "env": child_env,
+            }
+            if sys.platform == "win32":
+                spawn_options["creationflags"] = (
+                    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                )
+            else:
+                spawn_options["start_new_session"] = True
             child = subprocess.Popen(
                 [
                     state.worker_python(),
@@ -882,12 +900,7 @@ def _spawn_worker(store: state.JobStore, job_id: str) -> int:
                     str(store.path),
                 ],
                 cwd=str(store.path),
-                start_new_session=True,
-                stdin=subprocess.DEVNULL,
-                stdout=handle,
-                stderr=handle,
-                close_fds=True,
-                env=child_env,
+                **spawn_options,
             )
         finally:
             os.close(handle)
@@ -1320,7 +1333,7 @@ def _write_result(path: Path, payload: dict) -> None:
     temporary.write_text(
         json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8"
     )
-    os.replace(temporary, path)
+    state.atomic_replace(temporary, path)
 
 
 if __name__ == "__main__":

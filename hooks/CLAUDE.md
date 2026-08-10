@@ -19,7 +19,8 @@ Inventory lives in `./repo-map.md`.
   forked session inherits the parent's exported `CHINAMAX_SESSION_ID` — without its
   own SessionStart it never registers its own owner and its dispatches are reaped
   with the parent.
-- **Timeouts are 10s, except `SessionEnd` at 30s.** Interpreter resolution can fall
+- **Claude timeouts are 10s, except `SessionEnd` at 30s; Codex uses 3s for
+  `SessionEnd` because the CLI clamps that hook.** Interpreter resolution can fall
   through to `conda run` (process-startup cost before the hook body), and a
   SessionEnd reap may kill several Jobs; its reap runs with the short
   `state.SESSION_REAP_GRACE_S`/`SESSION_REAP_CONFIRM_S` so it fits that budget.
@@ -36,3 +37,6 @@ Inventory lives in `./repo-map.md`.
   `src/chinamax/hooks/`, not in this directory.
 - **Only `hooks.json` is consumed here; the loader does not `.md`-component-scan
   `hooks/`,** so the CLAUDE.md/AGENTS.md/repo-map.md trio is safe.
+- Codex consumes `codex-hooks.json` separately from Claude's `hooks.json`. Keep
+  event/matcher/timeout parity and put all native Windows Git Bash commands in
+  Codex `commandWindows` fields; never add PowerShell Runtime grammar.

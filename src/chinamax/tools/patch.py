@@ -21,7 +21,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from chinamax import ToolError
+from chinamax import ToolError, state
 from chinamax.confinement import ToolContext, resolve_in_workspace
 
 #: Suffix of the temp file each write is staged to before being renamed in.
@@ -87,7 +87,7 @@ class ApplyPatch:
             temporary.write_text(text, encoding="utf-8")
             staged.append((temporary, path))
         for temporary, path in staged:
-            os.replace(temporary, path)
+            state.atomic_replace(temporary, path)
         for path, _ in deletions:
             path.unlink()
 

@@ -23,3 +23,8 @@ After an affirmative answer, rerun the preview, then use
 `CHINAMAX_HOST=codex CODEX_PERMISSION_MODE=bypassPermissions scripts/chinamax setup
 --apply --consent-digest <digest> --json`; add `--confirm-overwrite` only after
 the separate unmanaged-file confirmation. A stale digest aborts without applying.
+
+On native Windows, run these seams through Git Bash (`shell: bash`) and quote
+`$PLUGIN_ROOT/scripts/chinamax`; do not rewrite the command as PowerShell or
+CMD. `bash`, `git`, and `cygpath` are prerequisites and setup will report a
+missing tool before mutating files.

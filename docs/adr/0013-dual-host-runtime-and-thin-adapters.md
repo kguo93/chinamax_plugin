@@ -11,3 +11,10 @@ compatible with its existing plugin surface.
 Rejected: maintaining two Runtime implementations or copying the Bridge contract
 into each Host adapter. A canonical hidden skill is the one maintained contract;
 adapters load it and add only Host-specific transport details.
+
+## Portability amendment (0.4.3)
+
+Platform is orthogonal to Host: both Claude and Codex adapters operate on every
+supported Platform, while native data roots and lifecycle mechanisms follow the
+Platform. The shared Runtime remains the only implementation of Job and Thread
+semantics.

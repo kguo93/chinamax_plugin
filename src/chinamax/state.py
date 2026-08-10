@@ -30,7 +30,6 @@ Job never outlives the Bridge that relays it.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -44,6 +43,8 @@ import sys
 import tempfile
 import threading
 import time
+if sys.platform != "win32":
+    import fcntl
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -145,6 +146,99 @@ WAIT_TIMEOUT_MS = 900_000
 #: Records hold prompt text and results, so the store is owner-only throughout.
 DIR_MODE = 0o700
 FILE_MODE = 0o600
+
+
+def _psutil_module():
+    """Load psutil only on platforms whose process table needs it."""
+    try:
+        import psutil
+    except ImportError as error:
+        raise ChinamaxError(
+            "ChinamaX requires psutil on macOS/Windows; rerun /chinamax:setup"
+        ) from error
+
+    return psutil
+
+
+@contextmanager
+def _locked_path(path: Path, *, nonblocking: bool = False) -> Iterator[None]:
+    """Lock one sidecar with fcntl on Unix or filelock on Windows."""
+    if sys.platform == "win32":
+        try:
+            from filelock import FileLock, Timeout
+        except ImportError as error:
+            raise ChinamaxError(
+                "ChinamaX requires filelock on Windows; rerun /chinamax:setup"
+            ) from error
+
+        lock = FileLock(str(path))
+        try:
+            lock.acquire(timeout=0 if nonblocking else -1)
+        except Timeout as error:
+            raise BlockingIOError(str(path)) from error
+        try:
+            yield
+        finally:
+            lock.release()
+        return
+
+    handle = os.open(path, os.O_CREAT | os.O_RDWR, FILE_MODE)
+    try:
+        _set_mode(handle, FILE_MODE, fd=True)
+        operation = fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0)
+        fcntl.flock(handle, operation)
+        yield
+    finally:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(handle)
+
+
+def atomic_replace(
+    source: str | os.PathLike[str],
+    destination: str | os.PathLike[str],
+    *,
+    cleanup_source: bool = True,
+) -> None:
+    """Publish a temporary file, retrying transient Windows sharing violations.
+
+    All callers pass a temporary file created beside ``destination``.  The
+    source is removed when publication fails by default so a failed write
+    cannot leave a stale staging artifact behind. Callers moving durable queue
+    entries can disable that cleanup to preserve retry semantics.
+    """
+    source_path = os.fspath(source)
+    destination_path = os.fspath(destination)
+    replaced = False
+    try:
+        attempts = 5 if sys.platform == "win32" else 1
+        for attempt in range(attempts):
+            try:
+                os.replace(source_path, destination_path)
+                replaced = True
+                return
+            except PermissionError:
+                if attempt + 1 >= attempts:
+                    raise
+                time.sleep(0.1)
+    finally:
+        if cleanup_source and not replaced:
+            try:
+                os.unlink(source_path)
+            except OSError:
+                pass
+
+
+def _set_mode(target: int | str | os.PathLike[str], mode: int, *, fd: bool = False) -> None:
+    """Apply a POSIX mode, or no-op where Windows ACLs are authoritative."""
+    if sys.platform == "win32":
+        return
+    if fd:
+        os.fchmod(int(target), mode)
+    else:
+        os.chmod(target, mode)
 
 #: The environment variable the SessionStart hook exports (`session_start.py`).
 #: This IS the owning-session field: `reap_session`/`reap_orphans` key a Job's
@@ -334,6 +428,13 @@ def read_pid_start_time(pid: int) -> int | None:
     Returns:
         The start time in clock ticks, or None.
     """
+    if sys.platform != "linux":
+        try:
+            return int(round(float(_psutil_module().Process(pid).create_time()) * 1_000_000))
+        except (_psutil_module().NoSuchProcess, _psutil_module().ZombieProcess):
+            return None
+        except (_psutil_module().AccessDenied, OSError, ValueError):
+            return None
     fields = read_proc_stat(pid)
     return None if fields is None else _stat_start_time(fields)
 
@@ -351,6 +452,31 @@ class ProcessInfo:
 
 def read_process(pid: int) -> ProcessInfo | None:
     """Return one process's identity and links, or None when it is gone."""
+    if sys.platform != "linux":
+        psutil = _psutil_module()
+        try:
+            process = psutil.Process(pid)
+            status = process.status()
+            try:
+                pgid = os.getpgid(pid)
+            except (AttributeError, OSError):
+                pgid = 0
+            return ProcessInfo(
+                pid=pid,
+                ppid=int(process.ppid()),
+                pgid=pgid,
+                start_time=int(round(float(process.create_time()) * 1_000_000)),
+                zombie=status == psutil.STATUS_ZOMBIE,
+            )
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return None
+        except psutil.AccessDenied:
+            # The process exists but its metadata is protected. Keep it alive
+            # and unknown so callers cannot mistake inspection failure for a
+            # safe-to-reap worker.
+            return ProcessInfo(pid=pid, ppid=0, pgid=0, start_time=None, zombie=False)
+        except (OSError, ValueError):
+            return None
     fields = read_proc_stat(pid)
     if fields is None or len(fields) < 3:
         return None
@@ -369,6 +495,14 @@ def read_process(pid: int) -> ProcessInfo | None:
 
 def process_table() -> dict[int, ProcessInfo]:
     """Snapshot every readable process, keyed by pid."""
+    if sys.platform != "linux":
+        psutil = _psutil_module()
+        table: dict[int, ProcessInfo] = {}
+        for process in psutil.process_iter():
+            info = read_process(int(process.pid))
+            if info is not None:
+                table[info.pid] = info
+        return table
     table: dict[int, ProcessInfo] = {}
     try:
         entries = list(os.scandir("/proc"))
@@ -468,6 +602,22 @@ def worker_gone(record: dict) -> bool:
     pid = usable_pid(record)
     if pid is None:
         return False
+    if sys.platform != "linux":
+        psutil = _psutil_module()
+        try:
+            process = psutil.Process(pid)
+            if process.status() == psutil.STATUS_ZOMBIE:
+                return True
+            recorded = record.get("pidStartTime")
+            if recorded is not None:
+                current = int(round(float(process.create_time()) * 1_000_000))
+                if current != recorded:
+                    return True
+            return False
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            return True
+        except (psutil.AccessDenied, OSError, ValueError):
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -631,6 +781,8 @@ def terminate_tree(
         The pids still alive after the sweep — empty when everything targeted is
         confirmed gone.
     """
+    if sys.platform == "win32":
+        return _terminate_tree_windows(pid, start_time, grace_s, confirm_s)
     if pid == os.getpid():
         # Only reachable from a fabricated or wildly recycled record, and the
         # one target that would take the caller down with it.
@@ -653,6 +805,159 @@ def terminate_tree(
     _signal_processes(remaining, signal.SIGKILL)
     _await_exit(remaining, confirm_s)
     return sorted(_alive_targets(remaining))
+
+
+def _windows_process_identity(process) -> int | None:
+    """Return a psutil process creation time in the persisted integer format."""
+    try:
+        return int(round(float(process.create_time()) * 1_000_000))
+    except (_psutil_module().NoSuchProcess, _psutil_module().ZombieProcess, OSError, ValueError):
+        return None
+
+
+def _windows_identity_holds(process, expected: int | None) -> bool:
+    """Verify a Windows process object still names the same PID instance."""
+    if expected is None:
+        return False
+    current = _windows_process_identity(process)
+    return current is not None and current == expected
+
+
+def _windows_snapshot(pid: int) -> dict[int, tuple[object, int | None]]:
+    """Snapshot a Windows root and recursive descendants before termination."""
+    psutil = _psutil_module()
+    try:
+        root = psutil.Process(pid)
+        processes = [root, *root.children(recursive=True)]
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return {}
+    except (psutil.AccessDenied, OSError):
+        return {pid: (root, _windows_process_identity(root))}
+    snapshot: dict[int, tuple[object, int | None]] = {}
+    for process in processes:
+        try:
+            if process.pid != os.getpid():
+                snapshot[int(process.pid)] = (process, _windows_process_identity(process))
+        except (psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
+            continue
+    return snapshot
+
+
+def _windows_alive_targets(
+    targets: dict[int, tuple[object, int | None]],
+) -> dict[int, tuple[object, int | None]]:
+    """Return target processes that are still alive and still have their identity."""
+    psutil = _psutil_module()
+    alive: dict[int, tuple[object, int | None]] = {}
+    for pid, (process, expected) in targets.items():
+        try:
+            if process.pid == os.getpid() or not process.is_running():
+                continue
+            if process.status() == psutil.STATUS_ZOMBIE:
+                continue
+            if expected is None or _windows_identity_holds(process, expected):
+                alive[pid] = (process, expected)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+        except (psutil.AccessDenied, OSError):
+            # Access denied means alive/unknown; report it conservatively.
+            alive[pid] = (process, expected)
+    return alive
+
+
+def _windows_rescan(
+    snapshot: dict[int, tuple[object, int | None]],
+) -> dict[int, tuple[object, int | None]]:
+    """Rescan verified live roots for descendants born after the first snapshot."""
+    psutil = _psutil_module()
+    found = dict(_windows_alive_targets(snapshot))
+    for pid, (process, expected) in list(found.items()):
+        try:
+            if process.pid != pid or not _windows_identity_holds(process, expected):
+                continue
+            for child in process.children(recursive=True):
+                if child.pid == os.getpid():
+                    continue
+                identity = _windows_process_identity(child)
+                found[int(child.pid)] = (child, identity)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess, OSError):
+            continue
+        except psutil.AccessDenied:
+            continue
+    return found
+
+
+def _terminate_tree_windows(
+    pid: int,
+    start_time: int | None,
+    grace_s: float,
+    confirm_s: float,
+) -> list[int]:
+    """Terminate a verified Windows process tree without relying on signals."""
+    if pid == os.getpid():
+        return []
+    snapshot = _windows_snapshot(pid)
+    rooted = snapshot.get(pid)
+    if rooted is None:
+        return []
+    if start_time is None or rooted[1] is None:
+        return [pid]
+    if rooted[1] != start_time:
+        return []
+    alive = _windows_alive_targets(snapshot)
+    for process, expected in sorted(
+        alive.values(),
+        key=lambda item: (_windows_depth(item[0], pid), item[0].pid),
+        reverse=True,
+    ):
+        try:
+            if _windows_identity_holds(process, expected):
+                process.terminate()
+        except (_psutil_module().NoSuchProcess, _psutil_module().ZombieProcess):
+            pass
+        except (_psutil_module().AccessDenied, OSError):
+            pass
+    deadline = time.monotonic() + grace_s
+    while _windows_alive_targets(alive) and time.monotonic() < deadline:
+        time.sleep(_TERMINATE_POLL_S)
+    remaining = _windows_rescan(alive)
+    for process, expected in sorted(
+        remaining.values(),
+        key=lambda item: (_windows_depth(item[0], pid), item[0].pid),
+        reverse=True,
+    ):
+        try:
+            if _windows_identity_holds(process, expected):
+                process.kill()
+        except (_psutil_module().NoSuchProcess, _psutil_module().ZombieProcess):
+            pass
+        except (_psutil_module().AccessDenied, OSError):
+            pass
+    deadline = time.monotonic() + confirm_s
+    while _windows_alive_targets(remaining) and time.monotonic() < deadline:
+        time.sleep(_TERMINATE_POLL_S)
+    return sorted(_windows_alive_targets(remaining))
+
+
+def _windows_depth(process, root_pid: int) -> int:
+    """Best-effort depth for deepest-first Windows termination ordering."""
+    depth = 0
+    seen: set[int] = set()
+    current = process
+    while getattr(current, "pid", None) != root_pid and depth < 128:
+        current_pid = getattr(current, "pid", None)
+        if current_pid in seen or current_pid is None:
+            break
+        seen.add(current_pid)
+        try:
+            parent = current.parent()
+        except (_psutil_module().NoSuchProcess, _psutil_module().ZombieProcess, _psutil_module().AccessDenied, AttributeError, OSError):
+            break
+        if parent is None:
+            break
+        current = parent
+        depth += 1
+    return depth
 
 
 def worker_python() -> str:
@@ -687,7 +992,9 @@ def state_root(context: HostContext | None = None) -> Path:
 #: Comms of the transient wrappers between a hook's python and the long-lived
 #: Claude process: the login shells and the plugin's own `scripts/` shims. The
 #: ancestor walk skips them so the registered pid is Claude's, never a runner's.
-_SHELL_COMMS = frozenset({"sh", "bash", "dash", "zsh", "ksh"})
+_SHELL_COMMS = frozenset(
+    {"sh", "bash", "dash", "zsh", "ksh", "cmd", "powershell", "pwsh"}
+)
 _SHIM_COMMS = frozenset(
     {
         "chinamax",
@@ -721,6 +1028,13 @@ def session_registry_path(
 
 def read_comm(pid: int) -> str | None:
     """Return a process's command name (``/proc/<pid>/comm``), or None."""
+    if sys.platform != "linux":
+        psutil = _psutil_module()
+        try:
+            name = psutil.Process(pid).name().strip().lower()
+        except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied, OSError):
+            return None
+        return name[:-4] if name.endswith(".exe") else name
     try:
         return (
             Path(f"/proc/{pid}/comm")
@@ -811,14 +1125,8 @@ def _session_registry_lock() -> Iterator[None]:
     """Serialize registry writes and compare-and-delete operations."""
     directory = sessions_dir()
     make_dir(directory)
-    handle = os.open(directory / ".registry.lock", os.O_CREAT | os.O_RDWR, FILE_MODE)
-    try:
-        os.fchmod(handle, FILE_MODE)
-        fcntl.flock(handle, fcntl.LOCK_EX)
+    with _locked_path(directory / ".registry.lock"):
         yield
-    finally:
-        fcntl.flock(handle, fcntl.LOCK_UN)
-        os.close(handle)
 
 
 def read_session_registry(session_id_value: str) -> tuple[int, int | None] | None:
@@ -1279,7 +1587,7 @@ def reap_stale_supervision(
 def make_dir(path: Path) -> Path:
     """Create a state directory 0700, tolerating an existing one."""
     path.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
-    os.chmod(path, DIR_MODE)
+    _set_mode(path, DIR_MODE)
     return path
 
 
@@ -1299,7 +1607,7 @@ def precreate(path: Path) -> Path:
     make_dir(path.parent)
     handle = os.open(path, os.O_CREAT | os.O_WRONLY, FILE_MODE)
     try:
-        os.fchmod(handle, FILE_MODE)
+        _set_mode(handle, FILE_MODE, fd=True)
     finally:
         os.close(handle)
     return path
@@ -1312,7 +1620,7 @@ def secure_file(path: Path) -> None:
     temporary carries its own mode rather than the precreated one.
     """
     try:
-        os.chmod(path, FILE_MODE)
+        _set_mode(path, FILE_MODE)
     except OSError:
         pass
 
@@ -1676,7 +1984,7 @@ class JobStore:
             except FileExistsError:
                 continue
             try:
-                os.fchmod(handle, FILE_MODE)
+                _set_mode(handle, FILE_MODE, fd=True)
             finally:
                 os.close(handle)
             return job_id
@@ -1990,13 +2298,8 @@ class JobStore:
     def _locked(self) -> Iterator[None]:
         """Hold ``state.lock`` for one mutation or rebuild."""
         self.ensure()
-        handle = os.open(self.lock_path, os.O_CREAT | os.O_RDWR, FILE_MODE)
-        try:
-            os.fchmod(handle, FILE_MODE)
-            fcntl.flock(handle, fcntl.LOCK_EX)
+        with _locked_path(self.lock_path):
             yield
-        finally:
-            os.close(handle)
 
     def _publish(self, record: dict) -> None:
         """Write one record atomically. The caller holds the lock."""
@@ -2459,12 +2762,12 @@ def _write_file(path: Path, text: str) -> None:
         dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp"
     )
     try:
-        os.fchmod(handle, FILE_MODE)
+        _set_mode(handle, FILE_MODE, fd=True)
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        atomic_replace(temporary, path)
     except BaseException:
         # Only ever the temporary this call just created.
         try:

@@ -19,6 +19,9 @@ from conftest import build_record
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOKS = json.loads((REPO_ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+CODEX_HOOKS = json.loads(
+    (REPO_ROOT / "hooks" / "codex-hooks.json").read_text(encoding="utf-8")
+)
 
 
 def _entry(event_name: str) -> dict:
@@ -68,6 +71,81 @@ def test_registered_events():
     assert HOOKS["hooks"]["PreToolUse"][0]["matcher"] == "Bash"
     assert HOOKS["hooks"]["PreToolUse"][1]["matcher"] == "Agent|Bash|spawn_agent"
     assert HOOKS["hooks"]["SubagentStart"][0]["matcher"] == "chinamax_bridge|chinamax[-_]"
+
+
+def test_codex_registration_has_cross_platform_command_parity():
+    """Codex uses its own registration while preserving Claude event semantics."""
+    assert set(CODEX_HOOKS["hooks"]) == set(HOOKS["hooks"])
+    for event_name, groups in CODEX_HOOKS["hooks"].items():
+        assert len(groups) == len(HOOKS["hooks"][event_name])
+        expected_timeouts = {
+            hook["timeout"]
+            for group in HOOKS["hooks"][event_name]
+            for hook in group["hooks"]
+        }
+        if event_name == "SessionEnd":
+            expected_timeouts = {3}
+        for group in groups:
+            for hook in group["hooks"]:
+                assert hook["type"] == "command"
+                assert hook["timeout"] in expected_timeouts
+                assert hook["commandWindows"].startswith("bash -lc ")
+                assert "PLUGIN_ROOT" in hook["commandWindows"]
+                assert "cygpath" in hook["commandWindows"]
+                assert "exec" in hook["commandWindows"]
+                assert "powershell" not in hook["commandWindows"].lower()
+
+
+def test_codex_windows_commands_convert_drive_root_with_spaces(tmp_path):
+    """Every Windows registration reaches its matching shim after cygpath."""
+    plugin_root = tmp_path / "plugin root"
+    scripts = plugin_root / "scripts"
+    scripts.mkdir(parents=True)
+    shim_names = {
+        "session_start_hook",
+        "session_end_hook",
+        "stop_hook",
+        "user_prompt_hook",
+        "bridge_contract_hook",
+        "codex_pretool_hook",
+    }
+    for name in shim_names:
+        shim = scripts / name
+        shim.write_text("#!/bin/sh\nprintf hook-ok\ncat >/dev/null\n", encoding="utf-8")
+        shim.chmod(0o700)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    cygpath = bin_dir / "cygpath"
+    cygpath.write_text("#!/bin/sh\nprintf '%s\\n' \"$CHINAMAX_CYGPATH_RESULT\"\n", encoding="utf-8")
+    cygpath.chmod(0o700)
+    env = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        "PLUGIN_ROOT": r"C:\Users\Alice\ChinamaX Plugin",
+        "CLAUDE_PLUGIN_ROOT": "ignored-fallback",
+        "CHINAMAX_CYGPATH_RESULT": str(plugin_root),
+    }
+    event = {"hook_event_name": "SessionStart", "session_id": "windows-smoke"}
+    commands = {
+        hook["commandWindows"]
+        for groups in CODEX_HOOKS["hooks"].values()
+        for group in groups
+        for hook in group["hooks"]
+    }
+    assert len(commands) == len(shim_names)
+    for command in commands:
+        result = subprocess.run(
+            command,
+            shell=True,
+            input=json.dumps(event),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=10,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == "hook-ok"
 
 
 def _run_registered(command: str, event: dict, extra_env: dict) -> subprocess.CompletedProcess:

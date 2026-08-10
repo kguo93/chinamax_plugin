@@ -45,6 +45,16 @@ hard-gate evidence, while other endpoint smokes were intentionally skipped.
 The CLI still clamps the registered SessionEnd hook to 3 s and has no reliable
 native teammate-stop event
 
+## Native Platform portability (0.4.3)
+
+`Platform` is orthogonal to `Host`. Linux behavior remains the regression
+baseline; macOS uses psutil inspection with POSIX locks/signals; native Windows
+uses Git Bash, psutil tree lifecycle handling, filelock sidecars, native Local
+AppData roots, and inherited ACLs. Conditional `psutil`/`filelock` markers must
+not change Linux installation behavior. Read ADR 0015 before changing these
+seams, and keep README/verification claims explicit about mocked new-platform
+coverage versus native Linux evidence.
+
 ## Keep Claude Code and Codex marketplace manifests synchronized
 
 These are two different marketplace formats. Never copy one marketplace file over

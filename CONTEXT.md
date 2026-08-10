@@ -53,6 +53,12 @@ The selected plugin host — `claude` or `codex` — resolved once at a process
 boundary. It determines native adapter behavior and filesystem roots; it is not
 a provider Profile.
 
+**Platform**:
+The operating-system family on which a Host and the ChinamaX Runtime execute:
+Linux, macOS, or Windows. Platform is orthogonal to Host. It selects native path,
+process, lock, permission, and launcher mechanisms but never changes Job, Thread,
+provider, confinement, or result semantics.
+
 **Host Session**:
 The host-owned lifecycle identity recorded on a Job. Claude uses the existing
 session registry semantics; Codex additionally uses a token so a detached

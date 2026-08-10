@@ -1,6 +1,9 @@
 # repo-map — src/chinamax/tools/
 
-The nine tools the Runtime advertises, and the single boundary that dispatches them. Each tool is a small class carrying a `spec` (the advertised JSON schema), a `writes` flag (what the read-only posture filters on) and, except for the terminus, an `execute(value, context)`.
+Windows timeout cleanup carries the process creation-time snapshot captured
+immediately after spawn into the shared descendant termination seam.
+
+The nine tools the Runtime advertises, and the single boundary that dispatches them. Each tool is a small class carrying a `spec` (the advertised JSON schema), a `writes` flag (what the read-only posture filters on) and, except for the terminus, an `execute(value, context)`. Temporary workspace-file publication uses the Runtime's shared atomic replace seam, including bounded Windows sharing-violation retries.
 
 - `__init__.py` — the registry and its dispatch boundary: `ALL_TOOLS` (every tool, in advertised order), `build_registry(write)` (the posture filter), `Registry` (`.schemas`/`.names`/`.validate()`/`.dispatch()` — one object feeding both the advertised schema and the executable dispatch table, and owning input validation, output truncation and `Exception` normalization), the `REPORT_RESULT` name constant, and `validate_input()`, the shared `input_schema` checker.
 - `bash.py` — `BashTool` (denylist and read-only checks, then execution), `run_bash()` (cwd-pinned `bash -c`, own process group, both pipes drained concurrently, timeout → SIGTERM/grace/SIGKILL of the whole group), `format_bash_result()`, `truncate_tail()` (the boundary's output bound) and `TailBuffer` (the streaming ~50 KB tail capture).

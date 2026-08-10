@@ -7,6 +7,11 @@ host-tagged records, Codex yolo/name invariants, native-agent compilation, and
 manifest parity. Direct CLI tests must provide `--host claude` or Codex evidence;
 the no-marker failure is intentional.
 
+Platform migration tests must use injected/mocked macOS and Windows seams on the
+Linux runner: native process, lock, path, prerequisite, and hook behavior is
+covered without pretending to be live native-OS evidence. Keep the full Linux
+suite green and assert that Linux dependency/report behavior remains unchanged.
+
 ## Gotchas
 
 - **The suite is keyless and endpoint-clean by construction.** The autouse `keyless_home` fixture points `HOME` at a temp dir and deletes the ambient `ANTHROPIC_*` variables, so tests added later inherit the guarantee instead of opting in. It only holds because the Runtime resolves `~/.claude/...` through `Path.home()`. `test_bearer_auth_and_advertised_tools` re-sets `ANTHROPIC_API_KEY` on purpose — that seeding IS the test; without it the assertion passes even on an implementation that never sanitizes the environment.

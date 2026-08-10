@@ -74,6 +74,11 @@ fourteen ADRs group into six themes.
 
 ## Edit routing — which ADR to amend when a decision changes
 
+Cross-platform process, lock, native-root, dependency-marker, Git Bash, or
+Codex `commandWindows` changes must read and amend **0015** in addition to the
+nearest existing Runtime/Host ADR. Keep the Linux-preservation and mocked-only
+validation limits synchronized with `README.md` and `docs/verification-report.md`.
+
 - **A change inside one of the six themes** → amend that theme's ADR in place (dated
   `**Amended <date>**` paragraph), per the ADR formatting rules above.
 - **A reversal** (the new decision contradicts the old) → quote the original, then override,

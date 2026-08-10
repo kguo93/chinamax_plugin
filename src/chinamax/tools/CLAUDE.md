@@ -11,3 +11,9 @@ Inventory lives in `./repo-map.md`. The loop-level rules that constrain these to
 - `validate_input` covers only the schema shapes these tools declare (object, string, string enum, integer, boolean, array of strings). Extend it alongside any new shape rather than reaching for a JSON-Schema dependency — none is declared. Its `integer` branch rejects `bool` explicitly, because `bool` subclasses `int`.
 - Output bounding has two halves and they are not interchangeable: `TailBuffer` bounds bash's capture WHILE it streams, so a command producing gigabytes cannot exhaust memory before its timeout; `truncate_tail` bounds a finished string and the registry applies it to every tool. Reuse both rather than adding a third mechanism.
 - `report_result` has no executor by design. Its input becomes the Job result verbatim (ADR 0007), so never normalize, default, or reshape those fields here.
+
+Runtime Bash remains `bash -c` on every Platform. Linux/macOS use POSIX process
+groups; native Windows uses Git Bash with `CREATE_NEW_PROCESS_GROUP` and the
+shared psutil descendant sweep on timeout. Windows captures the process identity
+immediately after spawn, bounds reader-thread joins, and reports survivor PIDs
+inside the existing timeout observation. Do not add PowerShell/CMD grammar.

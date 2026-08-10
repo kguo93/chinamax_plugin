@@ -1,5 +1,9 @@
 # repo-map — tests/
 
+Portability coverage includes mocked macOS/Windows Host roots, psutil process
+identity/PID reuse, conditional setup dependencies/prerequisites, and Codex hook
+registration parity with Git Bash `commandWindows` handlers.
+
 The pytest suite. Every test drives the Runtime and the Job supervisor at their process/CLI seam against the hermetic fake provider — never with SDK-level mocks, never with a mocked process layer, and never against a real endpoint (ADR 0011).
 
 - `fake_provider.py` — the test bed, not a test: `FakeProvider` (a `ThreadingHTTPServer` on an ephemeral port serving `POST /v1/messages` as SSE from a scripted turn list, recording every request's body and headers) plus the script builders `turn()` (with an optional `usage=` merged over the message_start usage, so a turn can script the cache counters), `text_block()`, `tool_use_block()`, `thinking_block()` (a `{type, thinking, signature}` reasoning block served on the full-block path — never the tool_use-only partial path), the turn-gate seam `gate(index)` (holds the worker between two turns — records the request, sets `reached`, blocks until the caller sets `release` — the window a steer test writes into), and the fault builders `status_fault()` (any status, body and headers, e.g. `Retry-After`), `hang_fault()` (stall mid-turn, optionally after a half-served block), `ping_fault()` (keepalives and SSE comments only), `eof_fault()` (clean close before `message_stop`), `stream_error_fault()` (an `error` event inside a 200) and `drop_fault()` (connection closed with no response).

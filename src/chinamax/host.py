@@ -9,10 +9,12 @@ the Runtime.
 from __future__ import annotations
 
 import os
+import ntpath
+import sys
 from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Mapping
 
 
@@ -29,9 +31,52 @@ class HostResolutionError(ValueError):
 
 def _absolute_dir(environ: Mapping[str, str], name: str) -> Path | None:
     value = environ.get(name, "").strip()
-    if not value or not os.path.isabs(value):
+    if not value or not _is_absolute(value):
         return None
     return Path(value).expanduser()
+
+
+def _is_absolute(value: str) -> bool:
+    """Check an env path using the selected platform's path grammar."""
+    return ntpath.isabs(value) if sys.platform == "win32" else os.path.isabs(value)
+
+
+def _join_native(base: Path, *parts: str) -> Path:
+    """Compose native Windows drive/UNC paths even when tests mock ``win32``."""
+    if sys.platform == "win32":
+        text = str(base)
+        drive, _ = ntpath.splitdrive(text)
+        if drive or text.startswith("\\\\"):
+            return Path(str(PureWindowsPath(text, *parts)))
+    return base.joinpath(*parts)
+
+
+def _native_home(environ: Mapping[str, str]) -> Path:
+    """Return the native user home, ignoring Git Bash's synthetic ``HOME`` on Windows."""
+    if sys.platform == "win32":
+        userprofile = environ.get("USERPROFILE", "").strip()
+        if userprofile and _is_absolute(userprofile):
+            return Path(userprofile).expanduser()
+        return Path.home()
+    home_value = environ.get("HOME", "").strip()
+    return Path(home_value).expanduser() if os.path.isabs(home_value) else Path.home()
+
+
+def _fallback_data_root(host: Host, home: Path, environ: Mapping[str, str]) -> Path:
+    """Return the native platform fallback for one Host's durable data."""
+    suffix = "chinamax-codex" if host is Host.CODEX else "chinamax"
+    if sys.platform == "win32":
+        local = environ.get("LOCALAPPDATA", "").strip()
+        base = (
+            Path(local).expanduser()
+            if local and _is_absolute(local)
+            else _join_native(home, "AppData", "Local")
+        )
+        return _join_native(base, suffix)
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / suffix
+    xdg = _absolute_dir(environ, "XDG_STATE_HOME")
+    return xdg / suffix if xdg is not None else home / ".local" / "state" / suffix
 
 
 def _event_value(event: Mapping[str, object] | None, *names: str) -> str:
@@ -89,40 +134,29 @@ class HostContext:
         cls, host: Host, environ: Mapping[str, str] | None = None
     ) -> "HostContext":
         environ = os.environ if environ is None else environ
-        home_value = environ.get("HOME", "").strip()
-        home = Path(home_value).expanduser() if os.path.isabs(home_value) else Path.home()
+        home = _native_home(environ)
         if host is Host.CODEX:
             plugin_root = _absolute_dir(environ, "PLUGIN_ROOT")
             plugin_data = _absolute_dir(environ, "PLUGIN_DATA")
-            fallback = _absolute_dir(environ, "XDG_STATE_HOME")
-            fallback = (
-                fallback / "chinamax-codex"
-                if fallback is not None
-                else home / ".local" / "state" / "chinamax-codex"
-            )
+            fallback = _fallback_data_root(host, home, environ)
             data_root = plugin_data or fallback
-            state_root = plugin_data / "state" if plugin_data is not None else fallback
-            home_dir = home / ".codex"
+            state_root = _join_native(plugin_data, "state") if plugin_data is not None else fallback
+            home_dir = _join_native(home, ".codex")
         else:
             plugin_root = _absolute_dir(environ, "CLAUDE_PLUGIN_ROOT")
             plugin_data = _absolute_dir(environ, "CLAUDE_PLUGIN_DATA")
-            fallback = _absolute_dir(environ, "XDG_STATE_HOME")
-            fallback = (
-                fallback / "chinamax"
-                if fallback is not None
-                else home / ".local" / "state" / "chinamax"
-            )
+            fallback = _fallback_data_root(host, home, environ)
             data_root = plugin_data or fallback
-            state_root = plugin_data / "state" if plugin_data is not None else fallback
-            home_dir = home / ".claude"
+            state_root = _join_native(plugin_data, "state") if plugin_data is not None else fallback
+            home_dir = _join_native(home, ".claude")
         return cls(
             host=host,
             plugin_root=plugin_root,
             data_root=data_root,
             state_root=state_root,
-            keys_path=home_dir / "model-keys.env",
-            overlay_path=home_dir / "chinamax-profiles.json",
-            interpreter_path=data_root / "python-path",
+            keys_path=_join_native(home_dir, "model-keys.env"),
+            overlay_path=_join_native(home_dir, "chinamax-profiles.json"),
+            interpreter_path=_join_native(data_root, "python-path"),
         )
 
 
@@ -141,6 +175,8 @@ def _environment_signature(environ: Mapping[str, str] | None = None) -> tuple[st
         "PLUGIN_ROOT",
         "PLUGIN_DATA",
         "XDG_STATE_HOME",
+        "USERPROFILE",
+        "LOCALAPPDATA",
     ))
 
 

@@ -73,14 +73,19 @@ def _detach_codex_reaper(session: str, token: str | None) -> None:
     ]
     if token:
         argv.extend(["--token", token])
-    subprocess.Popen(
-        argv,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        close_fds=True,
-    )
+    options = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if sys.platform == "win32":
+        options["creationflags"] = (
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        )
+    else:
+        options["start_new_session"] = True
+    subprocess.Popen(argv, **options)
 
 
 if __name__ == "__main__":

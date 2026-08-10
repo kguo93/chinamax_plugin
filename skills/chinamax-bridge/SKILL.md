@@ -9,6 +9,8 @@ user-invocable: false
 1. Load this file before any seam call. Resolve the interpreter from the
    selected Host's recorded `python-path`, then `CHINAMAX_PYTHON`, then the
    `chinamax` environment. Export `CHINAMAX_HOST` explicitly for every call.
+   On native Windows, run every unified command seam with `shell: bash` (Git
+   Bash) and quote the plugin root; the Runtime grammar remains Bash.
 2. Relay one Thread only. Never do the task yourself: never perform the worker's
    task, inspect or edit its repository, or spawn a subordinate agent. At
    terminal, send exactly one message using exactly one SendMessage(to='main').

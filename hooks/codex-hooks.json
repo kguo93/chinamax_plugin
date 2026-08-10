@@ -1,0 +1,91 @@
+{
+  "description": "Codex-native ChinamaX lifecycle and Bridge hooks. Windows handlers explicitly enter Git Bash so the shared Runtime shell contract remains unchanged.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact|fork",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/session_start_hook\"",
+            "commandWindows": "bash -lc 'root=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; if command -v cygpath >/dev/null 2>&1; then root=\"$(cygpath -u -- \"$root\")\"; fi; exec \"$root/scripts/session_start_hook\"'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/session_end_hook\"",
+            "commandWindows": "bash -lc 'root=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; if command -v cygpath >/dev/null 2>&1; then root=\"$(cygpath -u -- \"$root\")\"; fi; exec \"$root/scripts/session_end_hook\"'",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/stop_hook\"",
+            "commandWindows": "bash -lc 'root=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; if command -v cygpath >/dev/null 2>&1; then root=\"$(cygpath -u -- \"$root\")\"; fi; exec \"$root/scripts/stop_hook\"'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/user_prompt_hook\"",
+            "commandWindows": "bash -lc 'root=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; if command -v cygpath >/dev/null 2>&1; then root=\"$(cygpath -u -- \"$root\")\"; fi; exec \"$root/scripts/user_prompt_hook\"'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/bridge_contract_hook\"",
+            "commandWindows": "bash -lc 'root=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; if command -v cygpath >/dev/null 2>&1; then root=\"$(cygpath -u -- \"$root\")\"; fi; exec \"$root/scripts/bridge_contract_hook\"'",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "Agent|Bash|spawn_agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/codex_pretool_hook\"",
+            "commandWindows": "bash -lc 'root=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; if command -v cygpath >/dev/null 2>&1; then root=\"$(cygpath -u -- \"$root\")\"; fi; exec \"$root/scripts/codex_pretool_hook\"'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "chinamax_bridge|chinamax[-_]",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/bridge_contract_hook\"",
+            "commandWindows": "bash -lc 'root=\"${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; if command -v cygpath >/dev/null 2>&1; then root=\"$(cygpath -u -- \"$root\")\"; fi; exec \"$root/scripts/bridge_contract_hook\"'",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

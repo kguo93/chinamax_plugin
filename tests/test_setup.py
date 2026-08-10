@@ -33,6 +33,16 @@ def _all_present(_python: str) -> dict:
     return {name: True for name in doctor.DEPS}
 
 
+def test_platform_dependency_and_prerequisite_matrix(monkeypatch):
+    monkeypatch.setattr(doctor.sys, "platform", "darwin")
+    assert "psutil" in doctor.required_deps()
+    assert "filelock" not in doctor.required_deps()
+    monkeypatch.setattr(doctor.sys, "platform", "win32")
+    assert {"psutil", "filelock"}.issubset(doctor.required_deps())
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: None if name == "cygpath" else f"/bin/{name}")
+    assert doctor.prerequisite_status() == {"bash": True, "git": True, "cygpath": False}
+
+
 class _Fixers:
     """Recording fixer stubs — every env-missing run_setup call injects these."""
 
