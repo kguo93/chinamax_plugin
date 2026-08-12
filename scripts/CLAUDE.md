@@ -25,6 +25,9 @@ Inventory lives in `./repo-map.md`.
   `${VAR:-}` so `set -u` never trips.
 - **`chmod +x` the three entrypoints** (`chinamax`, `session_start_hook`,
   `stop_hook`); `_interpreter.sh` is sourced, so it need not be executable.
+- **`codex_hook_bash.cmd` locates Git Bash ONLY.** It exists to find `bash.exe`
+  before any POSIX shell exists (so it cannot be an sh shim), and must never grow
+  interpreter-discovery logic — that stays solely in `_interpreter.sh`.
 
 On native Windows `_interpreter.sh` converts native roots with `cygpath`, probes
 the per-user Miniconda installation, and selects Git Bash. On macOS

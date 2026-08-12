@@ -30,3 +30,8 @@ The plugin's thin shell shims. Each resolves the `chinamax` conda interpreter an
   `hooks/hooks.json`.
 - `codex_pretool_hook` — Codex Host-aware pre-tool guard shim for mutating
   Agent/spawn/setup calls outside yolo.
+- `codex_hook_bash.cmd` — cmd batch launcher for Codex `commandWindows` on native
+  Windows: resolves Git Bash in the default Git for Windows install roots first
+  (mirroring `doctor._git_for_windows_roots`), then PATH, and execs the named shim
+  through the standard `-lc` payload. Not a POSIX shim — no `chmod +x`; stored with
+  CRLF via `.gitattributes`.

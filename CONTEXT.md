@@ -12,6 +12,10 @@ _Avoid_: wrapper agent, proxy, "the deepseek agent" (DeepSeek is one Profile amo
 The Bridge Agent's single terminal message delivering a Job's outcome to the operator: the worker's final response untouched when the Job completed, or the failure report otherwise. Exactly one per Job, sent only when the Job ends — never a progress update, never an acknowledgment. The operator reads the worker's response as if they had dispatched the worker model themselves.
 _Avoid_: progress message, notification, status update (none of these are ever sent)
 
+**Follow stream**:
+The live tail of a running Job's progress log that the Bridge Agent's poll prints in its own terminal pane while waiting. Pane-only visibility the operator opts into by expanding the Bridge Agent: it is never a Relay, never sent as a message, and the Runtime tracks the streamed position so the tail is continuous across poll calls.
+_Avoid_: progress relay, progress message (a Relay is terminal-only; the stream is not a message)
+
 **Runtime**:
 The custom agent-loop process that owns the provider API conversation, tool execution, and safety controls for a task. Speaks the provider's Anthropic-compatible Messages API (the proven `/anthropic` endpoints), not chat-completions.
 _Avoid_: worker CLI, companion (reserve "companion" for the Codex plugin's runtime)
@@ -68,3 +72,21 @@ SessionEnd reaper cannot delete a newer session's registry or Job ownership.
 The thin native surface for a Host: manifests, routing/message tools, paths,
 lifecycle hooks, and setup. It loads the shared Runtime and canonical Bridge
 contract rather than maintaining a second implementation.
+
+**Prerequisite**:
+An external Platform tool the Runtime environment cannot be built without —
+bash, Git for Windows' git/bash/cygpath, Miniconda's conda — detected per
+Platform early in setup, before any Prerequisite is installed or any env/deps/key
+fixer runs (the only Phase-A side effect is the doctor's idempotent state-probe
+and interpreter record). Distinct from the Python dependencies installed inside
+the env. A missing Prerequisite pauses setup for operator approval; it is never
+installed silently.
+_Avoid_: dependency (reserved for the Python packages in the env), requirement
+
+**Rectification command**:
+The exact runnable command line(s) setup emits for one missing Prerequisite on
+the current Platform — the single source of truth for how that Prerequisite
+gets installed. The Host agent executes them verbatim only after the operator
+approves; the Runtime never runs them itself. A command needing interactive
+privilege is marked for the operator to run in their own terminal.
+_Avoid_: calling one a "fix" in prose (that word is the doctor's own env/deps/key fixers; the serialized report key is still `prerequisite_fixes`), installer script

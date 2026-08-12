@@ -39,4 +39,6 @@ Inventory lives in `./repo-map.md`.
   `hooks/`,** so the CLAUDE.md/AGENTS.md/repo-map.md trio is safe.
 - Codex consumes `codex-hooks.json` separately from Claude's `hooks.json`. Keep
   event/matcher/timeout parity and put all native Windows Git Bash commands in
-  Codex `commandWindows` fields; never add PowerShell Runtime grammar.
+  Codex `commandWindows` fields, which route through `scripts/codex_hook_bash.cmd`
+  (resolves Git Bash in the default Git for Windows install roots first, then
+  PATH); never add PowerShell Runtime grammar.

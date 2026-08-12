@@ -4,17 +4,18 @@ Repository for the `chinamax` worker-model plugin for Claude Code and Codex. The
 
 - `pyproject.toml` — packaging for the `chinamax` Runtime: src layout, unconditional SDK deps, conditional macOS/Windows `psutil`/`filelock` deps, `[test]` extra, and the `data/*.json` package-data rule.
 - `.gitignore` — the editable install's byproducts (`__pycache__/`, `*.pyc`, `*.egg-info/`), which are never committed.
+- `.gitattributes` — forces `scripts/codex_hook_bash.cmd` to check out with CRLF (cmd.exe convention) regardless of `core.autocrlf`.
 - `LICENSE` — the GPL-2.0 license text (verbatim `gpl-2.0.txt`) the repo is published under.
 - `.claude-plugin/` — the Claude plugin + marketplace manifest pair; see `.claude-plugin/repo-map.md`.
 - `.codex-plugin/` — the Codex plugin manifest and full interface metadata.
 - `.agents/plugins/marketplace.json` — the canonical Codex repo marketplace catalog; the legacy Claude marketplace remains under `.claude-plugin/`.
 - `agents/` — Claude Code agent definitions. The plugin loader auto-scans this dir and registers EVERY `.md` as an agent, so it holds only component files: `chinamax.md`, the Bash-only Bridge Agent (`chinamax:chinamax`). No `CLAUDE.md`/`repo-map.md` trio here (it would register as bogus agents) — its conventions live in the root `CLAUDE.md`.
-- `commands/` — Claude Code slash commands, likewise auto-scanned (component files only): `task.md` (`/chinamax:task`, the Bridge-dispatch command carrying the embedded persistent-Bridge contract) plus the thin `!`-launcher wrappers over `scripts/chinamax` — `status`, `profiles`, `setup`. The internal seam verbs (`result`/`logs`/`cancel`/`resume`/`steer`) are no longer exposed as commands (2026-07-30); the Bridge drives them on the operator's behalf. No trio here for the same reason; conventions in the root `CLAUDE.md`.
+- `commands/` — Claude Code slash commands, likewise auto-scanned (component files only): `task.md` (`/chinamax:task`, the Bridge-dispatch command carrying the embedded persistent-Bridge contract) plus the `!`-launcher command files over `scripts/chinamax` — `status` and `profiles` (thin wrappers) and `setup` (the `!`-launcher plus the prerequisite approve-and-install protocol defined in that command file). The internal seam verbs (`result`/`logs`/`cancel`/`resume`/`steer`) are no longer exposed as commands (2026-07-30); the Bridge drives them on the operator's behalf. No trio here for the same reason; conventions in the root `CLAUDE.md`.
 - `hooks/` — Host-specific hook registrations: `hooks.json` for Claude and
   `codex-hooks.json` for Codex (with Windows Git Bash `commandWindows` handlers);
   logic is `src/chinamax/hooks/`. See
   `hooks/repo-map.md`.
-- `scripts/` — the shell shims that resolve the `chinamax` interpreter and exec the CLI / hook entrypoints (`chinamax`, `session_start_hook`, `session_end_hook`, `stop_hook`, `user_prompt_hook`, `bridge_contract_hook`, `_interpreter.sh`). See `scripts/repo-map.md`.
+- `scripts/` — the shell shims that resolve the `chinamax` interpreter and exec the CLI / hook entrypoints (`chinamax`, `session_start_hook`, `session_end_hook`, `stop_hook`, `user_prompt_hook`, `bridge_contract_hook`, `_interpreter.sh`), plus the native-Windows Codex Git Bash launcher `codex_hook_bash.cmd`. See `scripts/repo-map.md`.
 - `skills/` — shared Bridge contract plus Claude/Codex adapter skills (`chinamax-bridge`, `chinamax-task`, `chinamax-status`, `chinamax-profiles`, `chinamax-setup`, `chinamax-results`). See `skills/repo-map.md`.
 - `src/` — the Runtime package (`chinamax`); see `src/repo-map.md`.
 - `tests/` — pytest suite driving the Runtime and the Job supervisor against the hermetic fake provider, with real detached workers, plus the plugin-manifest / Bridge-contract / Bridge-path / task-command surface tests; see `tests/repo-map.md`.

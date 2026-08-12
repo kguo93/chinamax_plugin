@@ -6,7 +6,9 @@ Codex reads `codex-hooks.json`; the hook LOGIC is Python in `src/chinamax/hooks/
 Host.
 
 - `codex-hooks.json` — Codex-parity lifecycle/Bridge registration. Every handler
-  has a Windows `commandWindows` that enters Git Bash and quotes the plugin root.
+  has a Windows `commandWindows` that enters Git Bash via
+  `scripts/codex_hook_bash.cmd` (default Git for Windows install roots → PATH) and
+  quotes the plugin root.
 
 - `hooks.json` — registers six events (ADR 0004 reversed 2026-07-30):
   - `SessionStart` (matcher `startup|resume|clear|compact|fork` →

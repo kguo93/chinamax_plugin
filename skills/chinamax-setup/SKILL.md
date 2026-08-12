@@ -18,13 +18,46 @@ never persist yolo, and use the shared deterministic compiler for the managed
 overwrite confirmation. A declined agent install warns but does not disable
 dynamic Terra/low spawning.
 
-The CLI seam is `CHINAMAX_HOST=codex scripts/chinamax setup --json` for Phase A.
-After an affirmative answer, rerun the preview, then use
-`CHINAMAX_HOST=codex CODEX_PERMISSION_MODE=bypassPermissions scripts/chinamax setup
---apply --consent-digest <digest> --json`; add `--confirm-overwrite` only after
-the separate unmanaged-file confirmation. A stale digest aborts without applying.
+Prerequisites first. The Phase A preview carries a `prerequisite_fixes` array —
+one row per missing bash / Miniconda / Git for Windows Prerequisite. When it is
+non-empty, act BEFORE any consent digest:
 
-On native Windows, run these seams through Git Bash (`shell: bash`) and quote
-`$PLUGIN_ROOT/scripts/chinamax`; do not rewrite the command as PowerShell or
-CMD. `bash`, `git`, and `cygpath` are prerequisites and setup will report a
-missing tool before mutating files.
+1. Show each row: name, summary, install_location, run_policy, commands. Warn
+   that a miniconda row runs `conda init`, which edits shell startup files.
+2. Ask the operator to reply "approve" to install these, anything else to stop.
+3. Not "approve" → stop; no Prerequisite installed and no config applied.
+4. "approve" → for each row IN ORDER, dispatch by `run_policy`, each command
+   through the row's `shell` (a `cmd` row via `cmd /c`; a `powershell`/`native`
+   row natively — never Git Bash):
+   - `agent` → run its commands.
+   - `privileged` → run `sudo -n true`; success → run; failure → have the
+     operator run the shown command themselves.
+   - `operator` → hand the summary to the operator; run none of the empty commands.
+   Stop-on-first-failure: a non-zero command runs no remaining command in that
+   row (no `conda init`) and stops the whole flow; report the failed command.
+5. Re-run the preview (the digest changed), then proceed with the fresh digest.
+
+The CLI seam is `CHINAMAX_HOST=codex scripts/chinamax setup --json` for Phase A.
+After an affirmative answer and any prerequisite install, rerun the preview, then
+use `CHINAMAX_HOST=codex CODEX_PERMISSION_MODE=bypassPermissions scripts/chinamax
+setup --apply --consent-digest <digest> --json`; add `--confirm-overwrite` only
+after the separate unmanaged-file confirmation. A stale digest aborts without
+applying. `--apply` keeps refusing while any Prerequisite is still missing.
+
+On native Windows, run the `scripts/chinamax` SEAM invocation through Git Bash
+(`shell: bash`) and quote `$PLUGIN_ROOT/scripts/chinamax`; do not rewrite THAT
+command as PowerShell or CMD. This does NOT forbid the `prerequisite_fixes` rows,
+which by design run via `cmd /c` (`shell: cmd`) or natively (`shell:
+powershell`/`native`). `bash`, `git`, `cygpath`, and Miniconda are prerequisites;
+setup detects them (Git for Windows in its default install tree, not merely
+`PATH`) and emits Rectification rows before mutating files.
+
+Windows-only: if the seam itself cannot start (bash or python missing), run these
+natively in cmd.exe, then return to Phase A:
+
+```text
+winget install --id Git.Git -e --silent --accept-source-agreements --accept-package-agreements
+curl.exe -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe -o "%TEMP%\chinamax-miniconda.exe"
+start /wait "" "%TEMP%\chinamax-miniconda.exe" /InstallationType=JustMe /RegisterPython=0 /AddToPath=0 /S /D=%USERPROFILE%\miniconda3
+"%USERPROFILE%\miniconda3\Scripts\conda.exe" init cmd.exe powershell bash
+```

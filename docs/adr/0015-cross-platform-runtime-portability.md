@@ -35,6 +35,31 @@ shim and Runtime Bash command. The Bash grammar and confinement lexer are not
 ported to PowerShell or CMD. Hooks use Codex's Windows-specific command field to
 enter `bash`; Claude's shell-form hooks continue through Git Bash.
 
+**Amended 2026-08-11.** Git Bash prerequisite detection now probes the default
+Git for Windows install locations before `PATH`, mirroring the conda resolver
+(see ADR 0009's 2026-08-11 amendment). The same seam extends to the Codex hooks:
+each `commandWindows` now enters Git Bash through `scripts/codex_hook_bash.cmd`
+(prefixed `cmd /d /c`) instead of a bare `bash -lc`. The recommended Git for
+Windows install leaves `bash.exe` off `PATH`, so a bare `bash` never started even
+when detection passed. The launcher resolves `bash.exe` in the default Git for
+Windows install roots FIRST (mirroring `doctor._git_for_windows_roots` order and
+`_GIT_FOR_WINDOWS_EXES["bash"]`), then on `PATH` as a fallback — root-first so a
+stray WSL `bash.exe` on `PATH` cannot shadow the real Git Bash. When nothing
+resolves it prints an explicit stderr diagnostic and exits 127. The `.cmd` uses
+block-free `if` lines (no `for`-IN set, no `( )` blocks) so the literal `(x86)`
+parens never enter a parenthesized construct, and is stored with CRLF via
+`.gitattributes` for cmd.exe. A lockstep test pins the launcher's mirror and
+root order because batch cannot reuse the Python probe. This reconciles the
+"Hook registration" claim below: Codex handlers enter Git Bash through the
+launcher, not a direct `bash` invocation. Consciously-accepted new failure mode:
+`commandWindows` locates the launcher via `%PLUGIN_ROOT%`, which cmd expands
+before any bash exists, so it depends on Codex exporting native `PLUGIN_ROOT`;
+there is no `CLAUDE_PLUGIN_ROOT` alias fallback for locating the `.cmd` itself
+(the bash payload keeps `${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}` only for the
+shim root). The extra `cmd` layer stays within Codex's 3 s `SessionEnd` clamp;
+CI runs no Windows runner, so the cmd→bash seam is manual-smoke evidence only,
+per the Validation scope below.
+
 ### Process mechanisms
 
 - Linux keeps `/proc`, integer kernel start times, POSIX process groups, and
@@ -91,8 +116,10 @@ Claude keeps `hooks/hooks.json`. Codex uses `hooks/codex-hooks.json`, selected b
 `.codex-plugin/plugin.json`. The two registrations have parity of events,
 matchers, ordering, and stdin; timeout parity preserves each Host's contract,
 including Codex's honest 3-second `SessionEnd` value under its CLI clamp. Every
-Codex handler has a `commandWindows` that invokes Git Bash, converts native
-drive/UNC roots with `cygpath`, and quotes the plugin root.
+Codex handler has a `commandWindows` that enters Git Bash through
+`scripts/codex_hook_bash.cmd` (default Git for Windows install roots → `PATH`),
+whose bash payload converts native drive/UNC roots with `cygpath` and quotes the
+plugin root (see the 2026-08-11 amendment above).
 
 ### Validation scope
 
@@ -100,6 +127,24 @@ The full Linux suite is native regression evidence. macOS and Windows process,
 lock, path, setup, launcher, and hook branches are mocked deterministically in
 the Linux test environment. No native-OS CI workflow is added in 0.4.3, and
 documentation must not claim live native validation.
+
+**Amended 2026-08-12 (0.4.5).** This narrowly reverses the Context claim above
+that "Both Claude Code and Codex must work on native macOS and native Windows
+while Linux behavior remains unchanged." — for Linux SETUP only. Linux setup now
+gates on the `bash` and `miniconda` Prerequisites, and its setup REPORT gains a
+`prerequisites` map plus (when something is missing) `prerequisite_fixes`
+Rectification rows (see ADR 0009's 2026-08-12 amendment). The reversal is scoped
+strictly to setup diagnosis: the Process mechanisms (`/proc`, POSIX process
+groups), the XDG state roots, and "Existing Linux dependencies and import behavior
+are unchanged" all remain TRUE — setup Prerequisites are external Platform tools,
+not the env's Python deps/imports, so none of those Linux runtime guarantees
+change. Windows Prerequisite rectification is winget-primary with an
+elevation-free per-user `/CURRENTUSER` PowerShell fallback, both landing in the
+already-probed Git-for-Windows / Miniconda roots. Zero-state bootstrap (bash and
+python both absent) is a skill-relayed set of native Windows commands only; no new
+launcher script is added. Validation stays mocked for macOS/Windows per the
+Validation scope below; the only live evidence for the new flow is one in-session
+Linux smoke of the emitted Miniconda install commands against a throwaway prefix.
 
 ## Rejected alternatives
 

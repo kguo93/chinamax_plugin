@@ -14,3 +14,55 @@ probes standard Miniconda locations before `PATH` (including the Windows
 per-user install). Linux's existing resolver and dependency behavior remain
 unchanged. New-platform setup diagnoses Bash/Git (and Windows `cygpath`) before
 mutating an environment.
+
+**Amended 2026-08-11.** Windows prerequisite detection no longer resolves
+`git`/`bash`/`cygpath` on `PATH` only. The recommended Git for Windows installer
+adds only `\cmd` (which holds `git.exe`) to `PATH`, leaving `bash.exe`
+(`\bin`, `\usr\bin`) and `cygpath.exe` (`\usr\bin` only) off `PATH`, so a correct
+install failed the old check. Setup now probes the default Git for Windows
+install tree on disk first — system-wide `%ProgramFiles%\Git` and per-user
+`%LocalAppData%\Programs\Git` (also `%ProgramW6432%\Git` and
+`%ProgramFiles(x86)%\Git`), checking `cmd`/`bin`/`usr/bin`/`mingw64/bin` as
+applicable per tool — and falls back to `PATH` (union). A miss advises installing
+Git for Windows from `https://git-scm.com/download/win` (one installer provides
+all three). macOS keeps `PATH` resolution — where its installers place bash/git
+by design — with Homebrew / Xcode CLT install advice; Linux stays a no-op.
+Detection is table-driven so each Platform is one readable clause. This also
+narrows the off-matrix behavior: the old code probed bash/git on ANY non-Linux
+platform, whereas `prerequisite_status()` now returns `{}` for any platform that
+is not `win32`/`darwin` — platforms outside the ADR 0015 target matrix get no
+prerequisite checks (running Windows/macOS-shaped probes there would be wrong).
+
+**Amended 2026-08-12 (0.4.5).** The Prerequisite set and the missing-Prerequisite
+flow change. The per-Platform matrix is now Linux → `bash`, `miniconda`; macOS →
+`bash`, `miniconda` (git DROPPED from the darwin probe); Windows → `git`, `bash`,
+`cygpath`, `miniconda`. Miniconda is a first-class Prerequisite everywhere, probed
+"conda resolvable" (`~/miniconda3` first, then `PATH` `conda`) so an existing
+anaconda/miniforge conda counts as present. The doctor resolves conda by absolute
+path through `_find_conda()` (`~/miniconda3` → `PATH`), PREPENDED to — never
+collapsing — `_find_env_python()`'s candidate list so the bare-`conda` `PATH`
+fallback survives a machine whose `chinamax` env lives under a different conda, and
+`_create_env()` runs that resolved conda.
+
+Setup no longer installs Prerequisites itself. When one is missing, `diagnose()`
+emits a structured Rectification-command table (`prerequisite_fixes`) — one row per
+missing tool carrying `run_policy` (`agent`/`privileged`/`operator`), `shell`, an
+`install_location` display template, and the exact command lines — and `run_setup`
+exits without running a fixer. The Host agent installs them ONLY after the operator
+types "approve"; Python never installs a Prerequisite and never elevates. `conda
+init` runs only inside a miniconda Rectification list, i.e. only on a fresh install
+setup itself caused (shells: Linux `bash`; macOS `bash zsh`; Windows `cmd.exe
+powershell bash`); a pre-existing conda is never re-initialized.
+
+Miniconda is fetched as `Miniconda3-latest-*` from
+`https://repo.anaconda.com/miniconda/` over HTTPS, with NO version pin and NO
+checksum. Considered and DECLINED (operator's explicit decision): pinning a specific
+Miniconda version and verifying its published SHA256 before running the installer —
+the rejected alternative would harden against a mutated `latest` or a corrupted
+download, but at the cost of a hardcoded version that ages out and a second network
+fetch; the operator accepted the residual risk to keep the emitted commands short
+and always current. Windows uses `winget install --id Git.Git` (one UAC click) with
+an elevation-free per-user PowerShell fallback (`/CURRENTUSER` into
+`%LocalAppData%\Programs\Git`) when winget is absent; Linux bash uses the detected
+package manager (auto-run only under passwordless `sudo -n true`, else operator-run);
+macOS bash uses `brew install bash` when brew exists, else operator advice.

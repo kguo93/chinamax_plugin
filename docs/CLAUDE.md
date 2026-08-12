@@ -78,6 +78,9 @@ Cross-platform process, lock, native-root, dependency-marker, Git Bash, or
 Codex `commandWindows` changes must read and amend **0015** in addition to the
 nearest existing Runtime/Host ADR. Keep the Linux-preservation and mocked-only
 validation limits synchronized with `README.md` and `docs/verification-report.md`.
+As of 0.4.5, Linux SETUP gains a `bash`+`miniconda` prerequisite gate and a
+`prerequisites`/`prerequisite_fixes` report (ADR 0009/0015 amendments); Linux
+runtime dependency, process, and import behavior stays the preserved baseline.
 
 - **A change inside one of the six themes** → amend that theme's ADR in place (dated
   `**Amended <date>**` paragraph), per the ADR formatting rules above.

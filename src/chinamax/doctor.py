@@ -1,7 +1,7 @@
 """The `/chinamax:setup` environment doctor.
 
-One pass diagnoses everything a first run needs: the ``chinamax`` conda env, the
-three dependencies importable BY THE RESOLVED ENV PYTHON (never the interpreter
+One diagnosis pass covers everything a first run needs: the ``chinamax`` conda env,
+the three dependencies importable BY THE RESOLVED ENV PYTHON (never the interpreter
 the doctor itself runs under — a bootstrap run on a fresh machine has ``chinamax``
 on its own ``PYTHONPATH`` and would otherwise grade itself), the API-key entries
 per Profile (present/missing by NAME — values never touch any stream), and the
@@ -10,16 +10,24 @@ since jobs/01 shifts the root between ``$CLAUDE_PLUGIN_DATA/state`` and the XDG
 fallback). It also records the resolved env python where the Bridge and the shims
 read it first.
 
+When a Platform Prerequisite (bash, Git for Windows, Miniconda) is missing, setup
+PAUSES before any fix: `diagnose` emits per-tool Rectification commands and
+`run_setup` exits without installing a Prerequisite or running a fixer. The Host
+agent installs them only after the operator approves; Python never installs a
+Prerequisite. `diagnose` still ran first, so its idempotent state-probe and
+interpreter record happen even on the paused path.
+
 The env-location and import probes are injectable so the suite can drive the
 doctor hermetically without resolving this machine's real conda env (ADR 0011).
 
-The doctor also FIXES what it can (2026-07-27): an absent env is created
-(``conda create``), missing deps are installed (``pip install -e '<repo>[test]'``
-under the env python), and a missing ``~/.claude/model-keys.env`` is scaffolded
-as a commented template the operator fills in. The fixers are injectable like
-the probes; a healthy machine's setup runs no fixer and stays a pure report.
-Extending the plugin to any provider that implements the Anthropic-compatible
-Messages API is an overlay row plus a key line — see ``key_template_text``.
+With every Prerequisite present, the doctor also FIXES what it can (2026-07-27):
+an absent env is created (``conda create``), missing deps are installed
+(``pip install -e '<repo>[test]'`` under the env python), and a missing
+``~/.claude/model-keys.env`` is scaffolded as a commented template the operator
+fills in. The fixers are injectable like the probes; a healthy machine's setup
+runs no fixer and stays a pure report. Extending the plugin to any provider that
+implements the Anthropic-compatible Messages API is an overlay row plus a key
+line — see ``key_template_text``.
 """
 
 from __future__ import annotations
@@ -30,6 +38,7 @@ import hashlib
 import json
 import ntpath
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -65,8 +74,42 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
-PLUGIN_VERSION = "0.4.3"
+PLUGIN_VERSION = "0.4.5"
 MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
+
+# ── Git for Windows install tree ────────────────────────────────────────────
+# Git for Windows scatters these across its tree and, with the recommended
+# installer option, leaves bash/cygpath OFF PATH — so setup probes the install
+# roots on disk. Roots: system-wide %ProgramFiles%\Git, per-user
+# %LocalAppData%\Programs\Git.
+_GIT_FOR_WINDOWS_URL = "https://git-scm.com/download/win"
+
+_GIT_FOR_WINDOWS_EXES: dict[str, tuple[str, ...]] = {
+    "git": ("cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe"),
+    "bash": ("bin/bash.exe", "usr/bin/bash.exe"),
+    "cygpath": ("usr/bin/cygpath.exe",),
+}
+
+# ── Miniconda Rectification source ──────────────────────────────────────────
+# `latest` over HTTPS, no version pin and no checksum (ADR 0009, operator's
+# explicit decision). One installer filename per (Platform, normalized arch).
+_MINICONDA_URL_BASE = "https://repo.anaconda.com/miniconda/"
+# platform.machine() normalization: any value absent here is an unsupported
+# architecture and yields an advice-only miniconda row (never a 404-bound URL).
+_LINUX_MINICONDA_ARCH = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
+_DARWIN_MINICONDA_ARCH = {"arm64": "arm64", "x86_64": "x86_64"}
+
+# ── Linux bash Rectification ────────────────────────────────────────────────
+# First package manager on PATH wins; each row installs bash and runs only when
+# passwordless sudo works (the skill's `sudo -n true` gate), else operator-run.
+_LINUX_BASH_PACKAGE_MANAGERS = (
+    ("apt-get", "sudo apt-get install -y bash"),
+    ("dnf", "sudo dnf install -y bash"),
+    ("yum", "sudo yum install -y bash"),
+    ("pacman", "sudo pacman -S --noconfirm bash"),
+    ("zypper", "sudo zypper install -y bash"),
+    ("apk", "sudo apk add bash"),
+)
 
 
 def required_deps() -> tuple[str, ...]:
@@ -78,22 +121,299 @@ def required_deps() -> tuple[str, ...]:
     return DEPS
 
 
-def prerequisite_status() -> dict[str, bool]:
-    """Check external tools required by native macOS/Windows setup."""
-    if sys.platform == "linux":
-        return {}
-    names = ["bash", "git"]
+def _find_conda() -> str | None:
+    """Absolute conda launcher, ~/miniconda3 first, PATH fallback; None when absent.
+
+    The Miniconda Prerequisite is "conda resolvable": an existing anaconda/miniforge
+    conda on PATH counts as present, so setup never forces its own install location
+    on a machine that already has conda. Not memoized — the suite monkeypatches
+    ``Path.home``/``sys.platform``/``shutil.which`` and a cache would leak stale
+    resolutions across tests.
+    """
+    base = Path.home() / "miniconda3"
     if sys.platform == "win32":
-        names.append("cygpath")
-    return {name: shutil.which(name) is not None for name in names}
+        candidates = [base / "Scripts" / "conda.exe", base / "condabin" / "conda.bat"]
+    else:
+        candidates = [base / "bin" / "conda"]
+    for candidate in candidates:
+        if _is_executable(str(candidate)):
+            return str(candidate)
+    return shutil.which("conda")
 
 
-def _prerequisite_advice(name: str) -> str:
-    if name == "cygpath":
-        return "install Git for Windows and ensure its usr/bin directory is on PATH"
-    if name == "bash":
-        return "install Bash (Git for Windows on Windows) and ensure bash is on PATH"
-    return "install Git and ensure git is on PATH"
+def prerequisite_status() -> dict[str, bool]:
+    """External Prerequisite tools setup requires, by Platform.
+
+    Linux and macOS: ``bash`` (on PATH) and ``miniconda`` (conda resolvable).
+    Windows: ``git``/``bash``/``cygpath`` (Git for Windows install tree first, then
+    PATH) followed by ``miniconda``; the Git row must precede miniconda because the
+    miniconda row's ``conda init ... bash`` needs the bash the Git row provides.
+    Miniconda is "conda resolvable" everywhere (``~/miniconda3`` first, then PATH).
+    Off-matrix Platforms return ``{}`` (ADR 0015 target matrix only).
+    """
+    if sys.platform == "win32":
+        status = {name: _windows_tool_present(name) for name in _GIT_FOR_WINDOWS_EXES}
+        status["miniconda"] = _find_conda() is not None
+        return status
+    if sys.platform == "darwin":
+        return {"bash": shutil.which("bash") is not None, "miniconda": _find_conda() is not None}
+    if sys.platform.startswith("linux"):
+        return {"bash": shutil.which("bash") is not None, "miniconda": _find_conda() is not None}
+    return {}
+
+
+def _git_for_windows_roots() -> list[Path]:
+    """Default Git for Windows install roots: system-wide, then per-user."""
+    roots: list[Path] = []
+    for var in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(var, "").strip()
+        if base:
+            roots.append(Path(base) / "Git")
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    if local:
+        roots.append(Path(local) / "Programs" / "Git")
+    # %ProgramW6432% usually aliases %ProgramFiles% on 64-bit Windows.
+    return list(dict.fromkeys(roots))
+
+
+def _windows_tool_present(name: str) -> bool:
+    """True when a tool resolves in a Git for Windows install root, else on PATH."""
+    for root in _git_for_windows_roots():
+        if any(_is_executable(str(root / rel)) for rel in _GIT_FOR_WINDOWS_EXES[name]):
+            return True
+    return shutil.which(name) is not None
+
+
+def prerequisite_fixes(prerequisites: dict[str, bool]) -> list[dict]:
+    """Rows for each missing Prerequisite: name, summary, commands, run_policy, shell, install_location.
+
+    Plain dicts (repo convention). ``run_policy`` is ``"agent"`` (the agent runs the
+    commands), ``"privileged"`` (run only when ``sudo -n true`` succeeds, else handed
+    to the operator), or ``"operator"`` (advice-only, ``commands`` empty). ``shell``
+    names the interpreter the commands are written for so the adapter never guesses:
+    Windows ``"cmd"`` rows run via ``cmd /c`` and ``"powershell"``/``"native"`` rows
+    run natively — neither is ever pasted into Git Bash. ``install_location`` is a
+    DISPLAY template (env-var/``$HOME`` forms as written), not a resolved absolute
+    path. Emission order is Prerequisite order: on Windows the Git for Windows row
+    precedes the miniconda row (whose ``conda init ... bash`` needs the Git bash).
+    """
+    missing = [name for name, present in prerequisites.items() if not present]
+    if not missing:
+        return []
+    rows: list[dict] = []
+    if sys.platform == "win32":
+        git_missing = [name for name in ("git", "bash", "cygpath") if name in missing]
+        if git_missing:
+            rows.append(_windows_git_row(git_missing))
+        if "miniconda" in missing:
+            rows.append(_windows_miniconda_row())
+        return rows
+    if sys.platform == "darwin":
+        if "bash" in missing:
+            rows.append(_darwin_bash_row())
+        if "miniconda" in missing:
+            rows.append(_miniconda_posix_row("darwin"))
+        return rows
+    if sys.platform.startswith("linux"):
+        if "bash" in missing:
+            rows.append(_linux_bash_row())
+        if "miniconda" in missing:
+            rows.append(_miniconda_posix_row("linux"))
+        return rows
+    return rows
+
+
+def _linux_bash_row() -> dict:
+    """The linux bash Rectification row: first package manager on PATH, else advice."""
+    for manager, command in _LINUX_BASH_PACKAGE_MANAGERS:
+        if shutil.which(manager):
+            return {
+                "name": "bash",
+                "summary": (
+                    f"install bash with {manager}. The skill runs it automatically only when "
+                    "passwordless sudo works (sudo -n true); otherwise run it yourself."
+                ),
+                "commands": [command],
+                "run_policy": "privileged",
+                "shell": "bash",
+                "install_location": "system package manager",
+            }
+    return {
+        "name": "bash",
+        "summary": "install bash with your distribution's package manager",
+        "commands": [],
+        "run_policy": "operator",
+        "shell": "bash",
+        "install_location": "system package manager",
+    }
+
+
+def _darwin_bash_row() -> dict:
+    """The macOS bash Rectification row: brew install when brew exists, else advice."""
+    if shutil.which("brew"):
+        return {
+            "name": "bash",
+            "summary": "install a current bash with brew install bash",
+            "commands": ["brew install bash"],
+            "run_policy": "agent",
+            "shell": "bash",
+            "install_location": "Homebrew",
+        }
+    return {
+        "name": "bash",
+        "summary": "install Homebrew or the Xcode Command Line Tools, then brew install bash",
+        "commands": [],
+        "run_policy": "operator",
+        "shell": "bash",
+        "install_location": "Homebrew",
+    }
+
+
+# The winget-absent Windows Git fallback: fail-loud so stop-on-first-failure can
+# catch an installer failure. `$ErrorActionPreference='Stop'` aborts on a download
+# error, and `Start-Process -Wait -PassThru` + `exit $p.ExitCode` propagates the
+# installer's own exit code (`Start-Process -Wait` alone does not). One raw string:
+# the line carries both `"` and `'` plus native `\` path separators.
+_WINDOWS_GIT_POWERSHELL_FALLBACK = r'''powershell -NoProfile -Command "$ErrorActionPreference='Stop';$a=(Invoke-RestMethod https://api.github.com/repos/git-for-windows/git/releases/latest).assets|Where-Object name -like '*64-bit.exe'|Select-Object -First 1;Invoke-WebRequest $a.browser_download_url -OutFile $env:TEMP\chinamax-git.exe;$p=Start-Process -Wait -PassThru $env:TEMP\chinamax-git.exe -ArgumentList '/VERYSILENT','/NORESTART','/CURRENTUSER';exit $p.ExitCode"'''
+
+
+def _windows_git_row(missing_tools: list[str]) -> dict:
+    """The single deduped Git for Windows Rectification row (the git/bash/cygpath trio).
+
+    winget present → one ``winget install --id Git.Git`` line (one UAC click); winget
+    absent → the fail-loud per-user PowerShell fallback, whose summary names
+    ``https://git-scm.com/download/win`` as the manual alternative (GitHub API
+    rate-limiting can break the automated line). Both run natively, never Git Bash.
+    """
+    if shutil.which("winget"):
+        return {
+            "name": "Git for Windows",
+            "missing_tools": missing_tools,
+            "summary": (
+                "install Git for Windows with winget (one UAC consent click); provides "
+                "git, bash, and cygpath. Run natively, not in Git Bash."
+            ),
+            "commands": [
+                "winget install --id Git.Git -e --silent "
+                "--accept-source-agreements --accept-package-agreements"
+            ],
+            "run_policy": "agent",
+            "shell": "native",
+            "install_location": r"Program Files\Git",
+        }
+    return {
+        "name": "Git for Windows",
+        "missing_tools": missing_tools,
+        "summary": (
+            "install Git for Windows per-user via the PowerShell fallback (winget "
+            f"absent); if the GitHub API is rate-limited or blocked, install manually "
+            f"from {_GIT_FOR_WINDOWS_URL}. Provides git, bash, and cygpath. Run "
+            "natively, not in Git Bash."
+        ),
+        "commands": [_WINDOWS_GIT_POWERSHELL_FALLBACK],
+        "run_policy": "agent",
+        "shell": "powershell",
+        "install_location": r"%LocalAppData%\Programs\Git",
+    }
+
+
+def _windows_miniconda_row() -> dict:
+    """The Windows miniconda Rectification row (cmd.exe syntax; run via ``cmd /c``).
+
+    The JustMe installer reuses an existing per-user install, so a re-run is safe.
+    Known live-Windows risk (mocked-only, ADR 0015): ``start /wait`` does not
+    reliably propagate the installer's exit code to ``%ERRORLEVEL%`` on all Windows
+    versions, so stop-on-first-failure may not catch a failed silent install.
+    """
+    commands = [
+        r'curl.exe -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe -o "%TEMP%\chinamax-miniconda.exe"',
+        r'start /wait "" "%TEMP%\chinamax-miniconda.exe" /InstallationType=JustMe /RegisterPython=0 /AddToPath=0 /S /D=%USERPROFILE%\miniconda3',
+        r'"%USERPROFILE%\miniconda3\Scripts\conda.exe" init cmd.exe powershell bash',
+    ]
+    return {
+        "name": "miniconda",
+        "summary": (
+            "install Miniconda into %USERPROFILE%\\miniconda3 with curl.exe (cmd.exe "
+            "syntax; run each line via cmd /c, never Git Bash). The JustMe installer "
+            "reuses an existing per-user install. The final command runs conda init, "
+            "which EDITS your cmd/powershell profiles and registry. Requires curl.exe."
+        ),
+        "commands": commands,
+        "run_policy": "agent",
+        "shell": "cmd",
+        "install_location": r"%USERPROFILE%\miniconda3",
+    }
+
+
+def _miniconda_posix_row(platform_kind: str) -> dict:
+    """The linux/macOS miniconda Rectification row (bash syntax), or advice on an
+    unsupported architecture.
+
+    ``-b -u`` reuses an existing/partial ``$HOME/miniconda3`` so a re-run after an
+    interrupted install is idempotent. The final command runs conda init, which
+    MODIFIES the operator's shell startup files. curl is the row's dependency. An
+    architecture absent from the normalization map yields an advice-only row with an
+    empty ``commands`` and no download URL (never a 404-bound URL).
+    """
+    machine = platform.machine().lower()
+    if platform_kind == "darwin":
+        arch = _DARWIN_MINICONDA_ARCH.get(machine)
+        os_tag, init_shells, startup_files = "MacOSX", "bash zsh", "~/.bashrc and ~/.zshrc"
+    else:
+        arch = _LINUX_MINICONDA_ARCH.get(machine)
+        os_tag, init_shells, startup_files = "Linux", "bash", "~/.bashrc"
+    if arch is None:
+        return {
+            "name": "miniconda",
+            "summary": (
+                f"unsupported CPU architecture {platform.machine()!r}; install Miniconda "
+                f"manually from {_MINICONDA_URL_BASE}, then re-run setup"
+            ),
+            "commands": [],
+            "run_policy": "operator",
+            "shell": "bash",
+            "install_location": "$HOME/miniconda3",
+        }
+    installer = f"Miniconda3-latest-{os_tag}-{arch}.sh"
+    url = f"{_MINICONDA_URL_BASE}{installer}"
+    commands = [
+        f'curl -fsSL {url} -o "$HOME/.chinamax-miniconda.sh"',
+        'bash "$HOME/.chinamax-miniconda.sh" -b -u -p "$HOME/miniconda3"',
+        f'"$HOME/miniconda3/bin/conda" init {init_shells}',
+    ]
+    return {
+        "name": "miniconda",
+        "summary": (
+            f"install Miniconda ({installer}) into $HOME/miniconda3 with curl; -b -u "
+            "reuses an existing $HOME/miniconda3 so a re-run is idempotent. The final "
+            f"command runs conda init {init_shells}, which MODIFIES your shell startup "
+            f"files ({startup_files}). Requires curl."
+        ),
+        "commands": commands,
+        "run_policy": "agent",
+        "shell": "bash",
+        "install_location": "$HOME/miniconda3",
+    }
+
+
+def missing_prerequisite_advice(rows: list[dict]) -> str:
+    """One-line 'what is missing and how to install it', or '' when nothing is missing.
+
+    Consumes the pre-computed `prerequisite_fixes` rows (never re-probes the
+    filesystem). Names the missing tools (the Windows Git row expands its
+    ``missing_tools``) and joins each row's ``summary``, deduped. Shared by both
+    Codex message sites so every Host surfaces the same guidance.
+    """
+    if not rows:
+        return ""
+    names: list[str] = []
+    for row in rows:
+        names.extend(row.get("missing_tools") or [row["name"]])
+    steps: list[str] = []
+    for row in rows:
+        if row["summary"] not in steps:
+            steps.append(row["summary"])
+    return f"missing prerequisites ({', '.join(names)}): " + "; ".join(steps)
 
 
 def data_root(context: HostContext | None = None) -> Path:
@@ -282,6 +602,14 @@ def diagnose(
     deps = check_deps(env_python) if env_present else {name: False for name in names}
     deps = {name: bool(deps.get(name, False)) for name in names}
     prerequisites = prerequisite_status()
+    # Compute the Rectification rows ONCE here (they probe the filesystem for pm /
+    # winget detection); render_report and missing_prerequisite_advice consume the
+    # stored rows rather than re-calling prerequisite_fixes.
+    prerequisite_rows = (
+        prerequisite_fixes(prerequisites)
+        if prerequisites and not all(prerequisites.values())
+        else []
+    )
 
     selected = context or current_host()
     root = selected.state_root
@@ -309,6 +637,7 @@ def diagnose(
         "deps": {name: deps[name] for name in names},
         "profiles": profile_rows,
         **({"prerequisites": prerequisites} if prerequisites else {}),
+        **({"prerequisite_fixes": prerequisite_rows} if prerequisite_rows else {}),
     }
 
 
@@ -329,9 +658,22 @@ def render_report(report: dict) -> str:
     for name in report["deps"]:
         lines.append(f"      {name}: {'ok' if report['deps'][name] else 'MISSING'}")
 
-    for name, present in report.get("prerequisites", {}).items():
-        verdict = "ok" if present else f"MISSING — {_prerequisite_advice(name)}"
-        lines.append(f"      prerequisite {name}: {verdict}")
+    prerequisites = report.get("prerequisites", {})
+    for name, present in prerequisites.items():
+        lines.append(f"      prerequisite {name}: {'ok' if present else 'MISSING'}")
+    rows = report.get("prerequisite_fixes", [])
+    if rows:
+        lines.append("  missing prerequisites — rectification commands:")
+        for row in rows:
+            lines.append(
+                f"      {row['name']} [run_policy={row['run_policy']}, shell={row['shell']}, "
+                f"install into {row['install_location']}]"
+            )
+            lines.append(f"          {row['summary']}")
+            for command in row["commands"]:
+                lines.append(f"          $ {command}")
+            if not row["commands"]:
+                lines.append("          (install manually — no automatic command)")
 
     lines.append(f"  API keys ({profiles.keys_path()}):")
     for row in report["profiles"]:
@@ -539,6 +881,10 @@ def codex_setup_plan(
     deps = check_deps(python) if python else {name: False for name in names}
     deps = {name: bool(deps.get(name, False)) for name in names}
     prerequisites = prerequisite_status()
+    # The Rectification rows join the DIGESTED structure so consent binds the exact
+    # commands: they vary with winget / package-manager detection WITHOUT
+    # prerequisites itself changing, so digest placement is load-bearing.
+    prerequisite_rows = prerequisite_fixes(prerequisites)
     config_path = selected.keys_path.parent / "config.toml"
     try:
         config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
@@ -613,6 +959,7 @@ def codex_setup_plan(
         "agent": {"path": str(target), "status": status, "version": PLUGIN_VERSION},
         "env": {"python": python, "deps": deps},
         "prerequisites": prerequisites,
+        "prerequisite_fixes": prerequisite_rows,
         "key_template": key_template,
         "interpreter": interpreter_change,
         "workspace": str(workspace) if workspace is not None else None,
@@ -624,6 +971,7 @@ def codex_setup_plan(
         "env": {"present": python is not None, "path": python},
         "deps": deps,
         "prerequisites": prerequisites,
+        "prerequisite_fixes": prerequisite_rows,
         "config_path": str(config_path),
         "config_diff": config_diff,
         "agent_path": str(target),
@@ -720,8 +1068,12 @@ def run_codex_setup(
     )
     if getattr(args, "apply", False):
         if plan.get("prerequisites") and not all(plan["prerequisites"].values()):
+            rows = plan.get("prerequisite_fixes")
+            if rows is None:
+                rows = prerequisite_fixes(plan["prerequisites"])
             print(
-                "chinamax: native prerequisites are missing; install them and rerun setup",
+                f"chinamax: {missing_prerequisite_advice(rows)}; rerun setup after "
+                "installing; the preview's prerequisite_fixes rows hold the exact commands",
                 file=sys.stderr,
             )
             return 1
@@ -797,10 +1149,10 @@ def apply_codex_setup(
             "target is changing between preview and apply; render a fresh Codex setup preview"
         )
     if fresh.get("prerequisites") and not all(fresh["prerequisites"].values()):
-        missing = ", ".join(
-            name for name, present in fresh["prerequisites"].items() if not present
-        )
-        raise ChinamaxError(f"missing native prerequisites: {missing}")
+        rows = fresh.get("prerequisite_fixes")
+        if rows is None:
+            rows = prerequisite_fixes(fresh["prerequisites"])
+        raise ChinamaxError(missing_prerequisite_advice(rows))
     config_path = Path(fresh["config_path"])
     changed: list[str] = []
     fixes: list[dict] = []
@@ -972,13 +1324,21 @@ def _find_env_python() -> str | None:
     )
     if _is_executable(str(candidate)):
         return str(candidate)
-    conda_commands = ["conda"]
     if sys.platform == "win32":
         conda_commands = [
             str(base / "Scripts" / "conda.exe"),
             str(base / "condabin" / "conda.bat"),
             "conda",
         ]
+    else:
+        conda_commands = ["conda"]
+    # Prepend the absolute conda _find_conda resolves (~/miniconda3 first, PATH
+    # fallback) WITHOUT collapsing the list: keep the trailing bare "conda" so a
+    # machine whose chinamax env lives under a different conda (anaconda3/miniforge
+    # on PATH) is still found. Drop None and duplicates; keep the try-next loop.
+    resolved_conda = _find_conda()
+    if resolved_conda is not None:
+        conda_commands = list(dict.fromkeys([resolved_conda, *conda_commands]))
     finished = None
     for conda in conda_commands:
         if conda != "conda" and not Path(conda).exists():
@@ -1010,7 +1370,7 @@ def _create_env() -> tuple[bool, str]:
     """
     try:
         finished = subprocess.run(
-            ["conda", "create", "-y", "-n", ENV_NAME, "python=3.12"],
+            [_find_conda() or "conda", "create", "-y", "-n", ENV_NAME, "python=3.12"],
             capture_output=True,
             text=True,
             timeout=FIX_TIMEOUT_S,

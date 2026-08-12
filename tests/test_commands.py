@@ -78,6 +78,19 @@ def test_each_command_maps_verb(verb, capsys, keyless_home):
         assert "extras=" not in deepseek_row
 
 
+def test_setup_command_approve_protocol():
+    """commands/setup.md carries the prerequisite approve-and-install protocol."""
+    text = (COMMANDS_DIR / "setup.md").read_text(encoding="utf-8")
+    assert '"approve"' in text  # the exact consent keyword
+    assert "run_policy" in text  # dispatch by run_policy
+    assert "stop-on-first-failure" in text.lower()
+    # Exactly one Windows zero-state fallback block (the one accepted duplication).
+    assert text.count("winget install --id Git.Git") == 1
+    # The dropped installer-cleanup lines never appear (operator override).
+    assert 'rm "$HOME/.chinamax-miniconda.sh"' not in text
+    assert 'del "%TEMP%\\chinamax-miniconda.exe"' not in text
+
+
 def test_argument_normalization():
     """The launcher normalizer collapses the single quoted "$ARGUMENTS" element."""
     # Blank / whitespace-only -> no arguments at all (not a stray "").

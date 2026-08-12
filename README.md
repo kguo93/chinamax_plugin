@@ -8,7 +8,7 @@ behavior work from Claude Code and Codex on Linux, macOS, and native Windows.
 
 | Platform | Claude Code | Codex | Release target |
 |---|---:|---:|---|
-| Linux | Yes | Yes | Existing behavior preserved |
+| Linux | Yes | Yes | Runtime preserved; setup adds a prerequisite gate |
 | Latest stable macOS, Apple Silicon | Yes | Yes | Supported |
 | Windows 11, x64 | Yes | Yes | Supported; Git Bash required |
 | Intel macOS | Best effort | Best effort | Use an Intel-compatible Miniconda release |
@@ -24,28 +24,39 @@ required for the native Windows target.
 
 ## Prerequisites
 
-All Platforms need a current Claude Code or Codex installation, Git, a writable
-user data directory, and Python 3.12 supplied by Miniconda or an equivalent
-Conda environment.
+All Platforms need a current Claude Code or Codex installation, `bash`, a writable
+user data directory, and Python 3.12 supplied by Miniconda or an equivalent Conda
+environment. Setup treats `bash` and Miniconda (and, on Windows, Git for Windows'
+`git`/`bash`/`cygpath`) as Prerequisites: when one is missing it pauses and prints
+the exact install commands, installing them only after you approve (see Setup).
 
 ### Linux
 
-Use the existing Linux setup. `bash`, `git`, and `conda` must be available using
-the same paths your current ChinamaX installation uses.
+Use the existing Linux setup. `bash` and `conda` must be available using the same
+paths your current ChinamaX installation uses; if Miniconda is absent, setup emits
+the install commands and runs them after you approve. Git is not a Linux setup
+Prerequisite.
 
 ### macOS
 
-Install Git and Bash, then install Miniconda for your architecture. The latest
-Apple Silicon release is the supported target; Intel is best effort. ChinamaX
-adds `psutil` to the managed environment on macOS.
+Setup probes `bash` and Miniconda on macOS (Git is no longer a macOS setup
+Prerequisite, though Git remains useful — `xcode-select --install` for the Xcode
+Command Line Tools, or `brew install git`). Bash is preinstalled; `brew install
+bash` provides a newer version, which setup offers to run after you approve.
+Install Miniconda for your architecture, or let setup install it. The latest
+Apple Silicon release is the supported target; Intel is best effort. ChinamaX adds
+`psutil` to the managed environment on macOS.
 
 ### Windows
 
-Install Git for Windows and ensure `bash.exe`, `git.exe`, and `cygpath.exe` are
-discoverable. Git Bash is the required shell for all ChinamaX shims and hooks.
-Install Miniconda for Windows x64 (the default per-user “Just Me” location is
-probed even when Conda is not on `PATH`). ChinamaX adds `psutil` and `filelock`
-to the managed environment on Windows.
+Install Git for Windows (https://git-scm.com/download/win). Setup detects
+`git.exe`, `bash.exe`, and `cygpath.exe` in the default Git for Windows install
+tree even when they are not on `PATH` — the recommended installer adds only
+`\cmd` to `PATH`, leaving `bash.exe` and `cygpath.exe` off it. Git Bash is the
+required shell for all ChinamaX shims and hooks. Install Miniconda for Windows
+x64 (the default per-user “Just Me” location is probed even when Conda is not on
+`PATH`). ChinamaX adds `psutil` and `filelock` to the managed environment on
+Windows.
 
 Do not install WSL, PowerShell modules, `taskkill`, or `icacls` for ChinamaX.
 
@@ -72,21 +83,26 @@ handlers enter Git Bash explicitly.
 
 ## Setup
 
-Run setup once per Host. Setup creates or locates the `chinamax` Conda
-environment, installs the package and its conditional dependencies, records the
-selected interpreter, scaffolds a commented key template, and checks profiles.
+Run setup once per Host, after install. Setup creates or locates the `chinamax`
+Conda environment, installs the package and its conditional dependencies, records
+the selected interpreter, scaffolds a commented key template, and checks profiles.
 
 - Claude: `/chinamax:setup`
 - Codex: `$chinamax-setup` under `codex --yolo` when applying mutations
+
+When a Prerequisite (`bash`, Miniconda, or Git for Windows) is missing, setup
+pauses and lists each missing tool with the exact install commands. Reply
+"approve" and the Host agent runs them (a miniconda row runs `conda init`, which
+edits your shell startup files; each command still prompts for permission);
+anything else stops without installing. Setup itself never installs a Prerequisite
+and never elevates. Note that approving a Miniconda (or, on Windows, Git)
+Rectification DOES download that installer — so it is no longer true that setup
+downloads no installers; it downloads none without your approval.
 
 Codex setup is preview-first and content-addressed. A preview is non-mutating;
 apply only the exact consent digest from that preview. The yolo permission is
 used only for Codex setup mutation. Runtime `--read-only` remains ChinamaX's
 tool-layer policy and is not replaced by a Host sandbox.
-
-On macOS and Windows, setup diagnoses and refuses to mutate when a required
-external prerequisite is missing. Install the named tool and rerun setup. Setup
-does not download installers or modify system `PATH`.
 
 ## Keys and native data paths
 
@@ -139,15 +155,17 @@ paths with spaces.
 
 ## Troubleshooting
 
-- **`bash` not found:** install Bash; on Windows install Git for Windows and put
-  its Bash executable on `PATH`.
-- **`cygpath` not found on Windows:** add Git for Windows' `usr/bin` directory to
-  `PATH`, then rerun setup.
-- **`git` not found:** install Git and ensure `git` is on `PATH`; workspace-root
-  discovery requires it on new Platforms.
-- **Conda/Python not found:** install Miniconda, or set `CHINAMAX_PYTHON` to an
-  absolute executable. Standard `~/miniconda3` and Windows per-user paths are
-  probed before `PATH`.
+- **`git`, `bash`, or `cygpath` not found (Windows):** install Git for Windows
+  from https://git-scm.com/download/win — one installer provides all three, and
+  setup detects them in the default install tree even when they are off `PATH`.
+- **`bash` not found (macOS):** approve the `brew install bash` Rectification setup
+  prints, or install Homebrew / the Xcode Command Line Tools first. Setup no longer
+  probes `git` on macOS (install Git separately if you want it).
+- **Conda/Python not found:** approve the Miniconda Rectification setup prints, or
+  install Miniconda yourself. Standard `~/miniconda3` and Windows per-user paths are
+  probed before `PATH`. Setting `CHINAMAX_PYTHON` to an absolute interpreter does
+  NOT skip the Miniconda pause: setup's Phase A keys on conda-resolvability
+  regardless of which Python runs the doctor.
 - **`psutil` or `filelock` missing:** rerun setup in the managed environment;
   `filelock` is Windows-only and `psutil` is macOS/Windows-only.
 - **Wrong state root:** inspect `CLAUDE_PLUGIN_DATA`/`PLUGIN_DATA`, then unset a
@@ -167,6 +185,9 @@ paths with spaces.
 
 ## Verification scope
 
-The Linux suite is the native regression baseline. macOS and Windows branches
-are covered by deterministic mocked process, lock, path, setup, and hook tests in
-0.4.3; this release does not claim native macOS/Windows CI or live-host evidence.
+The Linux suite is the native regression baseline. macOS and Windows branches —
+including the 0.4.5 Prerequisite matrix and Rectification-command emission — are
+covered by deterministic mocked process, lock, path, setup, prerequisite, and hook
+tests; this release does not claim native macOS/Windows CI or live-host evidence.
+The only live evidence for the new prerequisite flow is one in-session Linux smoke
+of the emitted Miniconda install commands against a throwaway prefix.

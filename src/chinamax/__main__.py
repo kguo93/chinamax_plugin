@@ -757,8 +757,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser = subcommands.add_parser(
         "setup",
         help=(
-            "diagnose and fix the install in one pass — create the env, install "
-            "deps, scaffold the key template"
+            "diagnose the install, pause for approval on any missing Prerequisite, "
+            "then fix the env / deps / key template"
         ),
     )
     setup_parser.add_argument(

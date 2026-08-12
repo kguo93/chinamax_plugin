@@ -89,10 +89,9 @@ def test_codex_registration_has_cross_platform_command_parity():
             for hook in group["hooks"]:
                 assert hook["type"] == "command"
                 assert hook["timeout"] in expected_timeouts
-                assert hook["commandWindows"].startswith("bash -lc ")
+                assert hook["commandWindows"].startswith("cmd /d /c ")
+                assert "codex_hook_bash.cmd" in hook["commandWindows"]
                 assert "PLUGIN_ROOT" in hook["commandWindows"]
-                assert "cygpath" in hook["commandWindows"]
-                assert "exec" in hook["commandWindows"]
                 assert "powershell" not in hook["commandWindows"].lower()
 
 
@@ -127,6 +126,13 @@ def test_codex_windows_commands_convert_drive_root_with_spaces(tmp_path):
         "CHINAMAX_CYGPATH_RESULT": str(plugin_root),
     }
     event = {"hook_event_name": "SessionStart", "session_id": "windows-smoke"}
+    # The registered commandWindows now route through the cmd launcher, which is
+    # Windows-only cmd grammar and not sh-runnable on Linux. Keep the end-to-end
+    # payload check by extracting the launcher's single-quoted bash payload and
+    # running it under bash against the fake cygpath env; the batch resolver itself
+    # is Windows-only logic, asserted statically in the lockstep test below.
+    launcher = (REPO_ROOT / "scripts" / "codex_hook_bash.cmd").read_text(encoding="utf-8")
+    payload_template = launcher.rsplit("-lc '", 1)[1].rsplit("'", 1)[0]
     commands = {
         hook["commandWindows"]
         for groups in CODEX_HOOKS["hooks"].values()
@@ -135,9 +141,10 @@ def test_codex_windows_commands_convert_drive_root_with_spaces(tmp_path):
     }
     assert len(commands) == len(shim_names)
     for command in commands:
+        (name,) = [n for n in shim_names if n in command]  # each names exactly one shim
+        payload = payload_template.replace("%~1", name)
         result = subprocess.run(
-            command,
-            shell=True,
+            ["bash", "-lc", payload],
             input=json.dumps(event),
             capture_output=True,
             text=True,
@@ -214,3 +221,26 @@ def test_registered_commands_run(tmp_path, keyless_home, monkeypatch):
     payload = json.loads(stop.stdout)
     assert set(payload) == {"systemMessage"}
     assert running in payload["systemMessage"]
+
+
+def test_codex_windows_bash_launcher_mirrors_doctor_probe():
+    """The cmd launcher mirrors doctor's Git for Windows tables + root order."""
+    from chinamax import doctor
+
+    raw = (REPO_ROOT / "scripts" / "codex_hook_bash.cmd").read_bytes()
+    assert b"\r\n" in raw, "launcher must be stored with CRLF for cmd.exe"
+    launcher = raw.decode("utf-8")
+    # every default root var is probed, in doctor._git_for_windows_roots order
+    roots = ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
+    positions = [launcher.index(f"%{var}%") for var in roots]
+    assert positions == sorted(positions), "root probes must follow doctor order"
+    for rel in doctor._GIT_FOR_WINDOWS_EXES["bash"]:
+        assert rel.replace("/", "\\") in launcher
+    # root-first: every install-root probe precedes the PATH fallback so a stray
+    # WSL bash on PATH cannot shadow the real Git Bash (mirrors §B tree-first).
+    assert launcher.index("where bash") > positions[-1]
+    # block-free: no `for ( … )` IN-set (keeps literal (x86) parens out of a
+    # parenthesized construct) and ambient CHINAMAX_BASH is cleared.
+    assert "for %%" not in launcher
+    assert 'set "CHINAMAX_BASH="' in launcher
+    assert "-lc" in launcher and "cygpath" in launcher and "exec" in launcher

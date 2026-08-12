@@ -10,7 +10,11 @@ the no-marker failure is intentional.
 Platform migration tests must use injected/mocked macOS and Windows seams on the
 Linux runner: native process, lock, path, prerequisite, and hook behavior is
 covered without pretending to be live native-OS evidence. Keep the full Linux
-suite green and assert that Linux dependency/report behavior remains unchanged.
+suite green and assert that Linux runtime dependency, process, and import behavior
+remains unchanged. Linux SETUP is the one documented exception (0.4.5): it now
+gates on the `bash`+`miniconda` prerequisites and its report gains
+`prerequisites`/`prerequisite_fixes`, so a setup test asserts that new report, not
+"report behavior unchanged".
 
 ## Gotchas
 

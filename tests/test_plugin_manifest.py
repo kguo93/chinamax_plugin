@@ -57,7 +57,7 @@ def test_manifest_and_marketplace_valid():
     # The marketplace entry's version equals plugin.json's, as the Codex pair does.
     assert entry["version"] == plugin["version"]
     assert codex["name"] == plugin["name"] == "chinamax"
-    assert codex["version"] == plugin["version"] == "0.4.3"
+    assert codex["version"] == plugin["version"] == "0.4.5"
     assert codex["homepage"] == "https://github.com/kguo93/chinamax_plugin"
     assert codex["repository"] == "https://github.com/kguo93/chinamax_plugin"
     assert codex["license"] == "GPL-2.0"
@@ -80,8 +80,25 @@ def test_manifest_and_marketplace_valid():
         "authentication": "ON_INSTALL",
     }
     assert codex_entry["category"] == "Developer tools"
-    assert project["project"]["version"] == "0.4.3"
+    assert project["project"]["version"] == "0.4.5"
     dependencies = project["project"]["dependencies"]
     assert any("psutil>=7.2" in value and "sys_platform == 'darwin'" in value for value in dependencies)
     assert any("filelock>=3.20" in value and "sys_platform == 'win32'" in value for value in dependencies)
     assert (REPO_ROOT / "skills" / "chinamax-bridge" / "SKILL.md").is_file()
+
+
+def test_codex_setup_skill_approve_protocol():
+    """skills/chinamax-setup/SKILL.md carries the prerequisite approve-and-install
+    protocol (no module reads this file, so its pins live here)."""
+    text = (REPO_ROOT / "skills" / "chinamax-setup" / "SKILL.md").read_text(encoding="utf-8")
+    assert '"approve"' in text  # the exact consent keyword
+    assert "run_policy" in text  # dispatch by run_policy
+    assert "stop-on-first-failure" in text.lower()
+    # The Git Bash sentence is scoped to the seam only, not the rectification rows.
+    assert "SEAM invocation through Git Bash" in text
+    assert "cmd /c" in text
+    # Exactly one Windows zero-state fallback block.
+    assert text.count("winget install --id Git.Git") == 1
+    # The dropped installer-cleanup lines never appear (operator override).
+    assert 'rm "$HOME/.chinamax-miniconda.sh"' not in text
+    assert 'del "%TEMP%\\chinamax-miniconda.exe"' not in text
