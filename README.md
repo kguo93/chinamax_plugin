@@ -155,33 +155,10 @@ paths with spaces.
 
 ## Troubleshooting
 
-- **`git`, `bash`, or `cygpath` not found (Windows):** install Git for Windows
-  from https://git-scm.com/download/win — one installer provides all three, and
-  setup detects them in the default install tree even when they are off `PATH`.
-- **`bash` not found (macOS):** approve the `brew install bash` Rectification setup
-  prints, or install Homebrew / the Xcode Command Line Tools first. Setup no longer
-  probes `git` on macOS (install Git separately if you want it).
-- **Conda/Python not found:** approve the Miniconda Rectification setup prints, or
-  install Miniconda yourself. Standard `~/miniconda3` and Windows per-user paths are
-  probed before `PATH`. Setting `CHINAMAX_PYTHON` to an absolute interpreter does
-  NOT skip the Miniconda pause: setup's Phase A keys on conda-resolvability
-  regardless of which Python runs the doctor.
-- **`psutil` or `filelock` missing:** rerun setup in the managed environment;
-  `filelock` is Windows-only and `psutil` is macOS/Windows-only.
-- **Wrong state root:** inspect `CLAUDE_PLUGIN_DATA`/`PLUGIN_DATA`, then unset a
-  stale or relative value. Relative plugin-data values are rejected.
-- **Windows path with spaces:** keep the plugin root and data paths quoted; the
-  shipped hooks and shims already quote them.
-- **Deep Windows state paths:** the default Windows 260-character `MAX_PATH`
-  limit can still affect deeply nested workspaces; enable Windows long-path
-  support or use a shorter workspace/data root.
-- **Cancellation reports survivor PIDs:** a process denied by Windows or still
-  alive after the terminate/kill grace is intentionally reported. Retry status or
-  cancel after investigating the listed process.
-- **Intel Mac or Windows ARM64:** these are best effort. Use a supported
-  architecture for release-blocking deployments.
-- **Want a Linux environment on Windows:** use WSL2 and follow the Linux path.
-  WSL1 is unsupported for Codex.
+Run /chinamax:setup this command will run doctor.py and diagnose if any
+pre-requisites are missing and create a list of commands to run in order to
+install them (conda + bash). You approve the install and it will fix everything.
+Any root required installs will require manual user run of doctor provided commands.
 
 ## Verification scope
 
