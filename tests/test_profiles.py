@@ -13,6 +13,7 @@ SHIPPED = {
     "glm": ("https://api.z.ai/api/anthropic", "glm-5.2", "GLM_API_KEY"),
     "minimax": ("https://api.minimax.io/anthropic", "MiniMax-M3[1m]", "MINIMAX_API_KEY"),
     "kimi": ("https://api.moonshot.ai/anthropic", "kimi-k3", "KIMI_API_KEY"),
+    "qwen": ("https://dashscope-intl.aliyuncs.com/apps/anthropic", "qwen3.8-max", "QWEN_API_KEY"),
 }
 
 #: The exact always-on reasoning knob each shipped row ships (ground truth,
@@ -23,11 +24,12 @@ SHIPPED_EXTRAS = {
     "glm": {"thinking": {"type": "enabled"}},
     "minimax": {"thinking": {"type": "adaptive"}},
     "kimi": {"extra_body": {"reasoning_effort": "max"}},
+    "qwen": {"thinking": {"type": "enabled"}},
 }
 
 
-def test_five_shipped_rows():
-    """Resolution with no overlay lists exactly the five pro Profiles."""
+def test_six_shipped_rows():
+    """Resolution with no overlay lists exactly the six pro Profiles."""
     resolved = profiles.load_profiles()
 
     assert set(resolved) == set(SHIPPED)

@@ -33,5 +33,12 @@
     "model": "kimi-k3",
     "api_key_env": "KIMI_API_KEY",
     "request_extras": {"extra_body": {"reasoning_effort": "max"}}
+  },
+  {
+    "name": "qwen",
+    "base_url": "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+    "model": "qwen3.8-max",
+    "api_key_env": "QWEN_API_KEY",
+    "request_extras": {"thinking": {"type": "enabled"}}
   }
 ]

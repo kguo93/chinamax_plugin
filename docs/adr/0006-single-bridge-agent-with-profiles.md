@@ -47,3 +47,12 @@ Thread does NOT actually change them — the worker still runs on the Thread's p
 model and resolved Profile. Actually changing model or Profile still requires a fresh
 `/chinamax:task` (a new Bridge + Thread). No-default-Profile and per-dispatch model
 pinning are otherwise unchanged.
+
+**Amended 2026-08-13** (sixth Profile: qwen). The roster gains `qwen` (Alibaba
+DashScope International): base_url `https://dashscope-intl.aliyuncs.com/apps/anthropic`,
+default model `qwen3.8-max`, key `QWEN_API_KEY`, `request_extras`
+`{"thinking": {"type": "enabled"}}` (budget-less, glm-shaped — reasoning on at the
+server's xhigh default). Endpoint, Bearer auth, model string and reasoning
+live-verified 2026-08-13. The shipped Profiles are now deepseek, mimo, glm, minimax,
+kimi, qwen — pure Profile data (no allow-list, no per-host registration, no code
+change beyond the row). Cross-reference ADR 0001 (its 2026-08-13 endpoint/wire amendment).

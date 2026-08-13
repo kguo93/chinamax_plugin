@@ -33,6 +33,7 @@ SYNTHETIC_KEYS = {
     "GLM_API_KEY": "sk-fake-glm",
     "MINIMAX_API_KEY": "sk-fake-minimax",
     "KIMI_API_KEY": "sk-fake-kimi",
+    "QWEN_API_KEY": "sk-fake-qwen",
 }
 AMBIENT_VARIABLES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
 

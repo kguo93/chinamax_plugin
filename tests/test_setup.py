@@ -329,6 +329,7 @@ def test_setup_scaffolds_key_template(tmp_path, keyless_home, isolated, capsys):
         "GLM_API_KEY",
         "MINIMAX_API_KEY",
         "KIMI_API_KEY",
+        "QWEN_API_KEY",
     ):
         assert f"# {env_name}=" in content
     # The extension recipe: overlay row + key line, for any Anthropic-compatible model.
