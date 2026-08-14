@@ -10,9 +10,13 @@ The plugin's thin shell shims. Each resolves the `chinamax` conda interpreter an
   order: recorded `<data root>/python-path` → `$CHINAMAX_PYTHON` →
   native macOS/Linux or Windows Miniconda paths → `conda run -n chinamax python`
   → system Python with the plugin's `src/` on `PYTHONPATH` (the bootstrap rung).
-  On Windows it normalizes native paths through `cygpath`, uses `;` Python path
-  lists, and keeps Git Bash as the shell. Provides `chinamax_data_root`,
-  `chinamax_resolve_python`, and `chinamax_exec <module>`.
+  On macOS the bootstrap rung is guarded: `/usr/bin/python3` is an Xcode CLT stub,
+  so with no real `python3` resolvable the shim stops (guidance to stderr, exit 1)
+  rather than `exec` a stub — detected GUI-safely with `command -v` + `xcode-select
+  -p`, never by executing `python3`. On Windows it normalizes native paths through
+  `cygpath`, uses `;` Python path lists, and keeps Git Bash as the shell. Provides
+  `chinamax_data_root`, `chinamax_resolve_python`, `chinamax_report_no_python`, and
+  `chinamax_exec <module>`.
 - `chinamax` — the CLI launcher: `chinamax_exec chinamax "$@"`. Referenced by every
   command file as `"${CLAUDE_PLUGIN_ROOT}/scripts/chinamax" <verb> "$ARGUMENTS"`.
 - `session_start_hook` — the SessionStart shim: `chinamax_exec

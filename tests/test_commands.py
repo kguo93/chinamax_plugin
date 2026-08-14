@@ -8,8 +8,10 @@ parser rejects — or forwarded flags it does not accept — fails here.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,11 @@ from conftest import SYNTHETIC_KEYS, write_overlay
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_DIR = REPO_ROOT / "commands"
+LAUNCHER = REPO_ROOT / "scripts" / "chinamax"
 BANG_LINE = re.compile(r"^!`(.+)`\s*$", re.MULTILINE)
+
+#: Unique marker the fake python3 prints once the shim reaches its exec.
+PY_MARKER = "CHINAMAX_FAKE_PY_REACHED"
 
 #: verb -> a representative raw "$ARGUMENTS" string the parser must accept once
 #: normalized. Only the FOUR surviving command files map to a seam verb here
@@ -135,3 +141,78 @@ def test_argument_normalization():
     selector_id, words_id = _split_resume_args(parsed_id.args)
     assert selector_id == "task-abc-000001"
     assert _read_prompt(words_id, default=DEFAULT_RESUME_PROMPT) == "keep going"
+
+
+def _write_fake(path: Path, body: str) -> None:
+    """Write a `#!/bin/sh` fake executable on PATH and mark it runnable."""
+    path.write_text(body, encoding="utf-8")
+    path.chmod(0o700)
+
+
+def _macos_no_python_env(tmp_path: Path, *, real_python: bool) -> dict[str, str]:
+    """Craft a hermetic macOS-simulated env where the launcher reaches its guard.
+
+    Fakes `uname`→Darwin, `xcode-select`→exit 1, and `conda`→exit 1 on PATH, with
+    an empty HOME (no ~/miniconda3) and an empty CLAUDE_PLUGIN_DATA (no recorded
+    python-path), so every interpreter rung before the macOS guard is neutralized
+    and PATH's only resolvable python3 is /usr/bin/python3. When `real_python` is
+    set, a fake `python3` printing PY_MARKER lands FIRST on PATH, so
+    `command -v python3` resolves off /usr/bin/python3 and the guard is passed.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    _write_fake(bin_dir / "uname", "#!/bin/sh\nprintf 'Darwin\\n'\n")
+    _write_fake(bin_dir / "xcode-select", "#!/bin/sh\nexit 1\n")
+    _write_fake(bin_dir / "conda", "#!/bin/sh\nexit 1\n")
+    if real_python:
+        _write_fake(
+            bin_dir / "python3",
+            f"#!/bin/sh\nprintf '{PY_MARKER} %s\\n' \"$*\"\nexit 0\n",
+        )
+    home = tmp_path / "home"
+    home.mkdir()
+    plugin_data = tmp_path / "plugindata"
+    plugin_data.mkdir()
+    # A minimal env: CHINAMAX_PYTHON is absent (unset), only the fixture bin and
+    # /usr/bin:/bin are on PATH — never conda's python.
+    return {
+        "HOME": str(home),
+        "CLAUDE_PLUGIN_DATA": str(plugin_data),
+        "CHINAMAX_HOST": "claude",
+        "PATH": f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin",
+    }
+
+
+def test_macos_shim_stops_without_real_python(tmp_path):
+    """On macOS with no real python3 (only the /usr/bin/python3 CLT stub) the
+    shim refuses to exec, stops with install guidance, and the doctor never runs."""
+    env = _macos_no_python_env(tmp_path, real_python=False)
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "setup"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "no usable Python 3" in result.stderr
+    assert "install a real python 3" in result.stderr.lower()
+    # The guard emits only to stderr and never reaches the exec, so the doctor
+    # produced no report and its unique marker path was never taken.
+    assert result.stdout == ""
+    assert PY_MARKER not in result.stdout
+
+
+def test_macos_shim_runs_with_real_python(tmp_path):
+    """A non-stub python3 (resolving off /usr/bin/python3) passes the guard, so the
+    shim reaches its `python3 -m chinamax setup` exec and prints no guidance."""
+    env = _macos_no_python_env(tmp_path, real_python=True)
+    result = subprocess.run(
+        ["bash", str(LAUNCHER), "setup"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert PY_MARKER in result.stdout
+    assert "-m chinamax setup" in result.stdout  # the module and forwarded verb
+    assert "no usable Python 3" not in result.stderr

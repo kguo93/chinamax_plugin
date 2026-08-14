@@ -66,3 +66,23 @@ an elevation-free per-user PowerShell fallback (`/CURRENTUSER` into
 `%LocalAppData%\Programs\Git`) when winget is absent; Linux bash uses the detected
 package manager (auto-run only under passwordless `sudo -n true`, else operator-run);
 macOS bash uses `brew install bash` when brew exists, else operator advice.
+
+**Amended 2026-08-14 (0.4.8).** The bare-`python3` bootstrap rung (rung 5) that
+lets the doctor start on a machine with no `chinamax` env previously dead-ended on
+macOS. Apple ships no real Python 3: `/usr/bin/python3` is an Xcode Command Line
+Tools *stub*, not an interpreter, so the rung would `exec` a stub — which can even
+pop the CLT GUI installer — and the doctor could never diagnose the interpreter it
+needs to start (a bootstrap circularity). `scripts/_interpreter.sh`'s `chinamax_exec`
+now inserts a macOS guard after the `~/miniconda3` bootstrap branch and before the
+final bare-`python3` `exec`: if no real `python3` is resolvable, it refuses to
+`exec`, prints install guidance (Miniconda / Homebrew / python.org), and exits 1;
+setup/doctor proceed only once a real `python3` is on `PATH`. Detection is
+GUI-safe — it never *executes* `python3` (running the stub is what triggers the
+installer) — using `command -v` plus `xcode-select -p`: a non-stub python3
+(Homebrew/python.org/Miniconda) resolves off `/usr/bin/python3` and is accepted; the
+Apple stub at `/usr/bin/python3` is accepted only when the CLT is installed
+(`xcode-select -p` succeeds); nothing resolvable is rejected. Linux always has a real
+`python3` and Windows keeps its native-fallback bootstrap (the Windows-only cmd.exe
+block in `commands/setup.md`), so both are unchanged. Cross-reference ADR 0015.
+Validation stays mocked on Linux: a fake `uname`→Darwin plus `xcode-select`/`conda`
+stubs on `PATH` exercise both the refusal and the accept path.

@@ -149,6 +149,27 @@ chinamax_resolve_python() {
   return 1
 }
 
+# macOS ships no usable Python 3 by default: /usr/bin/python3 is an Xcode Command
+# Line Tools stub, not an interpreter, so the bare-python bootstrap rung can
+# dead-end. Refuse rather than exec a stub; the doctor cannot diagnose the very
+# interpreter it needs to start (ADR 0009/0015). Writes to stderr itself.
+chinamax_report_no_python() {
+  cat >&2 <<'EOF'
+chinamax: no usable Python 3 found — cannot start setup.
+
+macOS does not ship a real Python 3: /usr/bin/python3 is an Xcode Command Line
+Tools stub, not an interpreter. Install a real Python 3, then re-run
+/chinamax:setup. Any one of these:
+
+  * Miniconda (one step; also satisfies chinamax's conda requirement):
+      https://repo.anaconda.com/miniconda/ (Miniconda3-latest-MacOSX-arm64.sh)
+  * Homebrew:   brew install python@3.12
+  * python.org: the macOS universal2 installer
+
+chinamax will not proceed until a real python3 is on PATH.
+EOF
+}
+
 # Resolve the interpreter and exec `python -m <module> "$@"`. Requires
 # CHINAMAX_SCRIPT_DIR to be the absolute path to this scripts/ directory.
 chinamax_exec() {
@@ -171,7 +192,7 @@ chinamax_exec() {
     exec "${conda_cmd}" run -n chinamax python -m "${module}" "$@"
   fi
 
-  local path_sep python_cmd bootstrap_python
+  local path_sep python_cmd bootstrap_python py_path
   if chinamax_windows; then
     path_sep=';'
     python_cmd=python
@@ -183,6 +204,19 @@ chinamax_exec() {
   fi
   if [ -x "${bootstrap_python}" ]; then
     exec env "PYTHONPATH=${plugin_root}/src${PYTHONPATH:+${path_sep}${PYTHONPATH}}" "${bootstrap_python}" -m "${module}" "$@"
+  fi
+  # On macOS the bare-python rung must not exec a missing or stub interpreter.
+  # Detect GUI-safely — never EXECUTE python3, since running the CLT stub can pop
+  # the installer — using command -v + xcode-select -p. A non-stub python3
+  # resolves off /usr/bin/python3 and is accepted; the Apple stub at
+  # /usr/bin/python3 works only with the CLT installed (xcode-select -p succeeds);
+  # nothing resolvable is rejected (ADR 0009/0015). Linux/Windows are unaffected.
+  if chinamax_macos; then
+    py_path="$(command -v "${python_cmd}" 2>/dev/null || true)"
+    if [ -z "${py_path}" ] || { [ "${py_path}" = /usr/bin/python3 ] && ! xcode-select -p >/dev/null 2>&1; }; then
+      chinamax_report_no_python
+      exit 1
+    fi
   fi
   exec env "PYTHONPATH=${plugin_root}/src${PYTHONPATH:+${path_sep}${PYTHONPATH}}" "${python_cmd}" -m "${module}" "$@"
 }

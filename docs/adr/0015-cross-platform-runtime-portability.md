@@ -124,6 +124,15 @@ shell and `host.py` agree on every Platform. Only `chinamax_data_root` changed;
 `chinamax_resolve_python`/`chinamax_exec` already resolve macOS through their POSIX branch.
 Validation stays mocked on Linux: a fake `uname` on `PATH` exercises the branch.
 
+**Amended 2026-08-14 (0.4.8).** The 2026-08-10 note that `chinamax_exec` "already
+resolves macOS through the POSIX branch" gets a macOS-specific guard. Apple ships
+no real Python 3 (`/usr/bin/python3` is an Xcode CLT stub), so the shim's bare-
+`python3` bootstrap rung could dead-end before the doctor could diagnose it.
+`chinamax_exec` now refuses to `exec` a missing/stub `python3` on macOS — detected
+GUI-safely via `command -v` + `xcode-select -p`, never by executing `python3` — and
+stops with install guidance. Linux/Windows bootstrap is unchanged. Gap-fill, not a
+reversal; see ADR 0009's 2026-08-14 amendment. Validation stays mocked on Linux.
+
 ### Conditional dependencies
 
 `psutil>=7.2,<8` is selected on macOS and Windows. `filelock>=3.20,<4` is

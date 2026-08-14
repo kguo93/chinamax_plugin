@@ -47,6 +47,12 @@ Install Miniconda for your architecture, or let setup install it. The latest
 Apple Silicon release is the supported target; Intel is best effort. ChinamaX adds
 `psutil` to the managed environment on macOS.
 
+macOS does not ship a real Python 3: `/usr/bin/python3` is an Xcode Command Line
+Tools stub, not an interpreter. ChinamaX requires a real Python 3 — from Miniconda,
+Homebrew (`brew install python@3.12`), or the python.org installer. Until one is on
+`PATH`, setup stops with install guidance instead of dead-ending on the stub. (This
+macOS interpreter guard is covered by mocked-on-Linux tests, not native-host CI.)
+
 ### Windows
 
 Install Git for Windows (https://git-scm.com/download/win). Setup detects
