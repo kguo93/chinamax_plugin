@@ -230,7 +230,7 @@ def test_codex_windows_bash_launcher_mirrors_doctor_probe():
     raw = (REPO_ROOT / "scripts" / "codex_hook_bash.cmd").read_bytes()
     assert b"\r\n" in raw, "launcher must be stored with CRLF for cmd.exe"
     launcher = raw.decode("utf-8")
-    # every default root var is probed, in doctor._git_for_windows_roots order
+    # every default root var is probed, in state._git_for_windows_roots order
     roots = ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
     positions = [launcher.index(f"%{var}%") for var in roots]
     assert positions == sorted(positions), "root probes must follow doctor order"

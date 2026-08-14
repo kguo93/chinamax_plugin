@@ -960,6 +960,50 @@ def _windows_depth(process, root_pid: int) -> int:
     return depth
 
 
+# ── Git for Windows tool resolution ─────────────────────────────────────────
+# The recommended Git for Windows installer leaves bash/cygpath OFF PATH, so the
+# tools are resolved by probing the install tree on disk FIRST, then PATH. One
+# resolver backs BOTH the setup Prerequisite probe (doctor) and the Runtime bash
+# spawn, so the setup check can never drift from what actually launches (ADR 0015).
+GIT_FOR_WINDOWS_EXES: dict[str, tuple[str, ...]] = {
+    "git": ("cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe"),
+    "bash": ("bin/bash.exe", "usr/bin/bash.exe"),
+    "cygpath": ("usr/bin/cygpath.exe",),
+}
+
+
+def _git_for_windows_roots() -> list[Path]:
+    """Default Git for Windows install roots: system-wide, then per-user."""
+    roots: list[Path] = []
+    for var in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(var, "").strip()
+        if base:
+            roots.append(Path(base) / "Git")
+    local = os.environ.get("LOCALAPPDATA", "").strip()
+    if local:
+        roots.append(Path(local) / "Programs" / "Git")
+    # %ProgramW6432% usually aliases %ProgramFiles% on 64-bit Windows.
+    return list(dict.fromkeys(roots))
+
+
+def windows_tool_path(name: str) -> str | None:
+    """Resolve a Git for Windows tool: install-root probe first, then PATH.
+
+    Args:
+        name: A ``GIT_FOR_WINDOWS_EXES`` key (``git``, ``bash``, or ``cygpath``).
+
+    Returns:
+        The absolute path to the resolved executable — an install-root hit wins
+        over ``PATH`` — or None when the tool resolves nowhere.
+    """
+    for root in _git_for_windows_roots():
+        for rel in GIT_FOR_WINDOWS_EXES[name]:
+            candidate = root / rel
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which(name)
+
+
 def worker_python() -> str:
     """Return the interpreter the detached worker runs under."""
     override = os.environ.get(WORKER_PYTHON_VARIABLE, "").strip()

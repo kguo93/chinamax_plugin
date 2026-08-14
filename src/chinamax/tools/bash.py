@@ -132,8 +132,13 @@ def run_bash(command: str, context: ToolContext) -> dict:
         options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         options["start_new_session"] = True
+    executable = "bash"
+    if sys.platform == "win32":
+        from chinamax import state
+
+        executable = state.windows_tool_path("bash") or "bash"
     process = subprocess.Popen(
-        ["bash", "-c", command],
+        [executable, "-c", command],
         **options,
     )
     process_start_time = None

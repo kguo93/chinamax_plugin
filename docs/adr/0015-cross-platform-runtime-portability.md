@@ -60,6 +60,26 @@ shim root). The extra `cmd` layer stays within Codex's 3 s `SessionEnd` clamp;
 CI runs no Windows runner, so the cmd→bash seam is manual-smoke evidence only,
 per the Validation scope below.
 
+**Amended 2026-08-14 (0.4.7).** The 2026-08-11 amendment fixed the Codex hook
+launcher but left a second bare-`bash` path unfixed: the Runtime bash TOOL (ADR
+0005) spawned `["bash", "-c", command]` relying on `PATH`, diverging from setup's
+install-root probe. Because the recommended Git for Windows install leaves
+`bash.exe` OFF `PATH`, setup's prerequisite probe could report bash PRESENT
+(green) while every in-Job bash spawn failed with `FileNotFoundError` — the two
+resolvers disagreed. Resolution: the Git for Windows tool tables and the
+root-first probe move to `state` as one shared resolver, `state.windows_tool_path`
+(backed by `state.GIT_FOR_WINDOWS_EXES` and `state._git_for_windows_roots` — the
+roots helper the 2026-08-11 amendment above names as `doctor._git_for_windows_roots`
+now lives in `state`, while `doctor` keeps only the alias
+`_GIT_FOR_WINDOWS_EXES = state.GIT_FOR_WINDOWS_EXES` for its remaining
+`prerequisite_status` use). That single resolver now
+backs BOTH the doctor prerequisite probe AND the Runtime bash spawn, so the check
+can never drift from what launches again; the spawn falls back to bare `"bash"`
+only when no Git for Windows root resolves. This is a gap-fill, not a reversal.
+Validation stays mocked on Linux (`sys.platform` monkeypatched to `win32`, the
+resolver and the spawn's `argv[0]` asserted), consistent with the Validation
+scope below.
+
 ### Process mechanisms
 
 - Linux keeps `/proc`, integer kernel start times, POSIX process groups, and

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import time
 
@@ -76,3 +77,80 @@ def test_invalid_timeout_rejected(job_env, capsys, value):
     assert env.requests == []
     # Omitting the field resolves to the documented default instead.
     assert parse_spec(env.spec()).bash_timeout_s == DEFAULT_BASH_TIMEOUT_S == 600.0
+
+
+class _FakeProc:
+    """A spawned command that produces no output and exits 0 immediately."""
+
+    pid = 1234
+
+    def __init__(self) -> None:
+        self.stdout = io.BytesIO(b"")
+        self.stderr = io.BytesIO(b"")
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+def _recording_popen(recorder: list[str]):
+    """A ``subprocess.Popen`` stand-in that records the spawned executable."""
+
+    def popen(argv, **_kwargs):
+        recorder.append(argv[0])
+        return _FakeProc()
+
+    return popen
+
+
+def _fail_if_called(*_args, **_kwargs):
+    raise AssertionError("windows_tool_path must not be consulted off win32")
+
+
+def test_win32_bash_spawn_uses_resolved_git_bash(monkeypatch, tmp_path):
+    """On Windows the bash tool spawns the resolver's Git Bash, not bare ``bash``.
+
+    Guards the divergence bug: setup probed the Git for Windows install tree while
+    the spawn relied on PATH, so a default install (bash OFF PATH) spawned nothing.
+    """
+    from chinamax import state
+    from chinamax.confinement import ToolContext
+    from chinamax.tools import bash
+
+    context = ToolContext(root=tmp_path, write=True, bash_timeout_s=5.0)
+    monkeypatch.setattr(bash.sys, "platform", "win32")
+    # The win32 branch reads a Windows-only creationflag absent on the Linux runner.
+    monkeypatch.setattr(
+        bash.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False
+    )
+    monkeypatch.setattr(state, "read_pid_start_time", lambda _pid: None)
+
+    recorder: list[str] = []
+    monkeypatch.setattr(bash.subprocess, "Popen", _recording_popen(recorder))
+
+    sentinel = r"C:\Git\bin\bash.exe"
+    monkeypatch.setattr(state, "windows_tool_path", lambda _name: sentinel)
+    result = bash.run_bash("echo hi", context)
+    assert recorder == [sentinel]
+    assert result["exit_code"] == 0 and result["timed_out"] is False
+
+    # No Git for Windows root resolves → fall back to bare "bash".
+    monkeypatch.setattr(state, "windows_tool_path", lambda _name: None)
+    recorder.clear()
+    bash.run_bash("echo hi", context)
+    assert recorder == ["bash"]
+
+
+def test_non_win32_bash_spawn_uses_bare_bash(monkeypatch, tmp_path):
+    """Off Windows the spawn stays bare ``bash`` and never consults the resolver."""
+    from chinamax import state
+    from chinamax.confinement import ToolContext
+    from chinamax.tools import bash
+
+    context = ToolContext(root=tmp_path, write=True, bash_timeout_s=5.0)
+    monkeypatch.setattr(bash.sys, "platform", "linux")
+    monkeypatch.setattr(state, "windows_tool_path", _fail_if_called)
+
+    recorder: list[str] = []
+    monkeypatch.setattr(bash.subprocess, "Popen", _recording_popen(recorder))
+    bash.run_bash("echo hi", context)
+    assert recorder == ["bash"]

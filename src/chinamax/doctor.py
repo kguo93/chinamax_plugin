@@ -84,11 +84,10 @@ MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
 # %LocalAppData%\Programs\Git.
 _GIT_FOR_WINDOWS_URL = "https://git-scm.com/download/win"
 
-_GIT_FOR_WINDOWS_EXES: dict[str, tuple[str, ...]] = {
-    "git": ("cmd/git.exe", "bin/git.exe", "mingw64/bin/git.exe"),
-    "bash": ("bin/bash.exe", "usr/bin/bash.exe"),
-    "cygpath": ("usr/bin/cygpath.exe",),
-}
+# The tool table lives in `state` as the single source the Prerequisite probe
+# below AND the Runtime bash spawn both resolve through (ADR 0015); aliased here
+# so the setup report keeps its module-qualified name.
+_GIT_FOR_WINDOWS_EXES = state.GIT_FOR_WINDOWS_EXES
 
 # ── Miniconda Rectification source ──────────────────────────────────────────
 # `latest` over HTTPS, no version pin and no checksum (ADR 0009, operator's
@@ -162,26 +161,9 @@ def prerequisite_status() -> dict[str, bool]:
     return {}
 
 
-def _git_for_windows_roots() -> list[Path]:
-    """Default Git for Windows install roots: system-wide, then per-user."""
-    roots: list[Path] = []
-    for var in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
-        base = os.environ.get(var, "").strip()
-        if base:
-            roots.append(Path(base) / "Git")
-    local = os.environ.get("LOCALAPPDATA", "").strip()
-    if local:
-        roots.append(Path(local) / "Programs" / "Git")
-    # %ProgramW6432% usually aliases %ProgramFiles% on 64-bit Windows.
-    return list(dict.fromkeys(roots))
-
-
 def _windows_tool_present(name: str) -> bool:
     """True when a tool resolves in a Git for Windows install root, else on PATH."""
-    for root in _git_for_windows_roots():
-        if any(_is_executable(str(root / rel)) for rel in _GIT_FOR_WINDOWS_EXES[name]):
-            return True
-    return shutil.which(name) is not None
+    return state.windows_tool_path(name) is not None
 
 
 def prerequisite_fixes(prerequisites: dict[str, bool]) -> list[dict]:

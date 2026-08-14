@@ -387,3 +387,48 @@ def test_windows_termination_refuses_unreadable_root(monkeypatch):
     assert state._windows_identity_holds(process, None) is False
     assert state._terminate_tree_windows(4242, 1_000_000, 0, 0) == [4242]
     assert process.terminate_calls == 0
+
+
+def _clear_windows_roots(monkeypatch):
+    """Drop every Git for Windows root env var so a stray host value never leaks in."""
+    for var in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_windows_tool_path_prefers_install_root(monkeypatch, tmp_path):
+    """A Git for Windows install-root hit resolves to that absolute path."""
+    _clear_windows_roots(monkeypatch)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    bash_exe = tmp_path / "Program Files" / "Git" / "bin" / "bash.exe"
+    bash_exe.parent.mkdir(parents=True, exist_ok=True)
+    bash_exe.write_text("")
+    monkeypatch.setattr(state.shutil, "which", lambda name: None)  # no PATH fallback
+    assert state.windows_tool_path("bash") == str(bash_exe)
+
+
+def test_windows_tool_path_falls_back_to_path(monkeypatch):
+    """With no install-root file, the tool resolves on PATH."""
+    _clear_windows_roots(monkeypatch)
+    sentinel = r"C:\tools\bin\bash.exe"
+    monkeypatch.setattr(
+        state.shutil, "which", lambda name: sentinel if name == "bash" else None
+    )
+    assert state.windows_tool_path("bash") == sentinel
+
+
+def test_windows_tool_path_unresolved_returns_none(monkeypatch):
+    """Nothing on disk and nothing on PATH resolves to None."""
+    _clear_windows_roots(monkeypatch)
+    monkeypatch.setattr(state.shutil, "which", lambda name: None)
+    assert state.windows_tool_path("bash") is None
+
+
+def test_windows_tool_path_root_wins_over_path(monkeypatch, tmp_path):
+    """An install-root hit takes precedence over a PATH resolution."""
+    _clear_windows_roots(monkeypatch)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "Program Files"))
+    bash_exe = tmp_path / "Program Files" / "Git" / "bin" / "bash.exe"
+    bash_exe.parent.mkdir(parents=True, exist_ok=True)
+    bash_exe.write_text("")
+    monkeypatch.setattr(state.shutil, "which", lambda name: r"C:\stray\bash.exe")
+    assert state.windows_tool_path("bash") == str(bash_exe)
