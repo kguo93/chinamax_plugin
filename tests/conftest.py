@@ -11,9 +11,12 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import signal
 import subprocess
+import sys
 import time
+import types
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -355,6 +358,222 @@ def job_leftovers(store, job_id: str) -> list[str]:
     return sorted(entry.name for entry in entries if entry.name.startswith(job_id))
 
 
+# ── Worker Host-policy fixtures (ADR 0016) ─────────────────────────────────────
+# Hook scripts, settings files, and the stdio MCP fixture server all live under
+# tmp roots and write observable evidence files with real exit codes, so no test
+# ever touches the operator's real settings (a hard requirement of the plan).
+
+#: A tiny hand-rolled MCP stdio server: line-delimited JSON-RPC over stdin/stdout,
+#: version-independent of the `mcp` SDK's own server API. Reads its tool list from
+#: ``CHINAMAX_FIXTURE_TOOLS`` (JSON) or defaults to a single ``echo`` tool, and an
+#: optional ``CHINAMAX_FIXTURE_DELAY`` (seconds) stalls each ``tools/call`` so a
+#: per-call-timeout test can bite. Echoes ``<tool>: <json-args>`` back as text.
+_MCP_FIXTURE_SERVER = '''\
+import json, os, sys, time
+
+def _tools():
+    raw = os.environ.get("CHINAMAX_FIXTURE_TOOLS")
+    if raw:
+        return json.loads(raw)
+    return [{"name": "echo", "description": "Echo the arguments back.",
+             "inputSchema": {"type": "object",
+                             "properties": {"text": {"type": "string"}},
+                             "required": ["text"]}}]
+
+def _send(obj):
+    sys.stdout.write(json.dumps(obj) + "\\n")
+    sys.stdout.flush()
+
+def main():
+    tools = _tools()
+    names = {tool["name"] for tool in tools}
+    delay = float(os.environ.get("CHINAMAX_FIXTURE_DELAY", "0") or 0)
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        msg = json.loads(line)
+        method = msg.get("method")
+        mid = msg.get("id")
+        if method == "initialize":
+            pv = msg.get("params", {}).get("protocolVersion", "2025-06-18")
+            _send({"jsonrpc": "2.0", "id": mid, "result": {
+                "protocolVersion": pv,
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "fixture", "version": "0.0.0"}}})
+        elif method == "notifications/initialized":
+            pass
+        elif method == "tools/list":
+            _send({"jsonrpc": "2.0", "id": mid, "result": {"tools": tools}})
+        elif method == "tools/call":
+            if delay:
+                time.sleep(delay)
+            params = msg.get("params", {})
+            name = params.get("name")
+            args = params.get("arguments", {})
+            if name in names:
+                _send({"jsonrpc": "2.0", "id": mid, "result": {
+                    "content": [{"type": "text", "text": name + ": " + json.dumps(args, sort_keys=True)}],
+                    "isError": False}})
+            else:
+                _send({"jsonrpc": "2.0", "id": mid,
+                       "error": {"code": -32601, "message": "unknown tool"}})
+        elif mid is not None:
+            _send({"jsonrpc": "2.0", "id": mid,
+                   "error": {"code": -32601, "message": "method not found"}})
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def mcp_server_script(directory: Path) -> Path:
+    """Materialize the stdio MCP fixture server under ``directory``."""
+    script = Path(directory) / "mcp_fixture_server.py"
+    script.write_text(_MCP_FIXTURE_SERVER, encoding="utf-8")
+    return script
+
+
+def mcp_server_entry(script: Path, *, env: dict[str, str] | None = None, cwd: str | None = None) -> dict:
+    """Build one `.mcp.json`/`mcpServers` entry pointing at the fixture server."""
+    entry: dict = {"command": sys.executable, "args": [str(script)]}
+    if env is not None:
+        entry["env"] = env
+    if cwd is not None:
+        entry["cwd"] = cwd
+    return entry
+
+
+def write_mcp_config(path: Path, servers: dict) -> None:
+    """Write a project `.mcp.json` with the given ``mcpServers`` mapping."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps({"mcpServers": servers}), encoding="utf-8")
+
+
+def write_hook_script(
+    directory: Path,
+    name: str,
+    *,
+    exit_code: int = 0,
+    stdout: str = "",
+    stderr: str = "",
+    evidence: Path | None = None,
+    sleep_s: float = 0.0,
+) -> str:
+    """Materialize a bash hook script and return the settings ``command`` string.
+
+    The script drains its stdin (the harness payload) into ``evidence`` when
+    given — so a test can assert the translated ``tool_name``/``tool_input`` the
+    hook actually saw — then emits ``stdout``/``stderr`` and exits ``exit_code``.
+    """
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    script = Path(directory) / f"hook_{name}.sh"
+    lines = ["#!/usr/bin/env bash", "set -u"]
+    if evidence is not None:
+        lines.append(f"cat > {shlex.quote(str(evidence))} 2>/dev/null || true")
+    else:
+        lines.append("cat > /dev/null 2>/dev/null || true")
+    if sleep_s:
+        lines.append(f"sleep {sleep_s}")
+    if stdout:
+        lines.append(f"printf %s {shlex.quote(stdout)}")
+    if stderr:
+        lines.append(f"printf %s {shlex.quote(stderr)} 1>&2")
+    lines.append(f"exit {exit_code}")
+    script.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return f"bash {shlex.quote(str(script))}"
+
+
+def hook_group(command: str, *, matcher: str | None = None, timeout: float | None = None) -> dict:
+    """Build one Claude settings hook group carrying a single command hook."""
+    hook: dict = {"type": "command", "command": command}
+    if timeout is not None:
+        hook["timeout"] = timeout
+    group: dict = {"hooks": [hook]}
+    if matcher is not None:
+        group["matcher"] = matcher
+    return group
+
+
+def write_claude_settings(
+    path: Path,
+    *,
+    pre: list[dict] | None = None,
+    post: list[dict] | None = None,
+    stop: list[dict] | None = None,
+    disable_all: bool = False,
+) -> None:
+    """Write a Claude ``settings.json`` with the given hook groups."""
+    hooks: dict = {}
+    if pre is not None:
+        hooks["PreToolUse"] = pre
+    if post is not None:
+        hooks["PostToolUse"] = post
+    if stop is not None:
+        hooks["Stop"] = stop
+    data: dict = {}
+    if hooks:
+        data["hooks"] = hooks
+    if disable_all:
+        data["disableAllHooks"] = True
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).write_text(json.dumps(data), encoding="utf-8")
+
+
+def policy_spec(
+    workspace: Path,
+    transcript_path: Path,
+    *,
+    job_id: str = "task-test-aaaaaa",
+    host: str = "claude",
+    mcp: list[str] | None = None,
+) -> types.SimpleNamespace:
+    """A minimal spec-shaped object for direct `Policy.build` unit calls."""
+    return types.SimpleNamespace(
+        workspace=str(workspace),
+        transcript_path=str(transcript_path),
+        job_id=job_id,
+        host=host,
+        mcp=mcp,
+    )
+
+
+def raw_tools_array(raw_body: bytes) -> bytes:
+    """Extract the balanced ``"tools":[…]`` byte slice from a raw request body.
+
+    A true byte-level comparison (not a parsed object, which cannot see key-order
+    drift): finds the tools array and returns its exact bytes, so two turns'
+    arrays can be asserted byte-identical.
+    """
+    marker = b'"tools":'
+    start = raw_body.index(marker) + len(marker)
+    assert raw_body[start:start + 1] == b"[", raw_body[start:start + 1]
+    depth = 0
+    for index in range(start, len(raw_body)):
+        char = raw_body[index : index + 1]
+        if char == b"[":
+            depth += 1
+        elif char == b"]":
+            depth -= 1
+            if depth == 0:
+                return raw_body[start : index + 1]
+    raise AssertionError("unbalanced tools array in request body")
+
+
+def memory_block_paths(text: str) -> list[str]:
+    """Return the Memory-file paths declared inside an injection block in ``text``."""
+    from chinamax.policy import _MEMORY_FILE_PREFIX, _MEMORY_FILE_SUFFIX, _MEMORY_OPEN
+
+    paths: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        if line == _MEMORY_OPEN:
+            in_block = True
+        elif in_block and line.startswith(_MEMORY_FILE_PREFIX) and line.endswith(_MEMORY_FILE_SUFFIX):
+            paths.append(line[len(_MEMORY_FILE_PREFIX) : -len(_MEMORY_FILE_SUFFIX)])
+    return paths
+
+
 def assert_wire_shape(messages: list[dict]) -> None:
     """Assert a request's history is one a strict endpoint would accept.
 
@@ -538,6 +757,13 @@ def keyless_home(tmp_path_factory, monkeypatch) -> Path:
     # explicitly to the Claude adapter while dedicated Host tests exercise the
     # fail-closed no-marker behavior.
     monkeypatch.setenv("CHINAMAX_HOST", "claude")
+    # Pin the Claude managed-settings discovery root under the temp HOME, at a
+    # path that does not exist — the "no managed settings" result the suite relies
+    # on is now hermetic by construction, never the operator's real
+    # /etc/claude-code/managed-settings.json happening to be absent (ADR 0016).
+    monkeypatch.setenv(
+        "CHINAMAX_MANAGED_SETTINGS", str(home / ".managed" / "managed-settings.json")
+    )
     for name in AMBIENT_VARIABLES:
         monkeypatch.delenv(name, raising=False)
     return home
@@ -602,10 +828,16 @@ __all__ = [
     "build_record",
     "dead_pid",
     "events_named",
+    "hook_group",
     "identity",
     "job_artifacts",
     "job_leftovers",
     "loop_config",
+    "mcp_server_entry",
+    "mcp_server_script",
+    "memory_block_paths",
+    "policy_spec",
+    "raw_tools_array",
     "report_turn",
     "reporter_events",
     "text_block",
@@ -616,6 +848,9 @@ __all__ = [
     "wait_for",
     "wait_for_status",
     "write_artifacts",
+    "write_claude_settings",
     "write_keys",
+    "write_mcp_config",
+    "write_hook_script",
     "write_overlay",
 ]

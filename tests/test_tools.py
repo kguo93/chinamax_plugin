@@ -194,3 +194,231 @@ def test_tool_exception_becomes_observation(job_env, call):
     # The loop reached the scripted turn after the failure.
     assert env.result() == REPORT_PAYLOAD
     assert len(env.requests) == 2
+
+
+# ── Policy hooks (ADR 0016) ────────────────────────────────────────────────────
+
+import json
+
+from conftest import (
+    hook_group,
+    policy_spec,
+    write_claude_settings,
+    write_hook_script,
+)
+from chinamax.policy import Policy, translate_tool
+
+
+def _build_policy(workspace, transcript):
+    return Policy.build(policy_spec(workspace, transcript))
+
+
+@pytest.mark.parametrize(
+    "native_name, native_input, claude_name, expected_extra",
+    [
+        ("bash", {"command": "ls"}, "Bash", {"command": "ls"}),
+        ("read_file", {"path": "a", "offset": 2}, "Read", {"file_path": "a"}),
+        ("write_file", {"path": "a", "content": "c"}, "Write", {"file_path": "a"}),
+        ("str_replace_edit", {"path": "a", "old_string": "x", "new_string": "y"}, "Edit", {"file_path": "a"}),
+        ("grep", {"pattern": "p", "path": ".", "include": "*.py", "fixed": True}, "Grep", {"glob": "*.py"}),
+        ("glob", {"pattern": "*.py", "path": "."}, "Glob", {"pattern": "*.py"}),
+        ("list_dir", {"path": "d"}, "Glob", {"pattern": "*"}),
+    ],
+)
+def test_translate_tool_full_table(native_name, native_input, claude_name, expected_extra):
+    """Every native tool presents with its Claude-canonical name and superset keys."""
+    name, payload = translate_tool(native_name, native_input)
+    assert name == claude_name
+    for key, value in expected_extra.items():
+        assert payload[key] == value
+    # Unmapped native keys ride along unchanged (matchers see supersets).
+    for key, value in native_input.items():
+        assert payload[key] == value
+
+
+def test_pretooluse_deny_blocks_dispatch(job_env, keyless_home):
+    """A PreToolUse deny (exit 2) stops the tool and returns its reason verbatim."""
+    hooks_dir = keyless_home / "hookdir"
+    hooks_dir.mkdir()
+    command = write_hook_script(hooks_dir, "deny", exit_code=2, stderr="nope, not that command")
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(command, matcher="Bash")],
+    )
+    env = job_env(tool_script(("bash", {"command": "echo hi > out.txt"})))
+
+    assert env.run() == 0
+
+    # The bash never ran: no file was written.
+    assert "out.txt" not in env.tree()
+    observations = env.observations()
+    assert observations[0]["is_error"] is True
+    assert "nope, not that command" in observations[0]["content"]
+
+
+def test_posttooluse_additional_context_appended(job_env, keyless_home):
+    """PostToolUse additionalContext rides after the tool_result in the same turn."""
+    marker = "POLICY-EXTRA-CONTEXT-7f3a"
+    stdout = json.dumps(
+        {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": marker}}
+    )
+    command = write_hook_script(keyless_home / "hookdir", "ctx", exit_code=0, stdout=stdout)
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        post=[hook_group(command, matcher="Bash")],
+    )
+    env = job_env(tool_script(("bash", {"command": "echo hi > out.txt"})))
+
+    assert env.run() == 0
+
+    # The context landed in the turn the loop sent AFTER the bash result.
+    assert any(marker in json.dumps(req["body"]) for req in env.requests)
+
+
+def test_ask_decision_allows(keyless_home, tmp_path):
+    """permissionDecision:'ask' resolves to allow (fail-open), not a block."""
+    stdout = json.dumps(
+        {"hookSpecificOutput": {"permissionDecision": "ask", "permissionDecisionReason": "hmm"}}
+    )
+    command = write_hook_script(tmp_path, "ask", exit_code=0, stdout=stdout)
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json", pre=[hook_group(command)]
+    )
+    policy = _build_policy(tmp_path, tmp_path / "t.jsonl")
+
+    result = policy.pre_tool_use("Bash", {"command": "ls"})
+    assert result.allowed is True
+
+
+@pytest.mark.parametrize("exit_code, sleep_s, timeout", [(7, 0, None), (0, 2, 0.4)])
+def test_hook_crash_or_timeout_continues(keyless_home, tmp_path, exit_code, sleep_s, timeout):
+    """A crashing (nonzero) or timing-out PreToolUse hook fails open to allow."""
+    command = write_hook_script(tmp_path, "bad", exit_code=exit_code, sleep_s=sleep_s)
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(command, timeout=timeout)],
+    )
+    policy = _build_policy(tmp_path, tmp_path / "t.jsonl")
+
+    assert policy.pre_tool_use("Bash", {"command": "ls"}).allowed is True
+
+
+def test_pretooluse_sequential_short_circuit(keyless_home, tmp_path):
+    """The first deny short-circuits: a later hook in the event never runs."""
+    first_evidence = tmp_path / "first.seen"
+    second_evidence = tmp_path / "second.seen"
+    deny = write_hook_script(tmp_path, "deny", exit_code=2, stderr="blocked", evidence=first_evidence)
+    later = write_hook_script(tmp_path, "later", exit_code=0, evidence=second_evidence)
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(deny), hook_group(later)],
+    )
+    policy = _build_policy(tmp_path, tmp_path / "t.jsonl")
+
+    result = policy.pre_tool_use("Bash", {"command": "ls"})
+    assert result.allowed is False
+    assert first_evidence.exists()
+    assert not second_evidence.exists()
+
+
+@pytest.mark.parametrize(
+    "matcher, tool_name, should_run",
+    [
+        ("Bash", "Bash", True),
+        ("Ba.h", "Bash", True),
+        ("Bash", "Read", False),
+        ("*", "Read", True),
+        (None, "Read", True),
+        ("[unclosed", "Bash", False),
+    ],
+)
+def test_matcher_semantics(keyless_home, tmp_path, matcher, tool_name, should_run):
+    """The matcher is a full regex over the TRANSLATED name; invalid regex skips."""
+    evidence = tmp_path / "ran.seen"
+    command = write_hook_script(tmp_path, "probe", exit_code=0, evidence=evidence)
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(command, matcher=matcher)],
+    )
+    policy = _build_policy(tmp_path, tmp_path / "t.jsonl")
+
+    policy.pre_tool_use(tool_name, {"command": "ls"})
+    assert evidence.exists() is should_run
+
+
+def test_hook_sees_translated_payload(keyless_home, tmp_path):
+    """The hook's stdin payload carries the translated name and superset input."""
+    evidence = tmp_path / "payload.json"
+    command = write_hook_script(tmp_path, "see", exit_code=0, evidence=evidence)
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json", pre=[hook_group(command)]
+    )
+    policy = _build_policy(tmp_path, tmp_path / "t.jsonl")
+
+    name, payload = translate_tool("read_file", {"path": "notes.txt", "offset": 3})
+    policy.pre_tool_use(name, payload)
+
+    seen = json.loads(evidence.read_text(encoding="utf-8"))
+    assert seen["hook_event_name"] == "PreToolUse"
+    assert seen["tool_name"] == "Read"
+    assert seen["tool_input"]["file_path"] == "notes.txt"
+    assert seen["tool_input"]["path"] == "notes.txt"
+
+
+def test_apply_patch_per_file_synthesis(keyless_home, tmp_path):
+    """apply_patch synthesizes one Edit PreToolUse event per file, raw segment intact."""
+    evidence_dir = tmp_path / "seen"
+    evidence_dir.mkdir()
+    # Each invocation appends its payload as one JSON line.
+    log = evidence_dir / "events.jsonl"
+    command = f"bash -c 'cat >> {json.dumps(str(log))}; printf \"\\n\" >> {json.dumps(str(log))}'"
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(command, matcher="Edit")],
+    )
+    policy = _build_policy(tmp_path, tmp_path / "t.jsonl")
+
+    result = policy.pre_tool_use_patch(MODIFY_PATCH)
+    assert result.allowed is True
+    events = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert len(events) == 2  # one Edit event per file the patch touches
+    file_paths = [event["tool_input"]["file_path"] for event in events]
+    assert file_paths == ["hello.py", "added.txt"]
+    # The raw segment is re-sliced by file boundary — the second file's hunk bytes
+    # ride with its own event, never the whole patch.
+    assert "brand new" in events[1]["tool_input"]["patch"]
+    assert "brand new" not in events[0]["tool_input"]["patch"]
+
+
+def test_apply_patch_single_deny_vetoes(job_env, keyless_home):
+    """Any single per-file PreToolUse deny vetoes the WHOLE patch (nothing applied)."""
+    command = write_hook_script(keyless_home / "hookdir", "veto", exit_code=2, stderr="no edits")
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(command, matcher="Edit")],
+    )
+    env = job_env(tool_script(("apply_patch", {"patch": MODIFY_PATCH})))
+    (env.workspace / "hello.py").write_text('def hello():\n    return "hello"\n', encoding="utf-8")
+
+    assert env.run() == 0
+
+    # The veto landed before ApplyPatch.execute: hello.py is untouched and added.txt
+    # was never created.
+    assert (env.workspace / "hello.py").read_text(encoding="utf-8") == 'def hello():\n    return "hello"\n'
+    assert "added.txt" not in env.tree()
+    assert env.observations()[0]["is_error"] is True
+
+
+def test_disable_all_hooks_silences_the_job(keyless_home, tmp_path):
+    """disableAllHooks in any Claude source drops every Policy hook for the Job."""
+    evidence = tmp_path / "ran.seen"
+    command = write_hook_script(tmp_path, "probe", exit_code=2, stderr="deny", evidence=evidence)
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(command)],
+        disable_all=True,
+    )
+    policy = _build_policy(tmp_path, tmp_path / "t.jsonl")
+
+    assert policy.pre_tool_use("Bash", {"command": "ls"}).allowed is True
+    assert not evidence.exists()

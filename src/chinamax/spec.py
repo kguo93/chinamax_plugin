@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from chinamax import ChinamaxError, profiles
+from chinamax.host import Host
 
 REQUIRED_FIELDS = ("workspace", "profile", "prompt", "transcript_path", "result_path")
 OPTIONAL_FIELDS = (
@@ -30,6 +31,8 @@ OPTIONAL_FIELDS = (
     "ladder_attempts",
     "backoff_base_s",
     "backoff_cap_s",
+    "host",
+    "mcp",
 )
 _ABSOLUTE_PATH_FIELDS = ("workspace", "transcript_path", "result_path")
 
@@ -60,6 +63,13 @@ class JobSpec:
     ladder_attempts: int | None = None
     backoff_base_s: float | None = None
     backoff_cap_s: float | None = None
+    #: The Job's Host (``claude``/``codex``), keying its Policy hook, Memory and
+    #: MCP discovery. Optional in the public spec format: direct ``exec`` specs
+    #: omit it, and ``run_exec`` injects the process-bound Host's value.
+    host: str | None = None
+    #: The RESOLVED Worker-MCP server-name selection pinned to the Thread: None
+    #: (all discovered), ``[]`` (none), or an explicit name list.
+    mcp: list[str] | None = None
 
 
 def load_spec(path: str | Path) -> JobSpec:
@@ -147,6 +157,25 @@ def parse_spec(data: object) -> JobSpec:
     if model is not None and (not isinstance(model, str) or not model):
         raise ChinamaxError("job spec field 'model' must be a non-empty string")
 
+    host = data.get("host")
+    if host is not None:
+        if not isinstance(host, str):
+            raise ChinamaxError("job spec field 'host' must be a string")
+        try:
+            Host(host)
+        except ValueError as exc:
+            raise ChinamaxError(
+                "job spec field 'host' must be 'claude' or 'codex', not "
+                f"{host!r}"
+            ) from exc
+    mcp = data.get("mcp")
+    if mcp is not None and (
+        not isinstance(mcp, list) or not all(isinstance(name, str) and name for name in mcp)
+    ):
+        raise ChinamaxError(
+            "job spec field 'mcp' must be an array of non-empty server-name strings"
+        )
+
     bash_timeout_s = data.get("bash_timeout_s")
     return JobSpec(
         workspace=workspace,
@@ -158,6 +187,8 @@ def parse_spec(data: object) -> JobSpec:
         model=model,
         job_id=job_id,
         seed_transcript=seed_transcript,
+        host=host,
+        mcp=list(mcp) if mcp is not None else None,
         bash_timeout_s=(
             DEFAULT_BASH_TIMEOUT_S
             if bash_timeout_s is None

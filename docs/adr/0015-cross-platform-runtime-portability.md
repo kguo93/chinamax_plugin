@@ -150,6 +150,25 @@ Codex handler has a `commandWindows` that enters Git Bash through
 whose bash payload converts native drive/UNC roots with `cygpath` and quotes the
 plugin root (see the 2026-08-11 amendment above).
 
+**Amended 2026-08-15 (0.5.0).** Worker Host-policy enforcement (ADR 0016) adds a
+NEW, distinct class of Windows hook: operator-authored **Policy hooks** sourced
+from settings surfaces (Claude settings files; Codex `config.toml` hook tables),
+run by the worker loop — separate from the plugin-registered lifecycle hooks the
+paragraphs above govern. The original decision recorded, for those plugin hooks:
+"Hooks use Codex's Windows-specific command field to enter `bash`; Claude's
+shell-form hooks continue through Git Bash." For worker Policy hooks this is
+narrowed: a Codex Policy hook's `commandWindows` string is a **cmd.exe command
+line run via cmd.exe** (repo precedent: `hooks/codex-hooks.json:11`, `cmd /d /c …`)
+and is NEVER routed through the Git Bash resolver — the operator authored a cmd.exe
+line and the worker honors it as one. Only a bash-shaped `command` string resolves
+bash, via the shared `state.windows_tool_path("bash")` (the same resolver the
+Runtime bash tool and the setup probe use). A Windows bash-resolution failure logs
+its cause distinctly from a generic hook crash. Timeout-kill uses the existing
+tree-kill seams (`state.terminate_tree`/`_terminate_tree_windows`); POSIX uses
+process-group spawn/kill like `run_bash`. Validation stays mocked on Linux, per the
+Validation scope below. This narrows, it does not reverse, the plugin-registered
+Codex hooks' Git-Bash-launcher behavior, which is unchanged.
+
 ### Validation scope
 
 The full Linux suite is native regression evidence. macOS and Windows process,

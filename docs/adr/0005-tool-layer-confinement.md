@@ -20,3 +20,16 @@ install-root probe first, then `PATH`) instead of a bare `bash` that assumed
 `PATH`. Confinement itself is unchanged — still cwd-pinned `bash -c` with the
 denylist and per-command timeouts on every Platform; only *which* `bash.exe`
 launches changed. See ADR 0015's 2026-08-14 amendment.
+
+**Amended 2026-08-15 (0.5.0).** Worker Host-policy enforcement (ADR 0016) adds a
+SECOND gate that composes AHEAD of this tool-layer confinement without weakening
+it. A PreToolUse Policy hook may DENY a tool call before it reaches dispatch, but
+a Policy-hook ALLOW can never LIFT confinement: the denylist, the read-only
+write-shaped refusal, and realpath containment remain the floor a hook allow
+cannot raise. Hook commands themselves are operator-authored host policy and sit
+OUTSIDE the tool boundary — they are NOT lexed/confined by this module and run
+even for `--read-only` Jobs. Separately, **Worker MCP** tools stay advertised and
+callable in read-only Jobs (outside the tool-layer posture, the same class as the
+bash-redirection network-egress residual documented above), and MCP server
+processes run UNSANDBOXED with full host filesystem/network capability regardless
+of Job posture — distinct from "tool omitted from the model". See ADR 0016.

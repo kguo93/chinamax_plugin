@@ -20,6 +20,12 @@ CASES = {
     # An explicit model must be a non-empty string; the provider judges validity.
     "empty_model": ({"model": ""}, "model"),
     "wrong_typed_model": ({"model": 3}, "model"),
+    # host must be a known Host enum value; mcp must be an array of names.
+    "bad_host": ({"host": "bogus"}, "host"),
+    "wrong_typed_host": ({"host": 5}, "host"),
+    "wrong_typed_mcp": ({"mcp": "server"}, "mcp"),
+    "bad_mcp_element": ({"mcp": [1]}, "mcp"),
+    "empty_mcp_element": ({"mcp": [""]}, "mcp"),
 }
 
 
@@ -43,3 +49,18 @@ def test_model_field_optional_and_carried(job_env):
 
     assert parse_spec(env.spec()).model is None
     assert parse_spec(env.spec(model="custom-m")).model == "custom-m"
+
+
+def test_host_and_mcp_fields_optional_and_carried(job_env):
+    """host/mcp are optional public spec fields, carried when present."""
+    env = job_env(bash_then_report_script())
+
+    default = parse_spec(env.spec())
+    assert default.host is None
+    assert default.mcp is None
+
+    carried = parse_spec(env.spec(host="codex", mcp=["a", "b"]))
+    assert carried.host == "codex"
+    assert carried.mcp == ["a", "b"]
+    # An explicit empty list is meaningful (no servers) and is preserved.
+    assert parse_spec(env.spec(mcp=[])).mcp == []

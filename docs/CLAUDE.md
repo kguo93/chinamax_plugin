@@ -19,7 +19,7 @@ reconcile by amending the ADR or fixing the code — never by trusting stale pro
 ## ADR formatting rules
 
 - **Filename**: `NNNN-kebab-slug.md`, four-digit zero-padded, sequential, no gaps. The next
-number is the highest in `adr/` plus one (currently → `0015`).
+number is the highest in `adr/` plus one (currently → `0017`).
 - **Heading**: a bare prose title, e.g. `# One Bridge Agent, providers as Profiles, no
   default` (match the existing ADRs — no leading number).
 - **Amend in place; never fork a decision** (root `CLAUDE.md`): when a later decision changes
@@ -32,7 +32,7 @@ number is the highest in `adr/` plus one (currently → `0015`).
 ## Read routing — which ADR to read for which purpose
 
 Match your change to a row and read that ADR (plus `../CONTEXT.md`) **before** editing. The
-fourteen ADRs group into six themes.
+sixteen ADRs group into seven themes.
 
 ### 1 · Runtime & provider wire
 | If your change / question touches… | Read | Governs |
@@ -72,6 +72,11 @@ fourteen ADRs group into six themes.
 | Host-neutral Runtime seams and thin Claude/Codex adapters | **0013** | `src/chinamax/host.py`, `src/chinamax/__main__.py`, `src/chinamax/codex.py` |
 | Codex yolo permission boundary and detached lifecycle backstop | **0014** | `src/chinamax/codex.py`, `src/chinamax/hooks/codex_pretool.py`, `scripts/codex_pretool_hook`, `skills/chinamax-*` |
 
+### 7 · Worker Host-policy enforcement
+| If your change / question touches… | Read | Governs |
+|---|---|---|
+| Worker-side Policy hooks (settings-file PreToolUse/PostToolUse/Stop), Memory injection (CLAUDE.md/AGENTS.md discovery + import + injection block), or Worker MCP (config discovery, stdio lifecycle, schema snapshot, dispatch routing) | **0016** | `src/chinamax/policy.py`, `src/chinamax/loop.py`, `src/chinamax/spec.py` (`host`/`mcp`), `src/chinamax/state.py` (`new_record`/`create_resume` `mcp`), `src/chinamax/__main__.py` (`--mcp`, host threading), `agents/chinamax.md`, `commands/task.md`, `skills/chinamax-bridge/SKILL.md` |
+
 ## Edit routing — which ADR to amend when a decision changes
 
 Cross-platform process, lock, native-root, dependency-marker, Git Bash, or
@@ -82,7 +87,14 @@ As of 0.4.5, Linux SETUP gains a `bash`+`miniconda` prerequisite gate and a
 `prerequisites`/`prerequisite_fixes` report (ADR 0009/0015 amendments); Linux
 runtime dependency, process, and import behavior stays the preserved baseline.
 
-- **A change inside one of the six themes** → amend that theme's ADR in place (dated
+Worker Host-policy changes (Policy hooks, Memory injection, Worker MCP — anything
+in `src/chinamax/policy.py` or its loop/spec/state/CLI wiring) amend **0016**; a
+change that also touches the wire prefix, the no-caps/Stop stance, tool-layer
+confinement, the `mcp` dependency, the Host seam, or cross-platform hook/MCP
+process execution cross-references 0001 / 0002 / 0005 / 0009 / 0013 / 0015
+respectively (those already carry 0.5.0 amendments pointing back to 0016).
+
+- **A change inside one of the seven themes** → amend that theme's ADR in place (dated
   `**Amended <date>**` paragraph), per the ADR formatting rules above.
 - **A reversal** (the new decision contradicts the old) → quote the original, then override,
   in the SAME file; `git mv` the slug if it now lies. (Precedent: ADR 0004.)

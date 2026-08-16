@@ -21,5 +21,6 @@ classify each message from main; send exactly one `SendMessage(to='main')`; emit
 no progress messages; and choose STEER when unsure between cancel and steer.
 The dispatch maps the operator's Profile model `model=<string>` to
 `--model='<string>'` and rejects **Profile model** values containing spaces or
-quote characters. REMEMBER THE Profile model string DOES NOT CONTAIN THE STRING
+quote characters. It maps the optional Worker-MCP `mcp=<none|comma-list>` to
+`--mcp <value>`, omitting `--mcp` when no `mcp=` is given. REMEMBER THE Profile model string DOES NOT CONTAIN THE STRING
 "haiku" or "luna" or "terra" THAT IS THE Bridge model NEVER EVER CONFUSE THE TWO OR YOU WILL DIE

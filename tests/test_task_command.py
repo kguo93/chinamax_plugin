@@ -105,3 +105,12 @@ def test_profile_model_override_present_in_contract_copies():
         assert "spaces or quote characters" in _normalized(text)
         assert "Bridge model" in text
         assert "Profile model" in text
+
+
+def test_mcp_selection_token_present_in_contract_copies():
+    """All three initial-dispatch copies map the Worker-MCP `mcp=` token to `--mcp`."""
+    for text in (COMMAND, AGENT, CONTRACT):
+        assert "mcp=" in text
+        assert "--mcp" in text
+    # The command's seam mapping lists the flag alongside the others.
+    assert "--mcp <value>" in COMMAND

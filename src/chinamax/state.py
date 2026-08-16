@@ -1824,6 +1824,7 @@ def new_record(
     log_file: Path,
     bash_timeout_s: float | None = None,
     model: str | None = None,
+    mcp: list[str] | None = None,
     originating_session: str | None = None,
     bridge_name: str | None = None,
     host: str | Host | None = None,
@@ -1862,6 +1863,11 @@ def new_record(
         request["bashTimeoutSec"] = bash_timeout_s
     if model is not None:
         request["model"] = model
+    if mcp is not None:
+        # The RESOLVED Worker-MCP name list, pinned to the Thread like `model`, so
+        # a resume replays exact names and a server configured later never appears
+        # mid-Thread.
+        request["mcp"] = list(mcp)
     selected_host = str(host or current_host().host.value)
     record = dict(RECORD_DEFAULTS)
     record.update(
@@ -2325,6 +2331,7 @@ class JobStore:
                 log_file=self.log_path(job_id),
                 bash_timeout_s=request.get("bashTimeoutSec"),
                 model=request.get("model"),
+                mcp=request.get("mcp"),
                 originating_session=originating_session,
                 bridge_name=source.get("bridgeName"),
                 host=source.get("host") or self.host_context.host.value,

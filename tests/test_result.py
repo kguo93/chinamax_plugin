@@ -105,3 +105,45 @@ def test_result_without_payload_still_exits_zero(dispatch_env, capsys):
     rendered = capsys.readouterr().out
     assert state.STATUS_INTERRUPTED in rendered
     assert f"resume {interrupted}" in rendered
+
+
+# ── Stop Policy hook (ADR 0016) ────────────────────────────────────────────────
+
+from conftest import hook_group, report_turn, write_claude_settings
+
+#: A Stop hook that BLOCKS the first report_result (stop_hook_active false) and
+#: ALLOWS a later one (stop_hook_active true), recording the flag it saw.
+_STOP_HOOK = """#!/usr/bin/env bash
+input=$(cat)
+printf '%s\\n' "$(printf '%s' "$input" | grep -o '\"stop_hook_active\":[a-z]*' | head -1)" >> "{evidence}"
+if printf '%s' "$input" | grep -q '\"stop_hook_active\":true'; then
+  exit 0
+fi
+printf 'blocked: finish once more' 1>&2
+exit 2
+"""
+
+
+def test_stop_hook_blocks_then_releases(job_env, keyless_home, tmp_path):
+    """A Stop hook rejects the first report_result; the second (stop_hook_active) completes."""
+    evidence = tmp_path / "stop.seen"
+    script = tmp_path / "stop_hook.sh"
+    script.write_text(_STOP_HOOK.format(evidence=evidence), encoding="utf-8")
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        stop=[hook_group(f"bash {script}")],
+    )
+    env = job_env([report_turn(), report_turn()])
+
+    assert env.run() == 0
+
+    # The Job completed on the SECOND report attempt.
+    assert env.result() == REPORT_PAYLOAD
+    assert len(env.requests) == 2
+    # The first report_result was rejected with the hook's reason.
+    observations = env.observations()
+    assert observations[0]["is_error"] is True
+    assert "blocked: finish once more" in observations[0]["content"]
+    # The Stop hook saw stop_hook_active flip false → true across the two firings.
+    seen = [line for line in evidence.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert seen == ['"stop_hook_active":false', '"stop_hook_active":true']

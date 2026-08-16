@@ -20,6 +20,7 @@ import anthropic
 from chinamax import state
 from chinamax.confinement import ToolContext
 from chinamax.liveness import LoopConfig, emit_event, stream_with_ladder
+from chinamax.policy import Policy, translate_tool
 from chinamax.profiles import Profile
 from chinamax.spec import JobSpec
 from chinamax.tools import REPORT_RESULT, Registry, build_registry
@@ -128,21 +129,41 @@ def run_loop(
     # rather than delivered twice — and the worker's transcript seeding is what
     # keeps a skipped-but-not-yet-consumed steer at exactly one delivery.
     consumed = read_steer_ids(spec.transcript_path) if steer_dir is not None else set()
+    # Discover the Job's Host policy ONCE (hooks/Memory/MCP config — no subprocess,
+    # no server spawn yet). The already-injected Memory set is derived ONCE from
+    # the replayed transcript, so lazy injection stays exactly-once across resumes.
+    policy = Policy.build(spec, reporter=reporter)
+    injected = policy.derive_injected(messages)
     _report(
         reporter,
         PHASE_STARTING,
         f"job started on profile {profile.name} in {spec.workspace}"
         + (f", seeded with {len(messages)} prior turn(s)" if messages else ""),
     )
-    if not messages:
-        _append(transcript, messages, "user", [{"type": "text", "text": spec.prompt}])
     # A seeded history always ENDS in an unsent user turn — the resume
     # normalization folds the follow-up into it — so the first request sends
     # that turn without re-appending it to the transcript, and the spec's prompt
     # is never appended as a second user message. Appending both would deliver
     # the follow-up twice.
     turn_number = 0
+    stop_hook_active = False
     try:
+        # Spawn stdio MCP servers INSIDE the try, so the same finally that hosts
+        # the undelivered-steer sweep tears them down even when startup fails
+        # midway. The tools array is built ONCE and reused every turn — same
+        # object → byte-stable prefix (ADR 0001).
+        policy.start_mcp()
+        tools = [*registry.schemas, *policy.mcp_schemas()]
+        if not messages:
+            # Fresh Job: Memory injection is PREPENDED to the first user turn (never
+            # the system prompt), so it rides the transcript like any message and
+            # is replay/resume-safe. Freshness is empty seeded history, not a flag.
+            first_turn: list[dict] = []
+            memory_block = policy.first_turn_memory_block(injected)
+            if memory_block:
+                first_turn.append({"type": "text", "text": memory_block})
+            first_turn.append({"type": "text", "text": spec.prompt})
+            _append(transcript, messages, "user", first_turn)
         while True:
             # Drain at the top of EVERY iteration, including the first, so a steer
             # written before the worker started lands before the first API call.
@@ -150,7 +171,7 @@ def run_loop(
             turn_number += 1
             _report(reporter, PHASE_CALLING_MODEL, f"turn {turn_number}: calling {profile.model}")
             content, usage = _stream_turn(
-                client, profile, spec, registry, messages, config, transcript
+                client, profile, spec, registry, messages, config, transcript, tools
             )
             _append(transcript, messages, "assistant", content)
             _emit_usage(reporter, turn_number, usage)
@@ -168,7 +189,12 @@ def run_loop(
                 _append(transcript, messages, "user", [{"type": "text", "text": NUDGE}])
                 continue
 
-            results, payload = _run_tool_uses(tool_uses, registry, context, reporter)
+            results, payload, stop_fired = _run_tool_uses(
+                tool_uses, registry, context, reporter, policy, injected, stop_hook_active
+            )
+            # Subsequent Stop firings carry stop_hook_active: true (ADR 0016).
+            if stop_fired:
+                stop_hook_active = True
             if payload is not None:
                 # Siblings of the terminal report_result are still answered in the
                 # durable record, even though no further request is sent.
@@ -178,8 +204,10 @@ def run_loop(
             _append(transcript, messages, "user", results)
     finally:
         # At the terminal transition, log any steer that lost the accept-versus-
-        # terminate race as undelivered — an auditable trace, no delivery change.
+        # terminate race as undelivered — an auditable trace, no delivery change —
+        # and tear down every MCP server, even on a startup failure.
         _sweep_undelivered(steer_dir, reporter)
+        policy.close()
 
 
 def _seed_history(spec: JobSpec) -> list[dict]:
@@ -313,6 +341,7 @@ def _stream_turn(
     messages: list[dict],
     config: LoopConfig,
     transcript: Transcript,
+    tools: list[dict],
 ) -> tuple[list[dict], dict | None]:
     """Stream one assistant turn through the supervision ladder.
 
@@ -321,13 +350,16 @@ def _stream_turn(
     nothing here — and nothing to the canonical history the caller appends to.
     The usage returned is that ``message_stop`` message's, so a retried attempt
     contributes no usage and exactly-once accounting is automatic.
+
+    ``tools`` is the native + Worker-MCP tools array, built ONCE at Job start and
+    reused every turn (same object → byte-stable prefix, ADR 0001).
     """
     message = stream_with_ladder(
         client,
         model=profile.model,
         max_tokens=profile.max_tokens,
         system=_system_prompt(spec),
-        tools=registry.schemas,
+        tools=tools,
         messages=messages,
         request_extras=profile.request_extras,
         config=config,
@@ -337,30 +369,51 @@ def _stream_turn(
     return content, _usage_to_dict(message)
 
 
+#: Answers a sibling report_result after the first validating one, so no
+#: unanswered tool_use goes into the next request (the provider-400 trap).
+_SIBLING_REPORT = (
+    "[chinamax] Ignored: this job already terminated on the first report_result of "
+    "this turn. Only the first report_result ends the job."
+)
+
+
 def _run_tool_uses(
     tool_uses: list[dict],
     registry: Registry,
     context: ToolContext,
-    reporter: Callable[[str, str], None] | None = None,
-) -> tuple[list[dict], dict | None]:
-    """Execute every tool_use block in arrival order.
+    reporter: Callable[[str, str], None] | None,
+    policy: Policy,
+    injected: set[str],
+    stop_hook_active: bool,
+) -> tuple[list[dict], dict | None, bool]:
+    """Execute every tool_use block in arrival order, under the Host policy.
 
-    Every call goes through the registry, so a name this Job does not carry —
-    a write tool in a read-only Job, or one that was never registered — comes
-    back as an error observation instead of executing.
+    The per-tool-call order is PreToolUse → (deny ends it: error tool_result, no
+    dispatch) → dispatch → PostToolUse (successful dispatches only) → lazy Memory
+    injection (successful results only). PreToolUse-allow ``additionalContext``
+    and PostToolUse context ride as text blocks after that tool's tool_result in
+    the same user turn. An advertised MCP name routes to its server BEFORE the
+    Registry; every native name still goes through the Registry (unknown names
+    already come back as error tool_results). ``report_result`` is the Stop gate.
 
     Args:
         tool_uses: The turn's tool_use blocks.
         registry: The Job's posture-filtered registry.
         context: The Job's tool context.
         reporter: The progress reporter, called around each execution.
+        policy: The Job's Host policy (hooks, Memory, MCP).
+        injected: The already-injected Memory-file path set, updated in place.
+        stop_hook_active: Whether a Stop hook has fired earlier in this Job.
 
     Returns:
-        The tool_result blocks to send back, and the terminal ``report_result``
-        payload when one arrived (the first block wins; later ones are ignored).
+        The tool_result (and context) blocks to send back, the terminal
+        ``report_result`` payload when one was accepted, and whether a Stop hook
+        fired this turn.
     """
     results: list[dict] = []
     payload: dict | None = None
+    stop_fired = False
+    terminal_seen = False
     for block in tool_uses:
         name = block.get("name")
         tool_use_id = block.get("id")
@@ -369,19 +422,53 @@ def _run_tool_uses(
         if name == REPORT_RESULT:
             problem = registry.validate(name, value)
             if problem is not None:
+                # A schema-invalid report_result is answered with an error before
+                # the terminal branch and fires no Stop.
                 results.append(_error_result(tool_use_id, problem))
-            elif payload is None:
-                # The terminal block is deliberately left unanswered: it IS the terminus.
-                payload = value
-                _report(
-                    reporter,
-                    PHASE_REPORTING,
-                    f"report_result: {_preview(value)}",
-                )
+                continue
+            if terminal_seen:
+                # The FIRST validating report_result of a turn is the terminus; a
+                # sibling is answered so no unanswered tool_use trips a 400.
+                results.append(_error_result(tool_use_id, _SIBLING_REPORT))
+                continue
+            terminal_seen = True
+            decision = policy.stop(stop_hook_active)
+            stop_fired = True
+            if decision.blocked:
+                # A block answers the report_result with the hook reason and
+                # continues the loop (never a bare user turn — a 400).
+                results.append(_error_result(tool_use_id, decision.reason))
+                _report(reporter, PHASE_REPORTING, "[policy] Stop hook blocked report_result")
+                continue
+            payload = value
+            _report(reporter, PHASE_REPORTING, f"report_result: {_preview(value)}")
+            continue
+
+        is_mcp = policy.is_mcp_tool(name)
+        if is_mcp:
+            hook_name, hook_input, kind = name, value if isinstance(value, dict) else {}, "mcp"
+            pre = policy.pre_tool_use(hook_name, hook_input)
+        elif name == "apply_patch":
+            hook_name, hook_input, kind = None, None, "patch"
+            patch_text = value.get("patch") if isinstance(value, dict) else None
+            pre = policy.pre_tool_use_patch(patch_text)
+        else:
+            hook_name, hook_input = translate_tool(name, value)
+            kind = "native"
+            pre = policy.pre_tool_use(hook_name, hook_input)
+
+        if not pre.allowed:
+            # PreToolUse deny → tool NOT executed, reason returned as the
+            # (error) tool_result so the worker sees actionable feedback.
+            _report(reporter, PHASE_RUNNING_TOOL, f"{name}: denied by PreToolUse hook")
+            results.append(_error_result(tool_use_id, pre.reason))
             continue
 
         _report(reporter, PHASE_RUNNING_TOOL, f"{name}: {_preview(value)}")
-        content, is_error = registry.dispatch(name, value, context)
+        if is_mcp:
+            content, is_error = policy.dispatch_mcp(name, value)
+        else:
+            content, is_error = registry.dispatch(name, value, context)
         _report(
             reporter,
             PHASE_RUNNING_TOOL,
@@ -393,7 +480,25 @@ def _run_tool_uses(
             results.append(
                 {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
             )
-    return results, payload
+        # PreToolUse allow-with-additionalContext rides after the tool_result.
+        for text in pre.contexts:
+            results.append({"type": "text", "text": text})
+        if is_error:
+            # PostToolUse fires only after a SUCCESSFUL dispatch; a denied or
+            # errored call is never a lazy-Memory touch.
+            continue
+
+        if kind == "patch":
+            post = policy.post_tool_use_patch(patch_text)
+        else:
+            post = policy.post_tool_use(hook_name, hook_input, content, False)
+        for text in post:
+            results.append({"type": "text", "text": text})
+        # Lazy Memory injection: bash and MCP tool paths are out of scope.
+        if not is_mcp:
+            for lazy in policy.lazy_blocks_for_path(name, value, injected):
+                results.append({"type": "text", "text": lazy})
+    return results, payload, stop_fired
 
 
 def _preview(value: object) -> str:

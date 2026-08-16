@@ -159,6 +159,32 @@ response. Steer, resume, and cancel semantics are unchanged across Hosts and
 Platforms. Prompt/stdin transport remains quoted and Bash-oriented, including
 paths with spaces.
 
+## Worker Host-policy enforcement (0.5.0)
+
+A worker Job now runs under the same Host operator policy a native session would,
+enforced by the shared Runtime (ADR 0016):
+
+- **Policy hooks** — your Host's settings-file hooks fire at the worker's
+  PreToolUse, PostToolUse, and Stop seams, with Claude-canonical tool names so
+  existing matchers/scripts bind. Sources are settings only (Claude:
+  managed/user/project/local `settings.json`; Codex: `config.toml` hook tables);
+  plugin-registered hooks never fire for workers. Edges are fail-open (a broken
+  hook weakens, never blocks, enforcement) and logged with a `[policy]` prefix.
+- **Memory injection** — `CLAUDE.md`/`AGENTS.md` (and their `@`-imports and
+  `CLAUDE.local.md` siblings) along the workspace's ancestor chain are injected as
+  a delimited block on a fresh Job's first turn, and lazily when a subdirectory is
+  first touched. The Claude memory store (`MEMORY.md`, `memory/`) is excluded.
+- **Worker MCP** — your Host's configured stdio MCP servers are connected per Job
+  and their tools advertised as `mcp__<server>__<tool>` alongside native tools.
+  Pin the selection per dispatch with `mcp=none` or `mcp=<comma-list>` (default:
+  all discovered); the choice rides with the Thread across resumes.
+
+MCP server processes and hook commands run UNSANDBOXED with full host capability,
+independent of a Job's `--read-only` posture — the same documented residual-risk
+class as bash network egress. This behavior is covered by the Linux suite; the
+new-platform (macOS/Windows) hook-process branches remain mocked, per the
+Verification scope below.
+
 ## Troubleshooting
 
 Run /chinamax:setup this command will run doctor.py and diagnose if any

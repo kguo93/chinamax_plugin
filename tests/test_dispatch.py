@@ -375,3 +375,114 @@ def test_reporter_failure_does_not_fail_the_job(job_env):
 
     assert execute_spec(parse_spec(env.spec()), reporter=exploding) == REPORT_PAYLOAD
     assert env.result() == REPORT_PAYLOAD
+
+
+# ── Worker MCP (ADR 0016) ──────────────────────────────────────────────────────
+
+import json as _json
+
+from conftest import (
+    mcp_server_entry,
+    mcp_server_script,
+    raw_tools_array,
+    write_mcp_config,
+)
+
+#: A command that resolves nowhere, so discovery still lists the server but the
+#: worker fails to connect — the fastest way to pin resolution and the
+#: proceed-without-it path without spawning a real server.
+_BAD_MCP = {"command": "chinamax-not-a-real-binary-zzz", "args": []}
+
+
+def _project_mcp(workspace, servers: dict) -> None:
+    """Write a project `.mcp.json` and root the workspace so it is the project.
+
+    The settings/MCP project root is the nearest `.claude`/`.git` ancestor; a
+    real workspace is a git repo, so mark the temp workspace as its own project
+    root rather than letting discovery ascend to a stray ancestor `.git`.
+    """
+    (workspace / ".claude").mkdir(exist_ok=True)
+    write_mcp_config(workspace / ".mcp.json", servers)
+
+
+def test_mcp_absent_pins_all_discovered(dispatch_env):
+    """No --mcp resolves to the discovered server-name list, pinned on the record."""
+    env = dispatch_env(bash_then_report_script())
+    _project_mcp(env.workspace, {"echo": _BAD_MCP})
+
+    code, job_id = env.dispatch()
+
+    assert code == 0
+    record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
+    # A server that fails to start is logged and the Job proceeds.
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    assert record["request"]["mcp"] == ["echo"]
+
+
+def test_mcp_none_pins_empty(dispatch_env):
+    """--mcp none pins an empty selection (no servers)."""
+    env = dispatch_env(bash_then_report_script())
+    _project_mcp(env.workspace, {"echo": _BAD_MCP})
+
+    code, job_id = env.dispatch("--mcp", "none")
+
+    assert code == 0
+    record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
+    assert record["request"]["mcp"] == []
+
+
+def test_mcp_explicit_list_pinned(dispatch_env):
+    """--mcp a,b pins exactly those names in order."""
+    env = dispatch_env(bash_then_report_script())
+
+    code, job_id = env.dispatch("--mcp", "echo,other")
+
+    assert code == 0
+    record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
+    assert record["request"]["mcp"] == ["echo", "other"]
+
+
+def test_mcp_tools_snapshot_and_round_trip(dispatch_env, tmp_path):
+    """A live stdio server's tools appear in the request, byte-stable, and route."""
+    script = mcp_server_script(tmp_path)
+    env = dispatch_env(
+        [
+            {"blocks": [{"type": "tool_use", "id": "toolu_mcp", "name": "mcp__echo__echo", "input": {"text": "hi"}}], "stop_reason": "tool_use"},
+            report_turn(),
+        ]
+    )
+    _project_mcp(env.workspace, {"echo": mcp_server_entry(script)})
+    provider = env.providers[PROFILE]
+
+    code, job_id = env.dispatch()
+
+    assert code == 0
+    record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+
+    # The MCP tool is advertised alongside the native roster.
+    names = [tool["name"] for tool in provider.requests[0]["body"]["tools"]]
+    assert "mcp__echo__echo" in names
+    # The tools array is byte-identical across turns (prefix-cache guarantee).
+    assert raw_tools_array(provider.requests[0]["raw_body"]) == raw_tools_array(
+        provider.requests[1]["raw_body"]
+    )
+    # The call routed to the server and its text result came back.
+    observations = tool_results(read_messages(env.store.transcript_path(job_id)))
+    assert any("echo: " in block["content"] for block in observations)
+
+
+def test_mcp_server_start_failure_proceeds(dispatch_env):
+    """A server that cannot start is skipped; the Job runs to completion."""
+    env = dispatch_env(bash_then_report_script())
+    _project_mcp(env.workspace, {"broken": _BAD_MCP})
+
+    code, job_id = env.dispatch()
+
+    assert code == 0
+    record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    # No MCP tool was advertised, but the native roster still went out.
+    provider = env.providers[PROFILE]
+    names = [tool["name"] for tool in provider.requests[0]["body"]["tools"]]
+    assert not any(name.startswith("mcp__") for name in names)

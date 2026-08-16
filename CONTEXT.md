@@ -90,3 +90,35 @@ gets installed. The Host agent executes them verbatim only after the operator
 approves; the Runtime never runs them itself. A command needing interactive
 privilege is marked for the operator to run in their own terminal.
 _Avoid_: calling one a "fix" in prose (that word is the doctor's own env/deps/key fixers; the serialized report key is still `prerequisite_fixes`), installer script
+
+**Policy hook**:
+An operator-authored hook sourced from the selected Host's settings surfaces
+(Claude: managed/user/project/local settings files; Codex: the CLI's own hook
+configuration) that the Runtime enforces at a worker's tool and stop seams —
+the worker obeys the same deny/allow/context decisions the Host harness would
+deliver. Plugin-registered hooks are never Policy hooks: workers do not load
+plugins, and plugin hooks are host-session machinery.
+_Avoid_: plugin hook (excluded by definition), "custom hook" (ambiguous)
+
+**Memory file**:
+A Host memory document (CLAUDE.md and its local/import companions on Claude;
+AGENTS.md on Codex) in the discovery chain for a workspace — the Host-global
+file, the workspace's ancestor chain, and lazily the subdirectories a worker
+touches. The operator's Claude memory store (MEMORY.md and its directory) is
+never a Memory file.
+_Avoid_: "CLAUDE.md reads" (the worker doesn't read them; they're injected)
+
+**Memory injection**:
+The delimited block that carries Memory-file content into a worker Thread:
+prepended to the first user turn when a fresh Job starts, or delivered
+alongside a tool result when a touched subdirectory's Memory file loads
+lazily. Resumed Jobs never re-inject; the Thread's existing injection stands.
+_Avoid_: system-prompt injection (it is never placed there), reminder
+
+**Worker MCP**:
+The per-Job connections to the Host's configured MCP servers whose tools are
+advertised to the worker alongside the native tool roster and governed by the
+same Policy hooks. A dispatch may narrow or disable the server set; the
+selection rides with the Thread.
+_Avoid_: conflating with the Host harness's own MCP connections (workers
+connect independently)

@@ -190,12 +190,16 @@ class FakeProvider:
             self._gates[index] = (reached, release)
         return reached, release
 
-    def take_turn(self, body: dict, headers: dict) -> dict | None:
+    def take_turn(self, body: dict, headers: dict, raw_body: bytes | None = None) -> dict | None:
         """Record a request and hand back the next scripted turn.
 
         Args:
             body: The decoded request body.
             headers: The request headers, lower-cased.
+            raw_body: The UNDECODED request bytes, retained so byte-identity
+                assertions (e.g. the MCP tools array being byte-stable across
+                turns) compare raw bytes rather than a parsed object that cannot
+                see key-order drift.
 
         Returns:
             The next scripted turn, or None once the script is exhausted.
@@ -205,6 +209,7 @@ class FakeProvider:
             self.requests.append(
                 {
                     "body": body,
+                    "raw_body": raw_body,
                     "headers": headers,
                     "transcript_snapshot": self._snapshot(),
                 }
@@ -251,9 +256,10 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_error_json(404, f"unexpected path {self.path}")
             return
         length = int(self.headers.get("Content-Length") or 0)
-        body = json.loads(self.rfile.read(length) or b"{}")
+        raw = self.rfile.read(length) or b"{}"
+        body = json.loads(raw)
         headers = {name.lower(): value for name, value in self.headers.items()}
-        scripted = self._provider.take_turn(body, headers)
+        scripted = self._provider.take_turn(body, headers, raw)
         if scripted is None:
             # A distinctive failure rather than a hang: the loop has no turn cap,
             # so a termination bug must fail in one turn instead of spinning.

@@ -27,6 +27,7 @@ from conftest import (
     report_turn,
     text_block,
     tool_results,
+    tool_script,
     tool_use_block,
     turn,
     write_overlay,
@@ -329,3 +330,93 @@ def test_system_prompt_shared_across_workspaces(tmp_path):
     assert a.endswith(WRITE_POSTURE)
     assert c.endswith(READ_ONLY_POSTURE)
     assert a[: -len(WRITE_POSTURE)] == c[: -len(READ_ONLY_POSTURE)]
+
+
+# ── Memory injection (ADR 0016) ────────────────────────────────────────────────
+
+import os as _os
+
+from chinamax.policy import _MEMORY_CLOSE, _MEMORY_OPEN
+from conftest import memory_block_paths
+
+
+def _first_user_text(request: dict) -> str:
+    """Return the concatenated text of a request's first user message."""
+    message = request["body"]["messages"][0]
+    return "".join(
+        block.get("text", "") for block in message["content"] if block.get("type") == "text"
+    )
+
+
+def _all_memory_paths(request: dict) -> list[str]:
+    """Every Memory-file path declared in any text block of a request's messages."""
+    paths: list[str] = []
+    for message in request["body"]["messages"]:
+        for block in message.get("content", []):
+            if isinstance(block, dict) and block.get("type") == "text":
+                paths.extend(memory_block_paths(block["text"]))
+    return paths
+
+
+def test_memory_injected_on_fresh_first_turn(job_env, keyless_home):
+    """A fresh Job's first user turn carries a delimited Memory block, prompt intact."""
+    (keyless_home / ".claude" / "CLAUDE.md").write_text("Global rule G1.", encoding="utf-8")
+    env = job_env(bash_then_report_script())
+    (env.workspace / "CLAUDE.md").write_text("Workspace rule W1.", encoding="utf-8")
+
+    assert env.run() == 0
+
+    text = _first_user_text(env.requests[0])
+    assert _MEMORY_OPEN in text and _MEMORY_CLOSE in text
+    paths = memory_block_paths(text)
+    assert _os.path.realpath(env.workspace / "CLAUDE.md") in paths
+    assert str((keyless_home / ".claude" / "CLAUDE.md").resolve()) in paths
+    # The prompt still rides the same turn, after the block.
+    assert env.prompt in text
+    # The Memory block is never placed in the system prompt (ADR 0001 cache).
+    assert _MEMORY_OPEN not in env.requests[0]["body"]["system"]
+
+
+def test_memory_excludes_claude_store(job_env, keyless_home):
+    """MEMORY.md under the Claude projects store is excluded, even via @import."""
+    store = keyless_home / ".claude" / "projects" / "slug"
+    store.mkdir(parents=True)
+    (store / "MEMORY.md").write_text("SECRET-MEMORY-STORE-CONTENT", encoding="utf-8")
+    env = job_env(bash_then_report_script())
+    (env.workspace / "CLAUDE.md").write_text(
+        f"Workspace rule.\n@{store / 'MEMORY.md'}\n", encoding="utf-8"
+    )
+
+    assert env.run() == 0
+
+    text = _first_user_text(env.requests[0])
+    assert "Workspace rule." in text
+    assert "SECRET-MEMORY-STORE-CONTENT" not in text
+    assert str((store / "MEMORY.md").resolve()) not in memory_block_paths(text)
+
+
+def test_lazy_nested_injection_on_first_touch(job_env, keyless_home):
+    """Touching a subdirectory file injects that subdir's Memory file with the result."""
+    env = job_env(tool_script(("read_file", {"path": "sub/notes.txt"})))
+    sub = env.workspace / "sub"
+    sub.mkdir()
+    (sub / "notes.txt").write_text("data\n", encoding="utf-8")
+    (sub / "CLAUDE.md").write_text("Subdir rule S1.", encoding="utf-8")
+
+    assert env.run() == 0
+
+    # No Memory on the first turn (no ancestor-chain file), but the lazy block for
+    # sub/CLAUDE.md rides the turn AFTER the successful read.
+    assert _MEMORY_OPEN not in _first_user_text(env.requests[0])
+    assert _os.path.realpath(sub / "CLAUDE.md") in _all_memory_paths(env.requests[1])
+
+
+def test_no_memory_when_no_files(job_env):
+    """With no Memory files anywhere, the first turn is the bare prompt (no markers)."""
+    env = job_env(bash_then_report_script())
+
+    assert env.run() == 0
+
+    text = _first_user_text(env.requests[0])
+    assert _MEMORY_OPEN not in text
+    assert text == env.prompt

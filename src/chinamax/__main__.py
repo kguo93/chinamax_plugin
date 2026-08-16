@@ -29,7 +29,13 @@ from dataclasses import replace
 from pathlib import Path
 
 from chinamax import ChinamaxError, doctor, profiles, provider, state
-from chinamax.host import HostResolutionError, current_host, resolve_host, set_current_host
+from chinamax.host import (
+    HostContext,
+    HostResolutionError,
+    current_host,
+    resolve_host,
+    set_current_host,
+)
 from chinamax.liveness import LoopConfig, RunFailure, build_config, emit_event
 from chinamax.loop import PHASE_REPORTING, PHASE_STARTING, run_loop
 from chinamax.spec import JobSpec, load_spec, parse_spec
@@ -119,8 +125,14 @@ def run_exec(spec_path: str | Path, config: LoopConfig | None = None) -> int:
     Raises:
         ChinamaxError: On any validation or configuration failure.
     """
+    spec = load_spec(spec_path)
+    if spec.host is None:
+        # `host` is optional in the public spec format; a direct `exec` spec omits
+        # it and the already-bound HostContext's value is injected here so the
+        # policy layer keys Memory/hook/MCP discovery on the right Host.
+        spec = replace(spec, host=current_host().host.value)
     try:
-        execute_spec(load_spec(spec_path), config=config)
+        execute_spec(spec, config=config)
     except RunFailure as failure:
         emit_event("failure", failure.payload)
         return EXIT_ERROR
@@ -146,6 +158,13 @@ def run_task(args: argparse.Namespace) -> int:
     if args.model is not None and not args.model:
         raise ChinamaxError("--model must be a non-empty string")
 
+    # The Worker-MCP selection is resolved to a CONCRETE name list here and pinned
+    # to the Thread, so a resume replays exact names and a server configured later
+    # never appears mid-Thread.
+    mcp_selection = _resolve_mcp_selection(
+        getattr(args, "mcp", None), store.workspace_root, current_host()
+    )
+
     job_id = store.reserve_id()
     store.create(
         state.new_record(
@@ -157,6 +176,7 @@ def run_task(args: argparse.Namespace) -> int:
             log_file=store.log_path(job_id),
             bash_timeout_s=args.bash_timeout_s,
             model=args.model,
+            mcp=mcp_selection,
             originating_session=state.session_id(),
             bridge_name=args.bridge_name,
             host=current_host().host.value,
@@ -182,6 +202,21 @@ def run_task_worker(job_id: str, state_dir: str) -> int:
         0 when the Job completed (or was already claimed), 1 when it failed.
     """
     store = state.JobStore(Path(state_dir))
+    # The claimed record's Host must EQUAL the process-bound Host: the worker
+    # refuses loudly rather than reading one Host's credentials (bound through the
+    # process boundary) under another Host's policy. Checked BEFORE the claim, so a
+    # mismatch leaves the record untouched.
+    bound_host = current_host().host.value
+    prospect = store.try_read(job_id)
+    if prospect is not None:
+        record_host = prospect.get("host")
+        if record_host is not None and record_host != bound_host:
+            print(
+                f"chinamax: {job_id} is host {record_host!r} but this worker is bound "
+                f"to {bound_host!r}; refusing the claim",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
     pid = os.getpid()
     claimed = store.claim(
         job_id,
@@ -220,7 +255,7 @@ def run_task_worker(job_id: str, state_dir: str) -> int:
     changes: dict = {}
     try:
         payload = execute_spec(
-            _worker_spec(job_id, claimed.get("request") or {}, transcript_path, result_path),
+            _worker_spec(job_id, claimed, transcript_path, result_path),
             reporter=reporter,
             steer_dir=store.steer_dir(job_id),
         )
@@ -688,6 +723,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="model string for this dispatch (default: the Profile's model); pinned to the Thread",
     )
     task_parser.add_argument(
+        "--mcp",
+        default=None,
+        metavar="SELECTION",
+        help=(
+            "Worker-MCP server selection: 'none' for no servers, a comma-separated "
+            "name list for only those, or omit for all discovered; pinned to the Thread"
+        ),
+    )
+    task_parser.add_argument(
         "prompt", nargs="*", help="the prompt; read from stdin when absent"
     )
 
@@ -935,17 +979,20 @@ def _spawn_worker(store: state.JobStore, job_id: str) -> int:
 
 
 def _worker_spec(
-    job_id: str, request: dict, transcript_path: Path, result_path: Path
+    job_id: str, record: dict, transcript_path: Path, result_path: Path
 ) -> JobSpec:
     """Rebuild runtime/01's frozen job spec from a Job record.
 
     It goes through `spec.py` validation on this path too, so a record left
     half-written by a crash fails with a named field rather than a confusing
-    crash inside the loop.
+    crash inside the loop. The Host comes from the record's TOP-LEVEL ``host``
+    (the ``request`` block does not carry it) and is validated against the Host
+    enum by `parse_spec`; the pinned Worker-MCP selection rides in the request
+    block like ``model``.
 
     Args:
         job_id: The Job (provenance only).
-        request: The record's ``request`` block.
+        record: The claimed Job record.
         transcript_path: The Job's Thread transcript.
         result_path: The Job's result artifact.
 
@@ -955,6 +1002,7 @@ def _worker_spec(
     Raises:
         ChinamaxError: Naming the offending field.
     """
+    request = record.get("request") or {}
     data: dict = {
         "workspace": request.get("workspaceRoot"),
         "profile": request.get("profile"),
@@ -963,6 +1011,10 @@ def _worker_spec(
         "transcript_path": str(transcript_path),
         "result_path": str(result_path),
         "job_id": job_id,
+        # The Host is the record's top-level field, not part of the request block.
+        "host": record.get("host"),
+        # The RESOLVED Worker-MCP name list, pinned on the request block.
+        "mcp": request.get("mcp"),
     }
     # `write` is carried separately: False is meaningful and must not be dropped.
     present = {key: value for key, value in data.items() if value is not None}
@@ -975,6 +1027,35 @@ def _worker_spec(
     if timeout is not None:
         present["bash_timeout_s"] = timeout
     return parse_spec(present)
+
+
+def _resolve_mcp_selection(
+    raw: str | None, workspace_root: Path, host_context: HostContext
+) -> list[str]:
+    """Resolve the ``--mcp`` selector to a CONCRETE, pinnable server-name list.
+
+    ``none`` → no servers; a comma-separated list → only those; absent → every
+    discovered server name (resolved now, so the pin is concrete and a resume
+    replays exact names).
+
+    Args:
+        raw: The ``--mcp`` value, or None when the flag was omitted.
+        workspace_root: The Job's resolved workspace root.
+        host_context: The dispatch's Host context.
+
+    Returns:
+        The resolved server-name list (possibly empty).
+    """
+    from chinamax import policy
+
+    if raw is not None and raw.strip().lower() == "none":
+        return []
+    if raw is not None and raw.strip():
+        return [name.strip() for name in raw.split(",") if name.strip()]
+    configs = policy.discover_mcp_configs(
+        Path(workspace_root), host_context, lambda _message: None
+    )
+    return [config.name for config in configs]
 
 
 def _fold_result(result_path: Path, payload: dict) -> dict:

@@ -338,3 +338,102 @@ def test_bare_resume_takes_the_latest_thread(dispatch_env, capsys):
     assert "Newer thread." in sent
     assert "Older thread." not in sent
     assert DEFAULT_RESUME_PROMPT in sent
+
+
+# ── Worker Host-policy across resume (ADR 0016) ────────────────────────────────
+
+import os as _os
+
+from chinamax.policy import _MEMORY_OPEN
+from conftest import memory_block_paths
+
+
+def test_mcp_selection_replayed_on_resume(dispatch_env, capsys):
+    """A Thread's pinned Worker-MCP selection is replayed verbatim on resume."""
+    env = dispatch_env(bash_then_report_script())
+    code, source = env.dispatch("--mcp", "foo,bar")
+    assert code == 0
+    store = env.store
+    workspace = str(env.workspace)
+    finished = wait_for_status(store, source, state.TERMINAL_STATUSES)
+    assert finished["status"] == state.STATUS_COMPLETED, finished.get("errorMessage")
+    assert finished["request"]["mcp"] == ["foo", "bar"]
+
+    env.bind([report_turn()])
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    resumed = capsys.readouterr().out.strip()
+    record = wait_for_status(store, resumed, state.TERMINAL_STATUSES)
+    assert record["status"] == state.STATUS_COMPLETED, record.get("errorMessage")
+    # The pin rides the Thread: a resume replays exactly the same names.
+    assert record["request"]["mcp"] == ["foo", "bar"]
+
+
+def test_memory_not_reinjected_on_resume(dispatch_env, capsys):
+    """A resumed Job never re-injects the Memory chain; the source block stands once."""
+    env = dispatch_env(bash_then_report_script())
+    (env.workspace / "CLAUDE.md").write_text("Workspace rule.", encoding="utf-8")
+    code, source = env.dispatch()
+    assert code == 0
+    store = env.store
+    workspace = str(env.workspace)
+    wait_for_status(store, source, state.TERMINAL_STATUSES)
+
+    resumed_provider = env.bind([report_turn()])
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    assert wait_for(lambda: bool(resumed_provider.requests))
+    resumed_id = capsys.readouterr().out.strip()
+    wait_for_status(store, resumed_id, state.TERMINAL_STATUSES)
+
+    # Exactly ONE injection block — the source's — is carried; none is minted fresh.
+    sent = json.dumps(resumed_provider.requests[0]["body"]["messages"])
+    assert sent.count(_MEMORY_OPEN) == 1
+
+
+def test_lazy_set_derived_from_replayed_transcript(dispatch_env, capsys):
+    """A subdir Memory file injected in the source is not re-injected on resume."""
+    from conftest import report_turn as _report_turn
+    from conftest import tool_use_block as _tool_use_block
+    from conftest import turn as _turn
+
+    env = dispatch_env(bash_then_report_script())
+    sub = env.workspace / "sub"
+    sub.mkdir()
+    (sub / "notes.txt").write_text("data\n", encoding="utf-8")
+    (sub / "CLAUDE.md").write_text("Subdir rule.", encoding="utf-8")
+    # Rebind the source provider to a script that touches sub first, then reports.
+    source_provider = env.bind(
+        [_turn([_tool_use_block("toolu_r", "read_file", {"path": "sub/notes.txt"})]), _report_turn()]
+    )
+    code, source = env.dispatch()
+    assert code == 0
+    store = env.store
+    workspace = str(env.workspace)
+    wait_for_status(store, source, state.TERMINAL_STATUSES)
+    sub_claude = _os.path.realpath(sub / "CLAUDE.md")
+    # The source injected the subdir Memory once, lazily, on the touch.
+    source_paths = [
+        path
+        for message in read_messages(store.transcript_path(source))
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "text"
+        for path in memory_block_paths(block["text"])
+    ]
+    assert source_paths.count(sub_claude) == 1
+
+    # The resumed Job touches sub again but must NOT re-inject (set seeded from
+    # the replayed transcript).
+    env.bind(
+        [_turn([_tool_use_block("toolu_r2", "read_file", {"path": "sub/notes.txt"})]), _report_turn()]
+    )
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    resumed_id = capsys.readouterr().out.strip()
+    wait_for_status(store, resumed_id, state.TERMINAL_STATUSES)
+    resumed_paths = [
+        path
+        for message in read_messages(store.transcript_path(resumed_id))
+        for block in message["content"]
+        if isinstance(block, dict) and block.get("type") == "text"
+        for path in memory_block_paths(block["text"])
+    ]
+    # Still exactly one — the block carried from the source, never a fresh one.
+    assert resumed_paths.count(sub_claude) == 1

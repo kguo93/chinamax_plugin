@@ -53,7 +53,7 @@ from chinamax.host import Host, HostContext, current_host
 #: The three dependencies the doctor grades, in report order. ``pytest`` is in
 #: runtime/01's optional ``[test]`` extra, which is why the create advice below
 #: installs with that extra: the doctor's own advice must satisfy its own check.
-DEPS = ("chinamax", "anthropic", "pytest", "tomlkit")
+DEPS = ("chinamax", "anthropic", "pytest", "tomlkit", "mcp")
 
 #: The env the plugin's Runtime runs in, and the interpreter the shims prefer.
 ENV_NAME = "chinamax"
@@ -74,7 +74,7 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
-PLUGIN_VERSION = "0.4.6"
+PLUGIN_VERSION = "0.5.0"
 MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
 
 # ── Git for Windows install tree ────────────────────────────────────────────

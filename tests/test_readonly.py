@@ -67,3 +67,46 @@ def test_read_bash_allowed(job_env):
     assert "f" in observations[0]["content"]
     assert observations[1]["content"].startswith("exit_code: ")
     assert "x" in observations[2]["content"]
+
+
+# ── Worker Host-policy in read-only Jobs (ADR 0016) ────────────────────────────
+
+from conftest import (
+    hook_group,
+    mcp_server_entry,
+    mcp_server_script,
+    write_claude_settings,
+    write_hook_script,
+    write_mcp_config,
+)
+
+
+def test_mcp_tools_advertised_in_read_only_job(job_env, tmp_path):
+    """Worker MCP tools stay advertised in a read-only Job (outside the posture)."""
+    script = mcp_server_script(tmp_path)
+    env = job_env(bash_script("ls"))
+    (env.workspace / ".claude").mkdir()
+    write_mcp_config(env.workspace / ".mcp.json", {"echo": mcp_server_entry(script)})
+
+    assert env.run(env.spec(write=False)) == 0
+
+    names = [tool["name"] for tool in env.requests[0]["body"]["tools"]]
+    assert "mcp__echo__echo" in names
+    # The write tools are still gone — the posture governs native tools only.
+    assert "write_file" not in names
+
+
+def test_hooks_fire_in_read_only_job(job_env, keyless_home):
+    """Policy hooks run even for a read-only Job (they are host policy, not tools)."""
+    command = write_hook_script(keyless_home / "hookdir", "deny", exit_code=2, stderr="hook says no")
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(command, matcher="Bash")],
+    )
+    env = job_env(bash_script("ls"))
+
+    assert env.run(env.spec(write=False)) == 0
+
+    observations = env.observations()
+    assert observations[0]["is_error"] is True
+    assert "hook says no" in observations[0]["content"]

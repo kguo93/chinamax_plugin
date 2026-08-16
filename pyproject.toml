@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "chinamax"
-version = "0.4.8"
+version = "0.5.0"
 description = "Shared dual-Host Runtime for the ChinamaX worker-model plugin"
 requires-python = ">=3.12"
 # httpx is already the SDK's transport, but the Runtime imports it directly —
@@ -14,6 +14,7 @@ dependencies = [
     "anthropic>=0.118,<1",
     "httpx>=0.25,<1",
     "tomlkit>=0.13,<1",
+    "mcp>=1.13,<3",
     "psutil>=7.2,<8; sys_platform == 'darwin' or sys_platform == 'win32'",
     "filelock>=3.20,<4; sys_platform == 'win32'",
 ]

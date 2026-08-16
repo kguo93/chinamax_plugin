@@ -76,7 +76,7 @@ def test_compiled_agent_has_codex_native_settings(tmp_path):
         encoding="utf-8",
     )
     compiled = compile_codex_agent(source)
-    assert "# chinamax-managed-plugin-version: 0.4.6" in compiled
+    assert "# chinamax-managed-plugin-version: 0.5.0" in compiled
     assert 'model = "gpt-5.6-terra"' in compiled
     assert 'model_reasoning_effort = "low"' in compiled
     assert "developer_instructions" in compiled
@@ -92,3 +92,81 @@ def test_codex_task_skill_preserves_read_only_posture():
     assert "Profile model" in text
     assert "never" in text.lower()  # the never-feed rule is present
     assert "Never copy it into the Runtime dispatch" in text
+
+
+# ── Codex Host Policy hooks and Memory (ADR 0016) ──────────────────────────────
+
+from chinamax import policy as _policy
+from chinamax.policy import HookSpec, Policy, discover_hooks, discover_memory
+from conftest import policy_spec, write_hook_script
+
+
+def test_codex_config_toml_hooks_run_all(keyless_home, tmp_path):
+    """Codex config.toml PreToolUse hooks all run, ignoring features/trusted_hash."""
+    codex_home = keyless_home / ".codex"
+    codex_home.mkdir()
+    evidence = tmp_path / "codex.seen"
+    command = write_hook_script(
+        tmp_path, "codex", exit_code=2, stderr="codex deny", evidence=evidence
+    )
+    config = (
+        "[features]\n"
+        "hooks = false\n\n"
+        "[hooks.state]\n"
+        'trusted_hash = "deadbeef"\n\n'
+        "[[hooks.PreToolUse]]\n"
+        f"command = {json.dumps(command)}\n"
+        'matcher = "Bash"\n'
+    )
+    (codex_home / "config.toml").write_text(config, encoding="utf-8")
+    ctx = HostContext.from_host(Host.CODEX)
+
+    hooks = discover_hooks(tmp_path, ctx, lambda message: None)
+    assert len(hooks.pre) == 1
+
+    policy = Policy.build(
+        policy_spec(tmp_path, tmp_path / "t.jsonl", host="codex"), host_context=ctx
+    )
+    result = policy.pre_tool_use("Bash", {"command": "ls"})
+    # It fires and denies despite features.hooks=false and a trusted_hash gate.
+    assert result.allowed is False
+    assert evidence.exists()
+
+
+def test_codex_commandwindows_preferred_on_windows(monkeypatch):
+    """On Windows a Codex commandWindows runs via cmd.exe, never the bash resolver."""
+    spec = HookSpec(
+        command="bash payload.sh",
+        command_windows="cmd /d /c echo hi",
+        matcher=None,
+        timeout_s=60.0,
+        source="codex",
+    )
+    monkeypatch.setattr(_policy.sys, "platform", "win32")
+    argv = _policy._hook_argv(spec, lambda message: None)
+    assert argv[0] == "cmd"
+    assert argv[-1] == "cmd /d /c echo hi"
+
+    # On POSIX the bash-shaped command wins.
+    monkeypatch.setattr(_policy.sys, "platform", "linux")
+    posix = _policy._hook_argv(spec, lambda message: None)
+    assert posix == ["bash", "-c", "bash payload.sh"]
+
+
+def test_codex_agents_md_chain_and_import(keyless_home, tmp_path):
+    """Codex Memory discovers the AGENTS.md chain and resolves its @CLAUDE.md stub."""
+    codex_home = keyless_home / ".codex"
+    codex_home.mkdir()
+    (codex_home / "AGENTS.md").write_text("Codex global rule.", encoding="utf-8")
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "CLAUDE.md").write_text("Imported CLAUDE stub content.", encoding="utf-8")
+    (workspace / "AGENTS.md").write_text("Workspace AGENTS rule.\n@CLAUDE.md\n", encoding="utf-8")
+    ctx = HostContext.from_host(Host.CODEX)
+
+    files = discover_memory(workspace, ctx, lambda message: None)
+    contents = "\n".join(memory.content for memory in files)
+    assert "Codex global rule." in contents
+    assert "Workspace AGENTS rule." in contents
+    # The AGENTS.md -> @CLAUDE.md stub pattern resolves on the Codex Host.
+    assert "Imported CLAUDE stub content." in contents

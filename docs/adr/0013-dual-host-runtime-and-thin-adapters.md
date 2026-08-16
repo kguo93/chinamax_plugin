@@ -18,3 +18,17 @@ Platform is orthogonal to Host: both Claude and Codex adapters operate on every
 supported Platform, while native data roots and lifecycle mechanisms follow the
 Platform. The shared Runtime remains the only implementation of Job and Thread
 semantics.
+
+**Amended 2026-08-15 (0.5.0).** Worker Host-policy enforcement (ADR 0016) puts
+Host-specific settings/Memory/MCP path knowledge into the shared Runtime, keyed on
+the Job's `host`, without adding a second resolution seam. `host.py` stays the ONLY
+Host-resolution seam: the loop never calls `resolve_host`. The Host flows as
+`JobSpec.host` (optional in the public spec format — direct `exec` specs omit it
+and `run_exec` injects the process-bound Host's value); on the worker path it comes
+from the claimed record's TOP-LEVEL `host` (never the `request` block) and, at
+worker start, MUST equal the process-bound HostContext's — a mismatch refuses the
+claim loudly rather than reading one Host's credentials under another Host's
+policy. `policy.py` derives its paths from that Host's `HostContext` (Claude:
+`~/.claude` settings/memory/`.mcp.json`/`~/.claude.json`; Codex: `~/.codex`
+`config.toml`/`AGENTS.md`). Claude and Codex paths stay disjoint; no cross-Host
+fallback is added.

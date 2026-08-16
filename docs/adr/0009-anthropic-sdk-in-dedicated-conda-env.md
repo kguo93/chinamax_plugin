@@ -7,6 +7,13 @@ The Runtime is Python 3.12 in a fresh conda env `chinamax` (never the shared py_
 
 **Amended 2026-08-01**: the `anthropic` floor in `pyproject.toml` rises `>=0.37` → `>=0.118`. The 2026-08-01 reasoning round depends on the `thinking` kwarg on `Messages.stream` and the `thinking_delta`/`signature_delta` stream accumulation, both absent at 0.37 and verified at 0.118.0; without the bump an environment whose already-installed older SDK satisfies `>=0.37` passes setup and then fails at dispatch. The env/SDK decision itself is unchanged. Cross-reference ADR 0001's 2026-08-01 reasoning amendment.
 
+**Amended 2026-08-15 (0.5.0).** The env gains one dependency: the official `mcp`
+Python SDK (`mcp>=1.13,<3` in `pyproject.toml`, matching the repo's `>=X,<Y`
+convention), added to `doctor.py`'s `DEPS` tuple so the setup probe grades it and
+`fix_missing` installs it. Worker MCP (ADR 0016) uses its asyncio stdio client
+(`mcp.client.stdio.stdio_client`, `ClientSession`, `StdioServerParameters`). The
+conda-env decision is unchanged. Cross-reference ADR 0016.
+
 ## Portability amendment (0.4.3)
 
 On macOS and Windows the doctor selects conditional runtime dependencies and
