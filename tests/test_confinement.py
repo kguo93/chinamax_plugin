@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from chinamax import ToolError
-from chinamax.confinement import resolve_in_workspace
+from chinamax import ToolError, confinement
+from chinamax.confinement import contained, resolve_in_workspace
 from conftest import bash_script, tool_script
 
 #: Every family the denylist promises, in each spelling that must be caught.
@@ -39,20 +40,16 @@ DENIED_COMMANDS = [
 ]
 
 
-def outside_file(workspace: Path, name: str = "target.txt") -> Path:
-    """Create a file next to the workspace, which nothing in the Job may touch."""
-    outside = workspace.parent / "outside"
-    outside.mkdir(exist_ok=True)
-    path = outside / name
+def outside_file(outside_root: Path, name: str = "target.txt") -> Path:
+    """Create a file OUTSIDE both roots, which nothing in the Job may touch."""
+    path = outside_root / name
     path.write_text("untouched\n", encoding="utf-8")
     return path
 
 
-def test_absolute_escape(job_env, tmp_path):
-    """An absolute path outside the workspace is refused and nothing is written."""
-    # The outside file is placed before the script is built, because the script
-    # has to name it: job_env's workspace is always tmp_path/"workspace".
-    target = outside_file(tmp_path / "workspace")
+def test_absolute_escape(job_env, outside_root):
+    """An absolute path outside both roots is refused and nothing is written."""
+    target = outside_file(outside_root)
     env = job_env(tool_script(("write_file", {"path": str(target), "content": "pwned"})))
 
     assert env.run() == 0
@@ -62,12 +59,17 @@ def test_absolute_escape(job_env, tmp_path):
     assert observation["is_error"] is True
     assert observation["tool_use_id"] == "toolu_0"
     assert "outside the workspace" in observation["content"]
+    assert "scratch root" in observation["content"]
 
 
-def test_dotdot_escape(job_env):
-    """A relative path climbing out with '..' is refused and nothing is written."""
-    env = job_env(tool_script(("write_file", {"path": "../outside/target.txt", "content": "pwned"})))
-    target = outside_file(env.workspace)
+def test_dotdot_escape(job_env, tmp_path, outside_root):
+    """A relative path climbing out with '..' to outside both roots is refused."""
+    target = outside_file(outside_root)
+    # The climb is computed against job_env's workspace (always tmp_path/"workspace"),
+    # so this stays a genuine relative-'..' escape even though the target now lives
+    # outside both roots rather than beside the workspace.
+    climb = os.path.relpath(target, tmp_path / "workspace")
+    env = job_env(tool_script(("write_file", {"path": climb, "content": "pwned"})))
 
     assert env.run() == 0
 
@@ -76,12 +78,13 @@ def test_dotdot_escape(job_env):
     assert observation["is_error"] is True
     assert observation["tool_use_id"] == "toolu_0"
     assert "outside the workspace" in observation["content"]
+    assert "scratch root" in observation["content"]
 
 
-def test_symlink_escape(job_env):
-    """A symlink whose TARGET is outside is refused: the link is followed, not trusted."""
+def test_symlink_escape(job_env, outside_root):
+    """A symlink whose TARGET is outside both roots is refused: the link is followed."""
     env = job_env(tool_script(("write_file", {"path": "link.txt", "content": "pwned"})))
-    target = outside_file(env.workspace)
+    target = outside_file(outside_root)
     (env.workspace / "link.txt").symlink_to(target)
 
     assert env.run() == 0
@@ -91,6 +94,7 @@ def test_symlink_escape(job_env):
     assert observation["is_error"] is True
     assert observation["tool_use_id"] == "toolu_0"
     assert "outside the workspace" in observation["content"]
+    assert "scratch root" in observation["content"]
 
 
 def test_inside_symlink_ok(job_env):
@@ -106,24 +110,73 @@ def test_inside_symlink_ok(job_env):
     assert observation["content"] == "inside\n"
 
 
-def test_sibling_prefix_rejected(tmp_path):
+def test_sibling_prefix_rejected(outside_root):
     """Workspace /…/ws rejects /…/ws-evil/f: containment is component-wise, not a prefix."""
-    workspace = tmp_path / "ws"
+    workspace = outside_root / "ws"
     workspace.mkdir()
-    sibling = tmp_path / "ws-evil"
+    sibling = outside_root / "ws-evil"
     sibling.mkdir()
     target = sibling / "f"
     target.write_text("evil\n", encoding="utf-8")
     root = Path(os.path.realpath(workspace))
 
-    # The trap this test exists for: a str.startswith check would accept it.
+    # The trap this test exists for: a str.startswith check would accept it. Both
+    # dirs live OUTSIDE both permitted roots — a workspace under the Scratch root
+    # would make the sibling accidentally permitted — and outside_root is already
+    # realpath'd, so root and target share the identical prefix on macOS too.
     assert str(target).startswith(str(root))
 
     with pytest.raises(ToolError, match="outside the workspace"):
         resolve_in_workspace(root, str(target))
 
 
-def test_recursive_symlink_not_followed(job_env):
+def test_scratch_root_file_accepted(tmp_path):
+    """resolve_in_workspace accepts a real file under the Scratch root (ADR 0005)."""
+    workspace = Path(os.path.realpath(tmp_path / "workspace"))
+    fd, created = tempfile.mkstemp(prefix="chinamax-test-", dir=confinement.SCRATCH_ROOT)
+    os.close(fd)
+    try:
+        assert resolve_in_workspace(workspace, created) == Path(os.path.realpath(created))
+    finally:
+        os.unlink(created)
+
+
+def test_scratch_root_traversal_contained(tmp_path):
+    """contained() re-validates a Scratch-root path as permitted (walk gate, D3)."""
+    workspace = Path(os.path.realpath(tmp_path / "workspace"))
+    fd, created = tempfile.mkstemp(prefix="chinamax-test-", dir=confinement.SCRATCH_ROOT)
+    os.close(fd)
+    try:
+        assert contained(workspace, created) == Path(os.path.realpath(created))
+    finally:
+        os.unlink(created)
+
+
+def test_workspace_symlink_into_scratch_allowed(tmp_path):
+    """A workspace symlink pointing at a Scratch-root file resolves and is permitted (D3)."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = Path(os.path.realpath(workspace))
+    fd, created = tempfile.mkstemp(prefix="chinamax-test-", dir=confinement.SCRATCH_ROOT)
+    os.close(fd)
+    (workspace / "into-scratch").symlink_to(created)
+    try:
+        assert resolve_in_workspace(root, "into-scratch") == Path(os.path.realpath(created))
+    finally:
+        os.unlink(created)
+
+
+def test_scratch_sibling_prefix_rejected(tmp_path):
+    """A Scratch-root sibling prefix is rejected: containment is component-wise on both roots."""
+    workspace = Path(os.path.realpath(tmp_path / "workspace"))
+    evil = f"{confinement.SCRATCH_ROOT}-evil/x"
+
+    # Never created: resolve_in_workspace raises before any existence check.
+    with pytest.raises(ToolError, match="outside the workspace"):
+        resolve_in_workspace(workspace, evil)
+
+
+def test_recursive_symlink_not_followed(job_env, outside_root):
     """grep, glob and list_dir all stop at a directory symlink pointing outside."""
     # The pattern and the outside file's contents are deliberately different
     # tokens: a "no matches for 'X'" observation echoes the pattern back, which
@@ -135,7 +188,7 @@ def test_recursive_symlink_not_followed(job_env):
             ("list_dir", {"path": "."}),
         )
     )
-    outside = env.workspace.parent / "outside"
+    outside = outside_root / "outside"
     outside.mkdir()
     (outside / "secret.txt").write_text("TOPSECRET payload line\n", encoding="utf-8")
     (env.workspace / "inside").mkdir()

@@ -1,4 +1,4 @@
-"""The search tools: grep and glob, both walking the workspace in Python.
+"""The search tools: grep and glob, both walking the workspace or the scratch root in Python.
 
 Traversal goes through `os.walk(followlinks=False)`, never `Path.rglob` or
 `glob.glob(recursive=True)`: on the pinned Python 3.12 those FOLLOW directory
@@ -7,9 +7,10 @@ the workspace would quietly hand the model the whole filesystem. Every entry the
 walk discovers is re-validated through `contained` before it is opened or
 reported, because a symlink out can also appear as a plain file entry.
 
-grep caps both the files it scans and the matches it returns, and says so in the
-observation: ADR 0002 gives the loop no wall-clock rescue, so a recursive search
-over a vendored tree must bound itself.
+grep and glob both cap the files they scan — grep also caps the matches it
+returns — and say so in the observation: ADR 0002 gives the loop no wall-clock
+rescue, so a recursive search over a vendored tree (or the shared scratch root)
+must bound itself.
 """
 
 from __future__ import annotations
@@ -25,11 +26,12 @@ from chinamax.confinement import ToolContext, contained, resolve_in_workspace
 
 MAX_GREP_FILES = 5_000
 MAX_GREP_MATCHES = 200
+MAX_GLOB_FILES = 5_000
 
 GREP_TOOL = {
     "name": "grep",
     "description": (
-        "Search the workspace recursively for a regular expression, returning "
+        "Search the workspace or the scratch root recursively for a regular expression, returning "
         "'path:line:text' hits. Set 'fixed' to true to search for the pattern "
         "literally, 'path' to search one subtree, and 'include' to filter file "
         "names by a glob such as '*.py'."
@@ -49,12 +51,13 @@ GREP_TOOL = {
 GLOB_TOOL = {
     "name": "glob",
     "description": (
-        "List workspace files whose path matches a glob pattern, such as '*.py', "
+        "List workspace or scratch-root files whose path matches a glob pattern, such as '*.py', "
         "'**/*.md' or 'src/*.json'. A pattern without a '/' matches at any depth. "
         "Note that a '**' in the middle of a pattern requires at least one "
         "directory there: 'src/**/*.py' finds 'src/pkg/a.py' but NOT 'src/a.py'. "
         "Use the bare '*.py' form to search every depth. Set 'path' to search one "
-        "subtree."
+        "subtree. Under the scratch root use basename patterns such as '*.log' — "
+        "slash-bearing patterns match workspace-relative paths only."
     ),
     "input_schema": {
         "type": "object",
@@ -115,19 +118,25 @@ class Glob:
     writes = False
 
     def execute(self, value: dict, context: ToolContext) -> str:
-        """Walk the subtree and collect matching relative paths."""
+        """Walk the subtree and collect matching paths, bounded in files scanned."""
         pattern = value["pattern"]
         start = resolve_in_workspace(context.root, value.get("path") or ".")
         if not start.is_dir():
             raise ToolError(f"{value.get('path') or '.'} is not a directory")
-        matches = [
-            relative
-            for _, relative in walk_files(context.root, start)
-            if matches_glob(relative, pattern)
-        ]
-        if not matches:
-            return f"no files match {pattern!r}"
-        return "\n".join(matches)
+        matches: list[str] = []
+        scanned = 0
+        capped = False
+        for _, relative in walk_files(context.root, start):
+            if scanned >= MAX_GLOB_FILES:
+                capped = True
+                break
+            scanned += 1
+            if matches_glob(relative, pattern):
+                matches.append(relative)
+        report = "\n".join(matches) if matches else f"no files match {pattern!r}"
+        if capped:
+            report += f"\n[stopped after scanning {MAX_GLOB_FILES} files — narrow the search with 'path']"
+        return report
 
 
 def walk_files(root: Path, start: Path) -> Iterator[tuple[Path, str]]:
@@ -138,9 +147,10 @@ def walk_files(root: Path, start: Path) -> Iterator[tuple[Path, str]]:
         start: The confined subtree to walk.
 
     Yields:
-        ``(realpath, workspace-relative posix path)``. The relative path names
-        the entry as the walk found it — the name the model can pass back —
-        while the realpath is what the caller may open.
+        ``(realpath, display name)`` — a workspace-relative posix path for an
+        entry under the workspace, otherwise the entry's absolute posix path (a
+        Scratch-root walk). Either name is one `resolve_in_workspace` accepts
+        back, while the realpath is what the caller may open.
     """
     for directory, dirnames, filenames in os.walk(start, followlinks=False):
         dirnames[:] = sorted(
@@ -153,11 +163,16 @@ def walk_files(root: Path, start: Path) -> Iterator[tuple[Path, str]]:
             resolved = contained(root, entry)
             if resolved is None:
                 continue
-            yield resolved, Path(os.path.relpath(entry, root)).as_posix()
+            entry_path = Path(entry)
+            yield resolved, (
+                entry_path.relative_to(root).as_posix()
+                if entry_path.is_relative_to(root)
+                else entry_path.as_posix()
+            )
 
 
 def matches_glob(relative: str, pattern: str) -> bool:
-    """Match a workspace-relative path against a glob pattern.
+    """Match a walk's display path against a glob pattern.
 
     ``fnmatch`` wildcards cross ``/``, so the pattern shapes a model actually
     writes are normalized first: a leading ``**/`` matches at any depth, and a
@@ -170,7 +185,9 @@ def matches_glob(relative: str, pattern: str) -> bool:
     directory and does not match ``src/a.py``.
 
     Args:
-        relative: The workspace-relative posix path.
+        relative: The walk's display name — a workspace-relative posix path
+            under the workspace, or an absolute posix path under the scratch
+            root, where only basename patterns (``*.log``) can match.
         pattern: The glob pattern.
 
     Returns:

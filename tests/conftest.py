@@ -12,9 +12,11 @@ import io
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import types
 from dataclasses import dataclass, field
@@ -23,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from chinamax import state
+from chinamax import confinement, state
 from chinamax.__main__ import main, run_exec
 from chinamax.liveness import LoopConfig
 from chinamax.transcript import read_messages
@@ -807,6 +809,34 @@ def job_env(tmp_path, keyless_home, start_fake_provider):
         )
 
     return _make
+
+
+@pytest.fixture
+def outside_root():
+    """A throwaway directory OUTSIDE both permitted roots, for escape targets.
+
+    Created under ``/var/tmp`` (the temp dir is now the Scratch root) and
+    realpath'd so the sibling-prefix ``startswith`` trap and the tests' own
+    ``os.path.relpath`` climbs stay honest on macOS, where ``/var/tmp`` is a
+    symlink. Skips wherever no such outside root exists — on native Windows, or
+    where ``/var/tmp`` falls under the Scratch root (e.g. ``TMPDIR=/var/tmp``) or
+    is unwritable — so the dual-root escape net runs only on POSIX (the
+    mocked-new-Platform stance), and the Windows-unreachable ``os.path.relpath``
+    calls the dependent tests make never fire.
+    """
+    if not Path("/var/tmp").exists():
+        pytest.skip("no /var/tmp outside the scratch root on this platform")
+    if Path(os.path.realpath("/var/tmp")).is_relative_to(confinement.SCRATCH_ROOT):
+        pytest.skip("/var/tmp lies under the scratch root (e.g. TMPDIR=/var/tmp)")
+    try:
+        created = tempfile.mkdtemp(prefix="chinamax-outside-", dir="/var/tmp")
+    except OSError:
+        pytest.skip("/var/tmp is not writable")
+    directory = Path(os.path.realpath(created))
+    try:
+        yield directory
+    finally:
+        shutil.rmtree(directory, ignore_errors=True)
 
 
 __all__ = [

@@ -18,7 +18,7 @@ from typing import Callable
 import anthropic
 
 from chinamax import state
-from chinamax.confinement import ToolContext
+from chinamax.confinement import SCRATCH_ROOT, ToolContext
 from chinamax.liveness import LoopConfig, emit_event, stream_with_ladder
 from chinamax.policy import Policy, translate_tool
 from chinamax.profiles import Profile
@@ -50,8 +50,8 @@ STEER_ABORT_VARIABLE = "CHINAMAX_STEER_ABORT"
 
 SYSTEM_TEMPLATE = """You are a worker model executing one task inside a confined workspace.
 
-Every tool is confined to that workspace: the file tools reject any path that \
-resolves outside it, and bash runs with the workspace as its working directory. \
+The file tools reject any path that resolves outside that workspace or the \
+scratch root, and bash runs with the workspace as its working directory. \
 Commands that destroy data or leave the machine are refused, and each one is \
 bounded by a timeout whose expiry comes back as an observation rather than \
 ending the job.
@@ -63,6 +63,7 @@ final answer in response — everything the operator should read, exactly as you
 want them to read it. It is your final message, not a summary of one.
 
 Your workspace is {workspace}.
+Your scratch root is {scratch}.
 
 {posture}"""
 
@@ -549,6 +550,7 @@ def _system_prompt(spec: JobSpec) -> str:
     return SYSTEM_TEMPLATE.format(
         workspace=spec.workspace,
         posture=WRITE_POSTURE if spec.write else READ_ONLY_POSTURE,
+        scratch=SCRATCH_ROOT,
     )
 
 

@@ -4,8 +4,9 @@ Two independent controls live here because they answer the same question — "ma
 this tool_use touch that?" — for the two shapes a tool argument takes:
 
 * `resolve_in_workspace` turns a model-supplied path into a real path proven to
-  be inside the workspace, component-wise, with symlinks followed to their
-  target. It is the only way a file tool may turn a string into a path.
+  be inside the workspace or the Scratch root, component-wise, with symlinks
+  followed to their target. It is the only way a file tool may turn a string
+  into a path.
 * `lex_command` turns a bash command line into pipeline stages with their
   command tokens identified. `denied_reason` (the operator's hard bans) and
   `write_shaped_reason` (read-only Jobs) both read that single lexer's output,
@@ -28,6 +29,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -71,6 +73,15 @@ _GIT_VALUE_FLAGS = frozenset(
 
 _REDIRECT_CHARACTERS = frozenset("<>&")
 
+#: The Scratch root (ADR 0005, amended 2026-08-16): the Platform temp
+#: directory, carved out whole as a worker scratchpad besides the workspace.
+SCRATCH_ROOT = Path(os.path.realpath(tempfile.gettempdir()))
+
+
+def _in_permitted_root(workspace: Path, resolved: Path) -> bool:
+    """Whether a realpath lies under the workspace or the Scratch root."""
+    return resolved.is_relative_to(workspace) or resolved.is_relative_to(SCRATCH_ROOT)
+
 
 @dataclass(frozen=True)
 class ToolContext:
@@ -99,12 +110,13 @@ class Stage:
 
 
 def resolve_in_workspace(workspace: Path, path: str) -> Path:
-    """Resolve a model-supplied path and prove it lies inside the workspace.
+    """Resolve a model-supplied path and prove it lies inside a permitted root.
 
     ``~`` is expanded and a relative path is taken against the workspace, then
     the result is realpathed — so symlinks are followed and it is the TARGET
-    that must be inside. Containment is compared component-wise, never by string
-    prefix: workspace ``/tmp/ws`` rejects ``/tmp/ws-evil/f``.
+    that must be inside the workspace or the Scratch root. Containment is
+    compared component-wise against both roots, never by string prefix:
+    workspace ``/tmp/ws`` rejects ``/tmp/ws-evil/f``.
 
     Args:
         workspace: The workspace realpath, resolved once per Job.
@@ -114,7 +126,7 @@ def resolve_in_workspace(workspace: Path, path: str) -> Path:
         The realpath, which may not exist yet (write_file creates it).
 
     Raises:
-        ToolError: If the path escapes the workspace, or is not a string.
+        ToolError: If the path escapes both roots, or is not a string.
     """
     if not isinstance(path, str) or not path:
         raise ToolError("path must be a non-empty string")
@@ -122,10 +134,11 @@ def resolve_in_workspace(workspace: Path, path: str) -> Path:
     if not os.path.isabs(expanded):
         expanded = os.path.join(workspace, expanded)
     resolved = Path(os.path.realpath(expanded))
-    if not resolved.is_relative_to(workspace):
+    if not _in_permitted_root(workspace, resolved):
         raise ToolError(
             f"path {path!r} resolves to {resolved}, which is outside the workspace "
-            f"{workspace}; this job may only touch files inside the workspace"
+            f"{workspace} and the scratch root {SCRATCH_ROOT}; this job may only "
+            f"touch files inside them"
         )
     return resolved
 
@@ -135,18 +148,20 @@ def contained(workspace: Path, path: str | os.PathLike[str]) -> Path | None:
 
     The traversal counterpart of `resolve_in_workspace`: directory walks
     re-validate every entry they discover, because an entry can itself be a
-    symlink pointing out of the workspace. Escapes are skipped rather than
-    raised, so one hostile symlink does not abort an otherwise fine search.
+    symlink pointing out of the workspace or the Scratch root. Escapes are
+    skipped rather than raised, so one hostile symlink does not abort an
+    otherwise fine search.
 
     Args:
         workspace: The workspace realpath.
         path: A path produced by a directory walk.
 
     Returns:
-        The realpath when it is inside the workspace, otherwise None.
+        The realpath when it is inside the workspace or the Scratch root,
+        otherwise None.
     """
     resolved = Path(os.path.realpath(path))
-    return resolved if resolved.is_relative_to(workspace) else None
+    return resolved if _in_permitted_root(workspace, resolved) else None
 
 
 def lex_command(command: str) -> list[Stage]:

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
+
+from chinamax import confinement
 from conftest import REPORT_PAYLOAD, bash_script, tool_script
 
 
@@ -67,6 +71,22 @@ def test_read_bash_allowed(job_env):
     assert "f" in observations[0]["content"]
     assert observations[1]["content"].startswith("exit_code: ")
     assert "x" in observations[2]["content"]
+
+
+def test_read_only_job_reads_scratch_root_file(job_env):
+    """A read-only Job's read tool can read a file under the Scratch root (0.6.0 carve-out)."""
+    fd, created = tempfile.mkstemp(prefix="chinamax-test-", dir=confinement.SCRATCH_ROOT)
+    os.write(fd, b"scratch-visible\n")
+    os.close(fd)
+    env = job_env(tool_script(("read_file", {"path": created})))
+    try:
+        assert env.run(env.spec(write=False)) == 0
+
+        observation = env.observations()[0]
+        assert not observation.get("is_error")
+        assert observation["content"] == "scratch-visible\n"
+    finally:
+        os.unlink(created)
 
 
 # ── Worker Host-policy in read-only Jobs (ADR 0016) ────────────────────────────

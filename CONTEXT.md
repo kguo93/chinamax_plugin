@@ -122,3 +122,13 @@ same Policy hooks. A dispatch may narrow or disable the server set; the
 selection rides with the Thread.
 _Avoid_: conflating with the Host harness's own MCP connections (workers
 connect independently)
+
+**Scratch root**:
+The Platform's temporary-file directory, which a Job's file tools may touch in
+addition to the workspace — an escape hatch for worker scratch files. Resolved
+by the Platform's standard temp convention (`TMPDIR`, `%TEMP%`), so it is not
+literally `/tmp` everywhere; the whole directory is permitted, and the worker
+is told its resolved path. Read-only Jobs may only read it; bash stays pinned
+to the workspace.
+_Avoid_: "/tmp" (a Platform-specific value, wrong on macOS), temp workspace,
+second workspace

@@ -7,8 +7,15 @@ the Runtime got there.
 
 from __future__ import annotations
 
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
 import pytest
 
+from chinamax import confinement
+from chinamax.tools import search
 from conftest import REPORT_PAYLOAD, tool_script
 
 MODIFY_PATCH = """--- a/hello.py
@@ -21,18 +28,6 @@ MODIFY_PATCH = """--- a/hello.py
 +++ b/added.txt
 @@ -0,0 +1 @@
 +brand new
-"""
-
-ESCAPING_PATCH = """--- a/first.txt
-+++ b/first.txt
-@@ -1 +1 @@
--one
-+ONE
---- a/../escape.txt
-+++ b/../escape.txt
-@@ -1 +1 @@
--secret
-+pwned
 """
 
 
@@ -156,12 +151,28 @@ def test_apply_patch_happy_path(job_env):
     assert not env.observations()[0].get("is_error")
 
 
-def test_apply_patch_all_or_nothing(job_env):
-    """A second file that escapes the workspace leaves the first one untouched."""
-    env = job_env(tool_script(("apply_patch", {"patch": ESCAPING_PATCH})))
-    (env.workspace / "first.txt").write_text("one\n", encoding="utf-8")
-    escape = env.workspace.parent / "escape.txt"
+def test_apply_patch_all_or_nothing(job_env, tmp_path, outside_root):
+    """A second file that escapes both roots leaves the first one untouched."""
+    escape = outside_root / "escape.txt"
     escape.write_text("secret\n", encoding="utf-8")
+    # The climb is computed against job_env's workspace (always tmp_path/"workspace")
+    # BEFORE job_env runs, so the escaping header resolves outside both roots even
+    # though the target now lives under outside_root rather than beside the workspace.
+    climb = os.path.relpath(escape, tmp_path / "workspace")
+    patch = (
+        "--- a/first.txt\n"
+        "+++ b/first.txt\n"
+        "@@ -1 +1 @@\n"
+        "-one\n"
+        "+ONE\n"
+        f"--- a/{climb}\n"
+        f"+++ b/{climb}\n"
+        "@@ -1 +1 @@\n"
+        "-secret\n"
+        "+pwned\n"
+    )
+    env = job_env(tool_script(("apply_patch", {"patch": patch})))
+    (env.workspace / "first.txt").write_text("one\n", encoding="utf-8")
 
     assert env.run() == 0
 
@@ -171,6 +182,47 @@ def test_apply_patch_all_or_nothing(job_env):
     assert len(observations) == 1
     assert observations[0]["is_error"] is True
     assert "outside the workspace" in observations[0]["content"]
+
+
+def test_scratch_root_tools_round_trip(job_env):
+    """write/read/edit/list/glob all work against a private Scratch-root dir (0.6.0)."""
+    scratch_dir = tempfile.mkdtemp(prefix="chinamax-test-", dir=confinement.SCRATCH_ROOT)
+    target = Path(scratch_dir) / "f.txt"
+    env = job_env(
+        tool_script(
+            ("write_file", {"path": str(target), "content": "one\n"}),
+            ("read_file", {"path": str(target)}),
+            ("str_replace_edit", {"path": str(target), "old_string": "one", "new_string": "two"}),
+            ("list_dir", {"path": scratch_dir}),
+            ("glob", {"pattern": "f.txt", "path": scratch_dir}),
+        )
+    )
+    try:
+        assert env.run() == 0
+
+        observations = env.observations()
+        # No observation errors — the write landed on disk AND reported success,
+        # which is exactly what the _relative fix pins (without it the write
+        # succeeds yet errors while formatting its message).
+        assert not any(block.get("is_error") for block in observations)
+        assert target.read_text(encoding="utf-8") == "two\n"
+        # The scratch hit renders as the file's absolute path (walk_files rendering).
+        assert observations[4]["content"] == str(target)
+    finally:
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+
+
+def test_glob_scan_cap(job_env, monkeypatch):
+    """glob bounds the files it scans and says so, mirroring grep (ADR 0002)."""
+    monkeypatch.setattr(search, "MAX_GLOB_FILES", 2)
+    env = job_env(tool_script(("glob", {"pattern": "*.txt"})))
+    for index in range(5):
+        (env.workspace / f"f{index}.txt").write_text("x", encoding="utf-8")
+
+    assert env.run() == 0
+
+    observation = env.observations()[0]
+    assert "stopped after scanning 2 files" in observation["content"]
 
 
 @pytest.mark.parametrize(

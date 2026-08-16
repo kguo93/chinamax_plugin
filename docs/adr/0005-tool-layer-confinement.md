@@ -33,3 +33,20 @@ callable in read-only Jobs (outside the tool-layer posture, the same class as th
 bash-redirection network-egress residual documented above), and MCP server
 processes run UNSANDBOXED with full host filesystem/network capability regardless
 of Job posture — distinct from "tool omitted from the model". See ADR 0016.
+
+**Amended 2026-08-16 (0.6.0).** Containment gains a second permitted root, the
+**Scratch root** — the realpath of the Platform temp directory (Python
+`tempfile.gettempdir()`, honoring `TMPDIR`/`%TEMP%`; deliberately NOT literal
+`/tmp`, which on macOS would miss `$TMPDIR` scratch), computed once at module
+import. Purpose of record: a scratchpad escape hatch for workers. File-tool
+containment now accepts a realpath under the workspace OR the Scratch root,
+uniformly at direct resolution (`resolve_in_workspace`) and walk re-validation
+(`contained`); the WHOLE temp directory is carved out — per-Thread/Job subtrees
+were rejected (lifecycle machinery; a resumed Thread's new Job would orphan its
+scratch). Everything else stands: bash is untouched (cwd stays workspace-pinned
+with the denylist, and read-only Jobs still refuse every file-targeting
+redirect, Scratch-root-aimed included — target-aware gating of lexed, unexpanded
+shell words was rejected as unreliable by construction); read-only Jobs still
+carry no write tools — the carve-out widens only where their read tools may
+look. The system prompt names the resolved Scratch root per Job. Containment
+stays component-wise (sibling-prefix safe) against both roots.

@@ -34,7 +34,7 @@ _UNSUPPORTED_HEADERS = ("rename from ", "rename to ", "copy from ", "copy to ",
 APPLY_PATCH_TOOL = {
     "name": "apply_patch",
     "description": (
-        "Apply a unified diff to the workspace. 'a/' and 'b/' path prefixes are "
+        "Apply a unified diff to the workspace or the scratch root. 'a/' and 'b/' path prefixes are "
         "stripped, and a '/dev/null' header creates or deletes a file. Context must "
         "match exactly — no fuzz — and the whole diff applies or none of it does. "
         "git rename, copy and mode-change headers are not supported."

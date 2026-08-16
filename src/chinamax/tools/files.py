@@ -17,7 +17,7 @@ from chinamax.confinement import ToolContext, contained, resolve_in_workspace
 READ_FILE_TOOL = {
     "name": "read_file",
     "description": (
-        "Read a UTF-8 text file from the workspace. Optional 1-based 'offset' and "
+        "Read a UTF-8 text file from the workspace or the scratch root. Optional 1-based 'offset' and "
         "'limit' select a range of lines; the contents are returned as they are on "
         "disk, so they can be used verbatim in a str_replace_edit."
     ),
@@ -35,8 +35,8 @@ READ_FILE_TOOL = {
 WRITE_FILE_TOOL = {
     "name": "write_file",
     "description": (
-        "Create a file in the workspace or overwrite it whole, creating any missing "
-        "parent directories. Use str_replace_edit to change part of an existing file."
+        "Create a file in the workspace or the scratch root, or overwrite it whole, creating "
+        "any missing parent directories. Use str_replace_edit to change part of an existing file."
     ),
     "input_schema": {
         "type": "object",
@@ -48,7 +48,7 @@ WRITE_FILE_TOOL = {
 STR_REPLACE_EDIT_TOOL = {
     "name": "str_replace_edit",
     "description": (
-        "Replace one literal string in a workspace file. 'old_string' is matched "
+        "Replace one literal string in a file in the workspace or the scratch root. 'old_string' is matched "
         "literally, not as a regular expression, and must occur exactly once in the "
         "file — include surrounding lines to make it unique."
     ),
@@ -66,8 +66,8 @@ STR_REPLACE_EDIT_TOOL = {
 LIST_DIR_TOOL = {
     "name": "list_dir",
     "description": (
-        "List one directory level of the workspace. Directories are marked with a "
-        "trailing '/'. Entries that resolve outside the workspace are omitted."
+        "List one directory level of the workspace or the scratch root. Directories are marked with a "
+        "trailing '/'. Entries that resolve outside the workspace and the scratch root are omitted."
     ),
     "input_schema": {
         "type": "object",
@@ -77,7 +77,7 @@ LIST_DIR_TOOL = {
 
 
 class ReadFile:
-    """Return a workspace file's text, optionally a range of its lines."""
+    """Return a workspace or scratch-root file's text, optionally a range of its lines."""
 
     spec = READ_FILE_TOOL
     writes = False
@@ -107,7 +107,7 @@ class ReadFile:
 
 
 class WriteFile:
-    """Create or overwrite a workspace file whole."""
+    """Create or overwrite a workspace or scratch-root file whole."""
 
     spec = WRITE_FILE_TOOL
     writes = True
@@ -125,7 +125,7 @@ class WriteFile:
 
 
 class StrReplaceEdit:
-    """Replace one literal, uniquely occurring string in a workspace file."""
+    """Replace one literal, uniquely occurring string in a workspace or scratch-root file."""
 
     spec = STR_REPLACE_EDIT_TOOL
     writes = True
@@ -154,7 +154,7 @@ class StrReplaceEdit:
 
 
 class ListDir:
-    """List one directory level, omitting entries that resolve outside."""
+    """List one directory level, omitting entries that resolve outside both roots."""
 
     spec = LIST_DIR_TOOL
     writes = False
@@ -181,7 +181,7 @@ def read_text(path: Path) -> str:
     """Read a workspace file as strict UTF-8.
 
     Args:
-        path: A path already proven to be inside the workspace.
+        path: A path already proven to be inside the workspace or the Scratch root.
 
     Returns:
         The file's text.
@@ -199,7 +199,9 @@ def read_text(path: Path) -> str:
 
 
 def _relative(path: Path, context: ToolContext) -> str:
-    """Render a resolved path relative to the workspace, for the observation."""
+    """Render a resolved path for the observation: workspace-relative, else absolute."""
     if path == context.root:
         return "."
-    return str(path.relative_to(context.root))
+    if path.is_relative_to(context.root):
+        return str(path.relative_to(context.root))
+    return str(path)

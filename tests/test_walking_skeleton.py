@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from chinamax import confinement
 from chinamax.loop import (
     READ_ONLY_POSTURE,
     SYSTEM_TEMPLATE,
@@ -330,6 +331,27 @@ def test_system_prompt_shared_across_workspaces(tmp_path):
     assert a.endswith(WRITE_POSTURE)
     assert c.endswith(READ_ONLY_POSTURE)
     assert a[: -len(WRITE_POSTURE)] == c[: -len(READ_ONLY_POSTURE)]
+
+
+def test_system_prompt_names_scratch_root(tmp_path):
+    """The rendered prompt names the resolved Scratch root per Job (ADR 0005, 0.6.0)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    spec = parse_spec(
+        {
+            "workspace": str(workspace),
+            "profile": PROFILE,
+            "prompt": "Do the task.",
+            "transcript_path": str(workspace / "job.thread.jsonl"),
+            "result_path": str(workspace / "job.result.json"),
+            "write": True,
+        }
+    )
+    prompt = _system_prompt(spec)
+
+    assert str(confinement.SCRATCH_ROOT) in prompt
+    # Deliberate hardening: the amended confinement sentence names the scratch root.
+    assert "outside that workspace or the scratch root" in prompt
 
 
 # ── Memory injection (ADR 0016) ────────────────────────────────────────────────

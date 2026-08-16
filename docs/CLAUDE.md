@@ -52,7 +52,7 @@ sixteen ADRs group into seven themes.
 ### 3 · Confinement & safety
 | If your change / question touches… | Read | Governs |
 |---|---|---|
-| Tool-layer file/bash safety — realpath containment, cwd-pinned bash + denylist + timeouts, write-tool disabling for read-only Jobs (not an OS sandbox) | **0005** | `src/chinamax/confinement.py`, `src/chinamax/tools/` |
+| Tool-layer file/bash safety — realpath containment (workspace + Scratch root), cwd-pinned bash + denylist + timeouts, write-tool disabling for read-only Jobs (not an OS sandbox) | **0005** | `src/chinamax/confinement.py`, `src/chinamax/tools/` |
 
 ### 4 · Results & duplication guard
 | If your change / question touches… | Read | Governs |
