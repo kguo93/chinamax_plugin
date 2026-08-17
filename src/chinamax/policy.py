@@ -446,39 +446,66 @@ def _claude_hook_specs(data: dict, event: str, source: str) -> list[HookSpec]:
     return specs
 
 
-def _codex_hook_specs(data: dict, event: str, source: str) -> list[HookSpec]:
-    """Extract Codex ``config.toml`` ``[[hooks.<event>]]`` tables for an event.
+def _codex_hook_specs(
+    data: dict, event: str, source: str, log: PolicyLog
+) -> list[HookSpec]:
+    """Extract nested Codex command hooks for one supported Policy event.
 
-    Deliberately runs ALL listed hooks: the worker ignores ``hooks.state``
-    trusted_hash entries and the ``[features] hooks`` flag, because
-    operator-authored ``config.toml`` entries are the consent boundary (ADR 0016
-    records this divergence from the Codex CLI's own gating).
+    Codex stores matcher groups under ``hooks.<event>`` and command handlers
+    under each group's nested ``hooks`` array. The worker intentionally runs
+    synchronous command handlers only; async and other handler types are
+    skipped because the shared Policy runner has no equivalent execution model.
     """
     specs: list[HookSpec] = []
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         return specs
-    for table in hooks.get(event, []) or []:
-        if not isinstance(table, dict):
+    for group in hooks.get(event, []) or []:
+        if not isinstance(group, dict):
             continue
-        command = table.get("command")
-        command_windows = table.get("commandWindows")
-        command = command if isinstance(command, str) and command else None
-        command_windows = (
-            command_windows if isinstance(command_windows, str) and command_windows else None
-        )
-        if command is None and command_windows is None:
+        matcher = group.get("matcher")
+        matcher = matcher if isinstance(matcher, str) else None
+        handlers = group.get("hooks")
+        if not isinstance(handlers, list):
             continue
-        matcher = table.get("matcher")
-        specs.append(
-            HookSpec(
-                command=command,
-                command_windows=command_windows,
-                matcher=matcher if isinstance(matcher, str) else None,
-                timeout_s=_hook_timeout(table.get("timeout")),
-                source=source,
+        for handler in handlers:
+            if not isinstance(handler, dict):
+                continue
+            handler_type = handler.get("type")
+            if handler_type != "command":
+                log(
+                    f"Codex {event} hook type {handler_type!r} is unsupported; skipped"
+                )
+                continue
+            async_value = handler.get("async", False)
+            if async_value is True:
+                log(f"Codex async {event} hook is unsupported; skipped")
+                continue
+            if async_value is not False and async_value is not None:
+                log(f"Codex {event} hook has malformed async value; skipped")
+                continue
+            command = handler.get("command")
+            command = command if isinstance(command, str) and command else None
+            command_windows = handler.get("commandWindows")
+            if command_windows is None:
+                command_windows = handler.get("command_windows")
+            command_windows = (
+                command_windows
+                if isinstance(command_windows, str) and command_windows
+                else None
             )
-        )
+            if command is None and command_windows is None:
+                log(f"Codex {event} command hook has no command; skipped")
+                continue
+            specs.append(
+                HookSpec(
+                    command=command,
+                    command_windows=command_windows,
+                    matcher=matcher,
+                    timeout_s=_hook_timeout(handler.get("timeout")),
+                    source=source,
+                )
+            )
     return specs
 
 
@@ -544,9 +571,9 @@ def _discover_codex_hooks(host_context: HostContext, log: PolicyLog) -> HookConf
         return HookConfig(False, (), (), ())
     return HookConfig(
         False,
-        tuple(_codex_hook_specs(data, "PreToolUse", "codex")),
-        tuple(_codex_hook_specs(data, "PostToolUse", "codex")),
-        tuple(_codex_hook_specs(data, "Stop", "codex")),
+        tuple(_codex_hook_specs(data, "PreToolUse", "codex", log)),
+        tuple(_codex_hook_specs(data, "PostToolUse", "codex", log)),
+        tuple(_codex_hook_specs(data, "Stop", "codex", log)),
     )
 
 

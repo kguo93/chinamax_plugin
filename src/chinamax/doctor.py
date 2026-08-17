@@ -74,7 +74,7 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
-PLUGIN_VERSION = "0.7.2"
+PLUGIN_VERSION = "0.7.3"
 MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
 
 #: The three per-Host Policy toggles setup can write (ADR 0016 amended 0.7.0).

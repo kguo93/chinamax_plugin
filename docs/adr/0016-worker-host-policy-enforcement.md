@@ -26,6 +26,20 @@ silently swallows) those `[policy]` lines fall back to the structured
 
 ## Decision
 
+**Amended 2026-08-17 (0.7.3): Codex hook schema and supported seams corrected.**
+Codex's canonical `config.toml` schema nests handlers under each matcher group:
+`[[hooks.<event>]]` carries `matcher` and one or more
+`[[hooks.<event>.hooks]]` tables. A flat `command` on the outer event table is
+not a valid Codex handler and is ignored. The Runtime normalizes the nested
+schema for the three Policy seams only — `PreToolUse`, `PostToolUse`, and
+`Stop` — and executes synchronous `type = "command"` handlers in declaration
+order. `async = true` (or malformed async values) and unsupported handler types
+are skipped and logged because the shared Policy runner has no equivalent
+execution model. Plugin lifecycle manifests remain Host-only and are not
+worker Policy sources. The earlier “ALL Codex hooks” wording below means all
+supported synchronous command handlers in those three seams, not every Codex
+hook type or lifecycle event.
+
 **Amended 2026-08-17 (0.7.0): three per-Host toggles, default OFF; the `mcp=`
 per-dispatch selector removed.** Two reversals of the original decision below.
 
@@ -89,9 +103,11 @@ harness-documented location, overridable for tests via
 **project root** is the nearest ancestor of the Job workspace (inclusive)
 containing `.claude/` or `.git`, else the workspace itself — deliberately
 diverging from the Job workspace root in nested-repo layouts. Codex Host:
-`~/.codex/config.toml` `[[hooks.PreToolUse]]`/`[[hooks.PostToolUse]]`/
-`[[hooks.Stop]]` tables. All hook sources (both Hosts) are discovered and parsed
-ONCE at Job start; mid-Job settings edits take effect on the NEXT Job (a
+`~/.codex/config.toml` nested matcher groups
+(`[[hooks.PreToolUse]]`/`[[hooks.PostToolUse]]`/`[[hooks.Stop]]`), each carrying
+`[[hooks.<event>.hooks]]` handler tables. All hook sources (both Hosts) are
+discovered and parsed ONCE at Job start; mid-Job settings edits take effect on
+the NEXT Job (a
 staleness class shared with B.4 and C.3). An unreadable/malformed source
 contributes zero hooks (logged) and cannot conceal another source's
 `disableAllHooks`.
@@ -197,12 +213,13 @@ first write fired a PostToolUse context. Single-tool turns are byte-identical to
 the original rule. Context blocks carry no per-tool attribution (verbatim text,
 harness parity).
 
-**Divergence (recorded):** the worker runs ALL Codex `config.toml` hooks and
-deliberately IGNORES `hooks.state` trusted_hash entries and the `[features]
-hooks` flag — this exceeds the Codex CLI's own gating. Operator-authored
-`config.toml` entries are the consent boundary. This is distinct from chinamax's
-own setup (`doctor.py`) which enables the CLI-side `features.hooks`/trusted_hash
-gate host-side.
+**Divergence (recorded):** the worker runs all supported synchronous command
+handlers from the nested Codex `config.toml` Policy seams and deliberately
+IGNORES `hooks.state` trusted_hash entries and the `[features] hooks` flag —
+this exceeds the Codex CLI's own gating. Operator-authored `config.toml` entries
+are the consent boundary. This is distinct from chinamax's own setup
+(`doctor.py`) which enables the CLI-side `features.hooks`/trusted_hash gate
+host-side.
 
 ### B · Memory injection
 

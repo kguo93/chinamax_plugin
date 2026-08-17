@@ -59,7 +59,7 @@ def test_manifest_and_marketplace_valid():
     # The marketplace entry's version equals plugin.json's, as the Codex pair does.
     assert entry["version"] == plugin["version"]
     assert codex["name"] == plugin["name"] == "chinamax"
-    assert codex["version"] == plugin["version"] == "0.7.2"
+    assert codex["version"] == plugin["version"] == "0.7.3"
     # doctor.PLUGIN_VERSION gates the managed Codex agent refresh; pin it to the
     # manifest version so it can never silently lag a release again.
     assert doctor.PLUGIN_VERSION == plugin["version"]
@@ -85,7 +85,7 @@ def test_manifest_and_marketplace_valid():
         "authentication": "ON_INSTALL",
     }
     assert codex_entry["category"] == "Developer tools"
-    assert project["project"]["version"] == "0.7.2"
+    assert project["project"]["version"] == "0.7.3"
     dependencies = project["project"]["dependencies"]
     assert any("psutil>=7.2" in value and "sys_platform == 'darwin'" in value for value in dependencies)
     assert any("filelock>=3.20" in value and "sys_platform == 'win32'" in value for value in dependencies)

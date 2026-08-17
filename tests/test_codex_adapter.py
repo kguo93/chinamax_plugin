@@ -76,7 +76,7 @@ def test_compiled_agent_has_codex_native_settings(tmp_path):
         encoding="utf-8",
     )
     compiled = compile_codex_agent(source)
-    assert "# chinamax-managed-plugin-version: 0.7.2" in compiled
+    assert "# chinamax-managed-plugin-version: 0.7.3" in compiled
     assert 'model = "gpt-5.6-terra"' in compiled
     assert 'model_reasoning_effort = "low"' in compiled
     assert "developer_instructions" in compiled
@@ -101,13 +101,37 @@ from chinamax.policy import HookSpec, Policy, discover_hooks, discover_memory
 from conftest import policy_spec, write_hook_script
 
 
-def test_codex_config_toml_hooks_run_all(keyless_home, tmp_path):
-    """Codex config.toml PreToolUse hooks all run, ignoring features/trusted_hash."""
+def test_codex_config_toml_nested_hooks_run_all_supported_events(
+    keyless_home, tmp_path
+):
+    """Nested Codex command handlers run for each Runtime Policy seam."""
     codex_home = keyless_home / ".codex"
     codex_home.mkdir()
-    evidence = tmp_path / "codex.seen"
-    command = write_hook_script(
-        tmp_path, "codex", exit_code=2, stderr="codex deny", evidence=evidence
+    pre_allow_evidence = tmp_path / "pre-allow.seen"
+    pre_deny_evidence = tmp_path / "pre-deny.seen"
+    async_evidence = tmp_path / "async.seen"
+    malformed_async_evidence = tmp_path / "malformed-async.seen"
+    prompt_evidence = tmp_path / "prompt.seen"
+    post_evidence = tmp_path / "post.seen"
+    stop_evidence = tmp_path / "stop.seen"
+    pre_allow = write_hook_script(
+        tmp_path, "pre_allow", evidence=pre_allow_evidence
+    )
+    pre_deny = write_hook_script(
+        tmp_path,
+        "pre_deny",
+        exit_code=2,
+        stderr="codex deny",
+        evidence=pre_deny_evidence,
+    )
+    async_command = write_hook_script(tmp_path, "async", evidence=async_evidence)
+    malformed_async = write_hook_script(
+        tmp_path, "malformed_async", evidence=malformed_async_evidence
+    )
+    prompt_command = write_hook_script(tmp_path, "prompt", evidence=prompt_evidence)
+    post = write_hook_script(tmp_path, "post", evidence=post_evidence)
+    stop = write_hook_script(
+        tmp_path, "stop", exit_code=2, stderr="codex stop", evidence=stop_evidence
     )
     config = (
         "[features]\n"
@@ -115,22 +139,102 @@ def test_codex_config_toml_hooks_run_all(keyless_home, tmp_path):
         "[hooks.state]\n"
         'trusted_hash = "deadbeef"\n\n'
         "[[hooks.PreToolUse]]\n"
-        f"command = {json.dumps(command)}\n"
         'matcher = "Bash"\n'
+        "[[hooks.PreToolUse.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(pre_allow)}\n"
+        "timeout = 7\n"
+        "[[hooks.PreToolUse.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(pre_deny)}\n"
+        "[[hooks.PreToolUse.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(async_command)}\n"
+        "async = true\n"
+        "[[hooks.PreToolUse.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(malformed_async)}\n"
+        'async = "yes"\n'
+        "[[hooks.PreToolUse.hooks]]\n"
+        'type = "prompt"\n'
+        f"command = {json.dumps(prompt_command)}\n\n"
+        "[[hooks.PreToolUse]]\n"
+        'matcher = "Bash"\n'
+        f"command = {json.dumps(prompt_command)}\n\n"
+        "[[hooks.PostToolUse]]\n"
+        'matcher = "Bash"\n'
+        "[[hooks.PostToolUse.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(post)}\n"
+        f"commandWindows = {json.dumps('cmd /d /c echo post')}\n"
+        f"command_windows = {json.dumps('cmd /d /c echo alias')}\n"
+        "timeout = 9\n"
+        "[[hooks.PostToolUse.hooks]]\n"
+        'type = "command"\n'
+        f"commandWindows = {json.dumps('cmd /d /c echo windows-only')}\n\n"
+        "[[hooks.Stop]]\n"
+        "[[hooks.Stop.hooks]]\n"
+        'type = "command"\n'
+        f"command = {json.dumps(stop)}\n"
     )
     (codex_home / "config.toml").write_text(config, encoding="utf-8")
     ctx = HostContext.from_host(Host.CODEX)
 
-    hooks = discover_hooks(tmp_path, ctx, lambda message: None)
-    assert len(hooks.pre) == 1
+    logs: list[str] = []
+    hooks = discover_hooks(tmp_path, ctx, logs.append)
+    assert len(hooks.pre) == 2
+    assert hooks.pre[0].matcher == "Bash"
+    assert hooks.pre[0].timeout_s == 7
+    assert len(hooks.post) == 2
+    assert hooks.post[0].command_windows == "cmd /d /c echo post"
+    assert hooks.post[0].timeout_s == 9
+    assert hooks.post[1].command is None
+    assert hooks.post[1].command_windows == "cmd /d /c echo windows-only"
+    assert len(hooks.stop) == 1
+    assert any("async" in message for message in logs)
+    assert any("malformed async" in message for message in logs)
+    assert any("unsupported" in message for message in logs)
+
+    alias_specs = _policy._codex_hook_specs(
+        {
+            "hooks": {
+                "PostToolUse": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "echo alias",
+                                "command_windows": "cmd /d /c echo alias",
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "PostToolUse",
+        "codex",
+        logs.append,
+    )
+    assert alias_specs[0].command_windows == "cmd /d /c echo alias"
 
     policy = Policy.build(
         policy_spec(tmp_path, tmp_path / "t.jsonl", host="codex"), host_context=ctx
     )
     result = policy.pre_tool_use("Bash", {"command": "ls"})
-    # It fires and denies despite features.hooks=false and a trusted_hash gate.
+    # Supported handlers fire despite features.hooks=false and a trusted_hash gate.
     assert result.allowed is False
-    assert evidence.exists()
+    assert pre_allow_evidence.exists()
+    assert pre_deny_evidence.exists()
+    assert not async_evidence.exists()
+    assert not malformed_async_evidence.exists()
+    assert not prompt_evidence.exists()
+
+    assert policy.post_tool_use("Bash", {"command": "ls"}, "ok", False) == []
+    assert post_evidence.exists()
+    stop_result = policy.stop(False)
+    assert stop_result.blocked is True
+    assert "codex stop" in (stop_result.reason or "")
+    assert stop_evidence.exists()
 
 
 def test_codex_commandwindows_preferred_on_windows(monkeypatch):

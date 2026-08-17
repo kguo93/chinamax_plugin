@@ -169,6 +169,13 @@ process-group spawn/kill like `run_bash`. Validation stays mocked on Linux, per 
 Validation scope below. This narrows, it does not reverse, the plugin-registered
 Codex hooks' Git-Bash-launcher behavior, which is unchanged.
 
+**Amended 2026-08-17 (0.7.3).** ADR 0016's nested Codex Policy-hook parser
+recognizes the canonical `commandWindows` handler field and accepts the
+`command_windows` spelling as a compatibility alias, preferring the canonical
+camel-case value when both are present. This affects only worker Policy-hook
+discovery; the plugin lifecycle-hook launcher and its Git-Bash behavior remain
+unchanged.
+
 ### Validation scope
 
 The full Linux suite is native regression evidence. macOS and Windows process,
