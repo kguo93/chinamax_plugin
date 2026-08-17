@@ -183,6 +183,20 @@ lazy Memory injection (successful results only). PreToolUse allow-with-
 blocks after that tool's tool_result in the same user turn; multiple contexts
 concatenate in hook order.
 
+**Amended 2026-08-17 (0.7.1): context text trails ALL tool_results.** The
+original delivery rule above — "deliver as text blocks after that tool's
+tool_result in the same user turn" — is reversed for multi-tool turns: every
+context text block (PreToolUse-allow `additionalContext`, PostToolUse
+`additionalContext`, lazy Memory) now delivers after ALL of the turn's
+tool_results, in per-tool arrival order (pre → post → lazy within a tool, tools
+in arrival order). Interleaving text between tool_results violates the Messages
+wire contract (ADR 0001; tool_results must stay contiguous) and was rejected
+live by DeepSeek's Anthropic-compat endpoint with `400: tool_use ids were found
+without tool_result blocks immediately after: call_01…` when a two-write turn's
+first write fired a PostToolUse context. Single-tool turns are byte-identical to
+the original rule. Context blocks carry no per-tool attribution (verbatim text,
+harness parity).
+
 **Divergence (recorded):** the worker runs ALL Codex `config.toml` hooks and
 deliberately IGNORES `hooks.state` trusted_hash entries and the `[features]
 hooks` flag — this exceeds the Codex CLI's own gating. Operator-authored
@@ -226,7 +240,9 @@ history (`not messages`), NOT the `seed_transcript` flag (worker specs always se
 
 **Nested subdirectory Memory files — lazy on first touch.** When a tool call first
 resolves a path inside a workspace subdirectory whose (workspace→dir] chain has an
-uninjected Memory file, its content is appended alongside that tool result. Path
+uninjected Memory file, its content is appended alongside that tool result
+*(amended 2026-08-17 / 0.7.1: appended after ALL of the turn's tool_results, with
+the other trailing context blocks — see the §A Ordering amendment)*. Path
 triggers are SCOPED to native file tools' `path` inputs and apply_patch's per-file
 paths, canonicalized through the same workspace resolver dispatch uses
 (`resolve_in_workspace`); bash and MCP tool paths are out of scope (uninferable).

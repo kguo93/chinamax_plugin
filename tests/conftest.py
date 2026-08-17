@@ -607,8 +607,10 @@ def assert_wire_shape(messages: list[dict]) -> None:
     """Assert a request's history is one a strict endpoint would accept.
 
     No two consecutive same-role messages — the Profiles target third-party
-    endpoints whose tolerance for those is not guaranteed — and every
-    ``tool_use`` answered by a ``tool_result`` carrying its id.
+    endpoints whose tolerance for those is not guaranteed — every ``tool_use``
+    answered by a ``tool_result`` carrying its id, and ``tool_result`` blocks
+    forming a contiguous prefix of their message (providers 400 on text
+    interleaved between them).
     """
     roles = [message["role"] for message in messages]
     assert all(one != other for one, other in zip(roles, roles[1:])), roles
@@ -620,6 +622,15 @@ def assert_wire_shape(messages: list[dict]) -> None:
     }
     answered = {block["tool_use_id"] for block in tool_results(messages)}
     assert not used - answered, sorted(used - answered)
+    for message in messages:
+        kinds = [
+            block.get("type")
+            for block in message["content"]
+            if isinstance(block, dict)
+        ]
+        if "tool_result" in kinds:
+            last = len(kinds) - 1 - kinds[::-1].index("tool_result")
+            assert set(kinds[: last + 1]) == {"tool_result"}, kinds
 
 
 def wait_for(predicate, timeout_s: float = 60.0, interval_s: float = 0.05) -> bool:

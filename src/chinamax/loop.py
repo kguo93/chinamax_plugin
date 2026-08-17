@@ -391,9 +391,11 @@ def _run_tool_uses(
 
     The per-tool-call order is PreToolUse → (deny ends it: error tool_result, no
     dispatch) → dispatch → PostToolUse (successful dispatches only) → lazy Memory
-    injection (successful results only). PreToolUse-allow ``additionalContext``
-    and PostToolUse context ride as text blocks after that tool's tool_result in
-    the same user turn. An advertised MCP name routes to its server BEFORE the
+    injection (successful results only). PreToolUse-allow ``additionalContext``,
+    PostToolUse context and lazy Memory blocks ride as text blocks after ALL of
+    the turn's tool_results, in per-tool arrival order — tool_results stay
+    contiguous, because providers reject text interleaved between them (a
+    DeepSeek 400). An advertised MCP name routes to its server BEFORE the
     Registry; every native name still goes through the Registry (unknown names
     already come back as error tool_results). ``report_result`` is the Stop gate.
 
@@ -412,6 +414,7 @@ def _run_tool_uses(
         fired this turn.
     """
     results: list[dict] = []
+    trailing: list[dict] = []
     payload: dict | None = None
     stop_fired = False
     terminal_seen = False
@@ -481,9 +484,9 @@ def _run_tool_uses(
             results.append(
                 {"type": "tool_result", "tool_use_id": tool_use_id, "content": content}
             )
-        # PreToolUse allow-with-additionalContext rides after the tool_result.
+        # PreToolUse allow-with-additionalContext rides after ALL tool_results.
         for text in pre.contexts:
-            results.append({"type": "text", "text": text})
+            trailing.append({"type": "text", "text": text})
         if is_error:
             # PostToolUse fires only after a SUCCESSFUL dispatch; a denied or
             # errored call is never a lazy-Memory touch.
@@ -494,12 +497,12 @@ def _run_tool_uses(
         else:
             post = policy.post_tool_use(hook_name, hook_input, content, False)
         for text in post:
-            results.append({"type": "text", "text": text})
+            trailing.append({"type": "text", "text": text})
         # Lazy Memory injection: bash and MCP tool paths are out of scope.
         if not is_mcp:
             for lazy in policy.lazy_blocks_for_path(name, value, injected):
-                results.append({"type": "text", "text": lazy})
-    return results, payload, stop_fired
+                trailing.append({"type": "text", "text": lazy})
+    return results + trailing, payload, stop_fired
 
 
 def _preview(value: object) -> str:

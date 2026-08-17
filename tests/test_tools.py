@@ -253,13 +253,16 @@ def test_tool_exception_becomes_observation(job_env, call):
 import json
 
 from conftest import (
+    assert_wire_shape,
     hook_group,
     policy_spec,
+    report_turn,
     write_claude_settings,
     write_hook_script,
     write_policy_settings,
 )
-from chinamax.policy import Policy, translate_tool
+from fake_provider import tool_use_block, turn
+from chinamax.policy import _MEMORY_OPEN, Policy, translate_tool
 
 
 def _build_policy(workspace, transcript):
@@ -344,6 +347,93 @@ def test_posttooluse_additional_context_appended(job_env, keyless_home):
 
     # The context landed in the turn the loop sent AFTER the bash result.
     assert any(marker in json.dumps(req["body"]) for req in env.requests)
+
+
+def test_context_trails_all_tool_results_in_multi_tool_turn(job_env, keyless_home):
+    """Hook context text rides after ALL of a turn's tool_results, never between.
+
+    Two tool_uses in one scripted turn — the deliberate exception to the
+    one-call-per-turn convention, because tool_result contiguity IS the contract
+    under test: providers 400 on text interleaved between tool_results.
+    """
+    write_policy_settings(hooks=True)
+    pre_marker = "PRE-CONTEXT-1a2b"
+    post_marker = "POST-CONTEXT-3c4d"
+    hooks_dir = keyless_home / "hookdir"
+    pre_command = write_hook_script(
+        hooks_dir,
+        "prectx",
+        exit_code=0,
+        stdout=json.dumps(
+            {"hookSpecificOutput": {"hookEventName": "PreToolUse", "additionalContext": pre_marker}}
+        ),
+    )
+    post_command = write_hook_script(
+        hooks_dir,
+        "postctx",
+        exit_code=0,
+        stdout=json.dumps(
+            {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": post_marker}}
+        ),
+    )
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(pre_command, matcher="Bash")],
+        post=[hook_group(post_command, matcher="Bash")],
+    )
+    env = job_env(
+        [
+            turn(
+                [
+                    tool_use_block("multi-0", "bash", {"command": "echo hi > out.txt"}),
+                    tool_use_block("multi-1", "read_file", {"path": "out.txt"}),
+                ]
+            ),
+            report_turn(),
+        ]
+    )
+
+    assert env.run() == 0
+
+    follow_up = env.requests[1]["body"]["messages"]
+    assert_wire_shape(follow_up)
+    blocks = follow_up[-1]["content"]
+    kinds = [block["type"] for block in blocks]
+    assert kinds == ["tool_result", "tool_result", "text", "text"], kinds
+    assert [blocks[0]["tool_use_id"], blocks[1]["tool_use_id"]] == ["multi-0", "multi-1"]
+    # Both contexts came from the FIRST tool yet trail the SECOND's result too.
+    assert pre_marker in blocks[2]["text"]
+    assert post_marker in blocks[3]["text"]
+
+
+def test_lazy_memory_block_trails_all_tool_results(job_env, keyless_home):
+    """A lazy-Memory block fired by the first tool trails the whole turn's results."""
+    write_policy_settings(memory=True)
+    env = job_env(
+        [
+            turn(
+                [
+                    tool_use_block("lazy-0", "read_file", {"path": "sub/notes.txt"}),
+                    tool_use_block("lazy-1", "read_file", {"path": "root.txt"}),
+                ]
+            ),
+            report_turn(),
+        ]
+    )
+    sub = env.workspace / "sub"
+    sub.mkdir()
+    (sub / "CLAUDE.md").write_text("sub rules\n", encoding="utf-8")
+    (sub / "notes.txt").write_text("notes\n", encoding="utf-8")
+    (env.workspace / "root.txt").write_text("root\n", encoding="utf-8")
+
+    assert env.run() == 0
+
+    follow_up = env.requests[1]["body"]["messages"]
+    assert_wire_shape(follow_up)
+    blocks = follow_up[-1]["content"]
+    kinds = [block["type"] for block in blocks]
+    assert kinds == ["tool_result", "tool_result", "text"], kinds
+    assert _MEMORY_OPEN in blocks[2]["text"]
 
 
 def test_ask_decision_allows(keyless_home, tmp_path):
