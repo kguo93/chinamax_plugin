@@ -386,6 +386,7 @@ from conftest import (
     mcp_server_script,
     raw_tools_array,
     write_mcp_config,
+    write_policy_settings,
 )
 
 #: A command that resolves nowhere, so discovery still lists the server but the
@@ -405,9 +406,10 @@ def _project_mcp(workspace, servers: dict) -> None:
     write_mcp_config(workspace / ".mcp.json", servers)
 
 
-def test_mcp_absent_pins_all_discovered(dispatch_env):
-    """No --mcp resolves to the discovered server-name list, pinned on the record."""
+def test_mcp_toggle_on_pins_all_discovered(dispatch_env):
+    """mcp toggle ON resolves to the discovered server-name list, pinned on the record."""
     env = dispatch_env(bash_then_report_script())
+    write_policy_settings(mcp=True)
     _project_mcp(env.workspace, {"echo": _BAD_MCP})
 
     code, job_id = env.dispatch()
@@ -419,27 +421,59 @@ def test_mcp_absent_pins_all_discovered(dispatch_env):
     assert record["request"]["mcp"] == ["echo"]
 
 
-def test_mcp_none_pins_empty(dispatch_env):
-    """--mcp none pins an empty selection (no servers)."""
+def test_mcp_toggle_off_pins_empty(dispatch_env):
+    """The default-OFF mcp toggle (no settings file) pins an empty selection."""
     env = dispatch_env(bash_then_report_script())
     _project_mcp(env.workspace, {"echo": _BAD_MCP})
 
-    code, job_id = env.dispatch("--mcp", "none")
+    code, job_id = env.dispatch()
 
     assert code == 0
     record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
     assert record["request"]["mcp"] == []
 
 
-def test_mcp_explicit_list_pinned(dispatch_env):
-    """--mcp a,b pins exactly those names in order."""
+def test_pinned_policy_booleans_land_in_record(dispatch_env):
+    """The three toggles resolve once and pin into the record's request block."""
     env = dispatch_env(bash_then_report_script())
+    write_policy_settings(memory=True, hooks=True, mcp=False)
 
-    code, job_id = env.dispatch("--mcp", "echo,other")
+    code, job_id = env.dispatch()
 
     assert code == 0
     record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
-    assert record["request"]["mcp"] == ["echo", "other"]
+    assert record["request"]["memoryEnabled"] is True
+    assert record["request"]["hooksEnabled"] is True
+    assert record["request"]["mcp"] == []
+
+
+def test_missing_settings_pins_all_off(dispatch_env):
+    """A missing settings file resolves every toggle OFF (the no/no/no default)."""
+    env = dispatch_env(bash_then_report_script())
+
+    code, job_id = env.dispatch()
+
+    assert code == 0
+    record = wait_for_status(env.store, job_id, state.TERMINAL_STATUSES)
+    assert record["request"]["memoryEnabled"] is False
+    assert record["request"]["hooksEnabled"] is False
+    assert record["request"]["mcp"] == []
+
+
+def test_malformed_settings_fails_dispatch(dispatch_env, capsys):
+    """A malformed settings.json fails the dispatch with an error naming the file."""
+    env = dispatch_env(bash_then_report_script())
+    settings_path = state.state_root() / "settings.json"
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text("{not valid json", encoding="utf-8")
+
+    code, job_id = env.dispatch()
+
+    assert code == 1
+    assert job_id == ""
+    assert str(settings_path) in capsys.readouterr().err
+    # No record was ever written for the failed dispatch.
+    assert env.store.job_ids() == []
 
 
 def test_mcp_tools_snapshot_and_round_trip(dispatch_env, tmp_path):
@@ -451,6 +485,7 @@ def test_mcp_tools_snapshot_and_round_trip(dispatch_env, tmp_path):
             report_turn(),
         ]
     )
+    write_policy_settings(mcp=True)
     _project_mcp(env.workspace, {"echo": mcp_server_entry(script)})
     provider = env.providers[PROFILE]
 
@@ -475,6 +510,7 @@ def test_mcp_tools_snapshot_and_round_trip(dispatch_env, tmp_path):
 def test_mcp_server_start_failure_proceeds(dispatch_env):
     """A server that cannot start is skipped; the Job runs to completion."""
     env = dispatch_env(bash_then_report_script())
+    write_policy_settings(mcp=True)
     _project_mcp(env.workspace, {"broken": _BAD_MCP})
 
     code, job_id = env.dispatch()

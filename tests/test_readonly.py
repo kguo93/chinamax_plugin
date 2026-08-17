@@ -98,11 +98,13 @@ from conftest import (
     write_claude_settings,
     write_hook_script,
     write_mcp_config,
+    write_policy_settings,
 )
 
 
 def test_mcp_tools_advertised_in_read_only_job(job_env, tmp_path):
     """Worker MCP tools stay advertised in a read-only Job (outside the posture)."""
+    write_policy_settings(mcp=True)
     script = mcp_server_script(tmp_path)
     env = job_env(bash_script("ls"))
     (env.workspace / ".claude").mkdir()
@@ -118,6 +120,7 @@ def test_mcp_tools_advertised_in_read_only_job(job_env, tmp_path):
 
 def test_hooks_fire_in_read_only_job(job_env, keyless_home):
     """Policy hooks run even for a read-only Job (they are host policy, not tools)."""
+    write_policy_settings(hooks=True)
     command = write_hook_script(keyless_home / "hookdir", "deny", exit_code=2, stderr="hook says no")
     write_claude_settings(
         keyless_home / ".claude" / "settings.json",

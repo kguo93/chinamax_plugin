@@ -107,10 +107,16 @@ def test_profile_model_override_present_in_contract_copies():
         assert "Profile model" in text
 
 
-def test_mcp_selection_token_present_in_contract_copies():
-    """All three initial-dispatch copies map the Worker-MCP `mcp=` token to `--mcp`."""
-    for text in (COMMAND, AGENT, CONTRACT):
-        assert "mcp=" in text
-        assert "--mcp" in text
-    # The command's seam mapping lists the flag alongside the others.
-    assert "--mcp <value>" in COMMAND
+def test_mcp_selection_token_absent_from_contract_copies():
+    """The Worker-MCP `mcp=`/`--mcp` selector is REMOVED (ADR 0016 amended 0.7.0).
+
+    All four dispatch surfaces must drop the dead token: the per-Host `mcp`
+    toggle is the sole control, and a stray token would make the Haiku Bridge
+    emit an argument the CLI no longer accepts.
+    """
+    task_skill = (REPO_ROOT / "skills" / "chinamax-task" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    for text in (COMMAND, AGENT, CONTRACT, task_skill):
+        assert "mcp=" not in text
+        assert "--mcp" not in text

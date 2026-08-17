@@ -26,6 +26,48 @@ silently swallows) those `[policy]` lines fall back to the structured
 
 ## Decision
 
+**Amended 2026-08-17 (0.7.0): three per-Host toggles, default OFF; the `mcp=`
+per-dispatch selector removed.** Two reversals of the original decision below.
+
+1. *Harness-parity always-on → opt-in toggles.* The original enforced all three
+   capabilities on every worker Job unconditionally (the Context's premise that
+   "a worker model dispatched through the Bridge ran with strictly less of the
+   Host's governance than a Claude/Codex session would", closed for every Job).
+   Reversed: each capability — Memory injection (§B), Policy hooks (§A), Worker
+   MCP (§C) — is now an independent per-Host boolean toggle, `memory` / `hooks`
+   / `mcp`, in a per-Host `settings.json` at exactly
+   `HostContext.state_root / "settings.json"`, and ALL THREE DEFAULT OFF (an
+   absent file or key ⇒ off; a disabled feature SKIPS its discovery/spawn
+   entirely, not discover-then-drop). The upgrade regression is accepted: a
+   0.5/0.6 install silently runs workers with no policy until opted in (surfaced
+   by setup, status, and the README). The toggles are resolved ONCE and PINNED
+   in the Job record's `request` block at dispatch — `memoryEnabled` /
+   `hooksEnabled` booleans beside the existing RESOLVED `mcp` name list — so a
+   resume replays the pins and never re-reads the file: the SAME staleness class
+   as B.4 / C.3. A legacy pre-0.7 record with a pinned `mcp` list keeps replaying
+   it; one with NO `mcp` key coerces to `[]` (off) on resume, never the
+   None⇒all-discovered arm.
+
+2. *`mcp=` per-dispatch opt-out → removed.* The original §C "Per-dispatch
+   opt-out" below reads: "The operator arg `mcp=`: `mcp=none` → no servers;
+   `mcp=a,b` → connect only those; absent → all discovered." Reversed
+   (user-directed, for consistency across the three capabilities): the `mcp=`
+   Bridge-contract token and the `--mcp` CLI flag are DELETED. The global `mcp`
+   toggle is the sole control — ON connects all discovered servers, OFF connects
+   none — with no per-dispatch escape hatch; `memory` and `hooks` likewise have
+   no dispatch token.
+
+*Failure polarity — the one deliberate exception to fail-open.* The never-raise,
+fail-open contract still holds for the Job-runtime policy layer (`Policy.build`
+and everything downstream). The lone exception is the dispatch-boundary settings
+loader (`load_policy_settings`): a MALFORMED `settings.json` — unparseable JSON,
+a non-object document or `policy` value, a non-boolean toggle (JSON `null`
+included), an unreadable file, or a directory at the path — fails the new
+dispatch/`exec` with a `PolicySettingsError` (a `ChinamaxError` subclass the CLI
+boundary renders `chinamax: <msg>`, exit 1) naming the file, until fixed.
+Resumes never read the file, so a malformed file breaks only NEW dispatches;
+status and setup read it tolerantly (flag it, never die).
+
 ### Plugin hooks are never Policy hooks
 
 Workers never autoload plugins: the Runtime has no skills/agents/commands/MCP-
@@ -220,7 +262,12 @@ the later duplicate and logs. Per-server `env` and `cwd` are honored; an entry
 that is disabled, malformed, non-stdio, or a selected name matching no discovered
 server is skipped with a `[policy]` log (fail-open class).
 
-**Per-dispatch opt-out.** The operator arg `mcp=`: `mcp=none` → no servers;
+**Per-dispatch opt-out.** *(Reversed 2026-08-17 / 0.7.0 — see the amendment at
+the top of this section: the `mcp=` token and `--mcp` flag are removed; the
+per-Host `mcp` toggle is the sole control, ON ⇒ all discovered, OFF ⇒ none. The
+dispatch still resolves the ON selection to a CONCRETE server-name list pinned in
+`request.mcp` exactly as described below, so resumes replay exact names.)* The
+operator arg `mcp=`: `mcp=none` → no servers;
 `mcp=a,b` → connect only those; absent → all discovered. Threads pin their MCP
 selection like a Pinned model — resumes replay it. Flows: Bridge contract token →
 `--mcp` CLI flag → Job record field. Pinning is CONCRETE: the dispatcher resolves

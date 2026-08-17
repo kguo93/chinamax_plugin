@@ -8,7 +8,14 @@ import time
 from chinamax import state
 from chinamax.__main__ import main
 from chinamax.loop import PHASE_RUNNING_TOOL
-from conftest import PROFILE, bash_script, build_record, wait_for, wait_for_status
+from conftest import (
+    PROFILE,
+    bash_script,
+    build_record,
+    wait_for,
+    wait_for_status,
+    write_policy_settings,
+)
 
 #: Long enough to observe the Job while it is still running.
 SLOW_COMMAND = "sleep 4; echo done"
@@ -302,16 +309,34 @@ def test_status_escapes_control_char_in_pinned_model(dispatch_env, capsys):
     assert out.count("custom-\\x1bm") == 2, "escaped in the row cell AND the detail line"
 
 
+def test_status_footer_reports_policy_toggles(dispatch_env, capsys):
+    """The bare-listing footer reports the toggle values and flags a malformed file."""
+    env = dispatch_env()
+    write_policy_settings(memory=True, hooks=False, mcp=True)
+
+    assert main(["status", "--workspace", str(env.workspace)]) == 0
+    listing = capsys.readouterr().out
+    assert "policy: memory on  hooks off  mcp on" in listing
+    assert "policy settings: " in listing
+
+    # A malformed settings.json flags in the footer but never breaks the listing.
+    (state.state_root() / "settings.json").write_text("{bad", encoding="utf-8")
+    assert main(["status", "--workspace", str(env.workspace)]) == 0
+    assert "MALFORMED" in capsys.readouterr().out
+
+
 def test_resolution_error_exits_one(dispatch_env, capsys):
     """A named Job that is not found exits 1 listing candidates, never 0."""
     env = dispatch_env()
 
-    # Against an EMPTY store too: exit 0 with no output answers only a bare
-    # `status` with nothing to list.
+    # Against an EMPTY store too: a bare `status` with nothing to list exits 0
+    # and prints only the policy footer (no Job rows).
     assert main(["status", "task-nope-000000", "--workspace", str(env.workspace)]) == 1
     assert "no Job matching" in capsys.readouterr().err
     assert main(["status", "--workspace", str(env.workspace)]) == 0
-    assert capsys.readouterr().out == ""
+    listing = capsys.readouterr().out
+    assert "policy: memory off  hooks off  mcp off" in listing
+    assert "policy settings: " in listing and "settings.json" in listing
 
     running_job(env)
     assert main(["logs", "task-nope-000000", "--workspace", str(env.workspace)]) == 1

@@ -26,6 +26,10 @@ CASES = {
     "wrong_typed_mcp": ({"mcp": "server"}, "mcp"),
     "bad_mcp_element": ({"mcp": [1]}, "mcp"),
     "empty_mcp_element": ({"mcp": [""]}, "mcp"),
+    # The pinned Policy toggles must be booleans (a non-bool would silently ride
+    # the record and mis-govern the worker).
+    "wrong_typed_memory_enabled": ({"memory_enabled": "yes"}, "memory_enabled"),
+    "wrong_typed_hooks_enabled": ({"hooks_enabled": 1}, "hooks_enabled"),
 }
 
 
@@ -64,3 +68,16 @@ def test_host_and_mcp_fields_optional_and_carried(job_env):
     assert carried.mcp == ["a", "b"]
     # An explicit empty list is meaningful (no servers) and is preserved.
     assert parse_spec(env.spec(mcp=[])).mcp == []
+
+
+def test_policy_toggle_fields_optional_and_defaulted(job_env):
+    """memory_enabled/hooks_enabled default False when absent and carry when set."""
+    env = job_env(bash_then_report_script())
+
+    default = parse_spec(env.spec())
+    assert default.memory_enabled is False
+    assert default.hooks_enabled is False
+
+    carried = parse_spec(env.spec(memory_enabled=True, hooks_enabled=False))
+    assert carried.memory_enabled is True
+    assert carried.hooks_enabled is False

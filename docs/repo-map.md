@@ -36,4 +36,4 @@ whole file, including its `**Amended <date>**` notes).
 | 0013† | `0013-dual-host-runtime-and-thin-adapters.md` | One Host-neutral Runtime with thin Claude and Codex adapters | Host architecture |
 | 0014 | `0014-codex-yolo-runtime-boundary-and-lifecycle-gaps.md` | Codex yolo boundary and detached lifecycle backstop | Host architecture |
 | 0015† | `0015-cross-platform-runtime-portability.md` | Native macOS/Windows portability with Linux preservation | Platform architecture |
-| 0016 | `0016-worker-host-policy-enforcement.md` | Worker-side Host-policy enforcement: Policy hooks, Memory injection, Worker MCP | Worker Host-policy enforcement |
+| 0016† | `0016-worker-host-policy-enforcement.md` | Worker-side Host-policy enforcement: Policy hooks, Memory injection, Worker MCP (per-Host toggles, default OFF; `mcp=` removed — amended 2026-08-17 / 0.7.0) | Worker Host-policy enforcement |

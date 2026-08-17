@@ -76,7 +76,7 @@ def test_compiled_agent_has_codex_native_settings(tmp_path):
         encoding="utf-8",
     )
     compiled = compile_codex_agent(source)
-    assert "# chinamax-managed-plugin-version: 0.5.0" in compiled
+    assert "# chinamax-managed-plugin-version: 0.7.0" in compiled
     assert 'model = "gpt-5.6-terra"' in compiled
     assert 'model_reasoning_effort = "low"' in compiled
     assert "developer_instructions" in compiled

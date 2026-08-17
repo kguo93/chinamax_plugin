@@ -529,15 +529,42 @@ def policy_spec(
     job_id: str = "task-test-aaaaaa",
     host: str = "claude",
     mcp: list[str] | None = None,
+    memory_enabled: bool = True,
+    hooks_enabled: bool = True,
 ) -> types.SimpleNamespace:
-    """A minimal spec-shaped object for direct `Policy.build` unit calls."""
+    """A minimal spec-shaped object for direct `Policy.build` unit calls.
+
+    The Policy toggles default ON so hook/Memory behavior under a direct
+    ``Policy.build`` call stays exercised; the settings.json default-OFF polarity
+    is covered through the dispatch/exec seams instead (ADR 0016 amended 0.7.0).
+    """
     return types.SimpleNamespace(
         workspace=str(workspace),
         transcript_path=str(transcript_path),
         job_id=job_id,
         host=host,
         mcp=mcp,
+        memory_enabled=memory_enabled,
+        hooks_enabled=hooks_enabled,
     )
+
+
+def write_policy_settings(
+    *, memory: bool = False, hooks: bool = False, mcp: bool = False, host: str = "claude"
+) -> None:
+    """Write the per-Host ``settings.json`` toggles through production resolution.
+
+    Resolves the settings root ITSELF the way production does — a fresh
+    ``HostContext`` off the current fixture env, so ``dispatch_env`` lands under
+    its ``CLAUDE_PLUGIN_DATA`` state root and ``job_env`` under the temp HOME
+    fallback — rather than a caller-passed root that could drift. ``host="codex"``
+    resolves through the Codex family, never the Claude root.
+    """
+    from chinamax import policy
+    from chinamax.host import Host, HostContext
+
+    context = HostContext.from_host(Host(host))
+    policy.write_policy_settings(context, {"memory": memory, "hooks": hooks, "mcp": mcp})
 
 
 def raw_tools_array(raw_body: bytes) -> bytes:
@@ -768,6 +795,13 @@ def keyless_home(tmp_path_factory, monkeypatch) -> Path:
     )
     for name in AMBIENT_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+    # Strip inherited plugin-data roots so the state root falls back UNDER this
+    # test's temp HOME. Without this a suite run inside an installed plugin (where
+    # CLAUDE_PLUGIN_DATA points at the operator's real ~/.claude data) would read
+    # AND write the operator's real per-Host settings.json (ADR 0016 amended
+    # 0.7.0). `dispatch_env`/`isolated` set their own temp roots after this.
+    for name in ("CLAUDE_PLUGIN_DATA", "CLAUDE_PLUGIN_ROOT", "PLUGIN_DATA", "PLUGIN_ROOT"):
+        monkeypatch.delenv(name, raising=False)
     return home
 
 
@@ -883,4 +917,5 @@ __all__ = [
     "write_mcp_config",
     "write_hook_script",
     "write_overlay",
+    "write_policy_settings",
 ]

@@ -19,9 +19,8 @@ Runtime tool layer. The explicit marker is an adapter-to-Runtime transport detai
 not a persistent setting or a substitute for the Codex UI permission check.
 
 Require exactly one `profile=` and apply the shared task grammar for the
-optional `--read-only` posture, **Profile model** `model=`, Worker-MCP `mcp=`
-(mapped to `--mcp <value>`), `bash_timeout=`, `poll=`, duplicates, and an empty
-prompt. Preserve `--read-only` in the Runtime dispatch when the
+optional `--read-only` posture, **Profile model** `model=`, `bash_timeout=`,
+`poll=`, duplicates, and an empty prompt. Preserve `--read-only` in the Runtime dispatch when the
 operator supplies it; it is independent of Codex yolo and must never be
 dropped by the adapter. Lowercase names,
 replace non `[a-z0-9_]` characters with `_`, collapse and trim runs, bound the

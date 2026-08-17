@@ -1825,6 +1825,8 @@ def new_record(
     bash_timeout_s: float | None = None,
     model: str | None = None,
     mcp: list[str] | None = None,
+    memory_enabled: bool = False,
+    hooks_enabled: bool = False,
     originating_session: str | None = None,
     bridge_name: str | None = None,
     host: str | Host | None = None,
@@ -1868,6 +1870,11 @@ def new_record(
         # a resume replays exact names and a server configured later never appears
         # mid-Thread.
         request["mcp"] = list(mcp)
+    # The pinned Policy toggles, resolved once at dispatch beside the MCP pin
+    # (ADR 0016 amended 0.7.0). Persisted unconditionally as camelCase keys (the
+    # `bashTimeoutSec` precedent), so a resume replays all three.
+    request["memoryEnabled"] = bool(memory_enabled)
+    request["hooksEnabled"] = bool(hooks_enabled)
     selected_host = str(host or current_host().host.value)
     record = dict(RECORD_DEFAULTS)
     record.update(
@@ -2332,6 +2339,8 @@ class JobStore:
                 bash_timeout_s=request.get("bashTimeoutSec"),
                 model=request.get("model"),
                 mcp=request.get("mcp"),
+                memory_enabled=bool(request.get("memoryEnabled", False)),
+                hooks_enabled=bool(request.get("hooksEnabled", False)),
                 originating_session=originating_session,
                 bridge_name=source.get("bridgeName"),
                 host=source.get("host") or self.host_context.host.value,

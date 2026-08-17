@@ -15,6 +15,7 @@ import json
 import os
 import stat
 import types
+from pathlib import Path
 
 import pytest
 
@@ -40,9 +41,11 @@ def _stub_find_conda(monkeypatch):
     monkeypatch.setattr(doctor, "_find_conda", lambda: "/stub/miniconda3/bin/conda")
 
 
-def _ns(json_flag: bool, workspace) -> argparse.Namespace:
+def _ns(json_flag: bool, workspace, toggles: list[str] | None = None) -> argparse.Namespace:
     """Build the parsed ``setup`` arguments."""
-    return argparse.Namespace(json=json_flag, workspace=str(workspace))
+    return argparse.Namespace(
+        json=json_flag, workspace=str(workspace), toggles=list(toggles or [])
+    )
 
 
 def _all_present(_python: str) -> dict:
@@ -173,10 +176,18 @@ def test_doctor_reports(tmp_path, keyless_home, isolated, monkeypatch, capsys):
             "env",
             "deps",
             "profiles",
+            "policy",
             "fixes",
             "prerequisites",
         }
         assert report["prerequisites"] == {"bash": True, "miniconda": True}
+        # The Policy toggles report all-OFF (no settings.json), with the full path.
+        assert report["policy"]["present"] is False
+        assert report["policy"]["malformed"] is False
+        assert report["policy"]["memory"] is False
+        assert report["policy"]["hooks"] is False
+        assert report["policy"]["mcp"] is False
+        assert report["policy"]["settings_path"].endswith("settings.json")
         assert "prerequisite_fixes" not in report
         assert report["ok"] is False and code == 1
         assert report["python"] is None
@@ -245,6 +256,111 @@ def test_doctor_ok_path(tmp_path, isolated, monkeypatch, capsys):
     assert "prerequisite_fixes" not in report
     # The resolved interpreter is recorded where the shims read it first.
     assert doctor.python_path_file().read_text(encoding="utf-8").strip() == fake_python
+
+
+# ── Policy toggles (settings.json, ADR 0016 amended 0.7.0) ──────────────────────
+
+from chinamax import ChinamaxError
+
+
+def _settings_file(plugin_data):
+    """The per-Host settings.json under the isolated plugin-data state root."""
+    return plugin_data / "state" / "settings.json"
+
+
+def test_setup_writes_and_subset_updates_policy_toggles(tmp_path, isolated, capsys):
+    """Explicit toggle args write settings.json; a later subset updates ONLY named keys."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fake_python = _fake_python(tmp_path)
+
+    doctor.run_setup(
+        _ns(True, workspace, ["memory=on", "mcp=on"]),
+        find_env_python=lambda: fake_python,
+        check_deps=_all_present,
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["policy"]["memory"] is True
+    assert report["policy"]["hooks"] is False
+    assert report["policy"]["mcp"] is True
+    assert report["policy"]["present"] is True
+
+    # A subset rerun updates only the named key; the others are preserved.
+    doctor.run_setup(
+        _ns(True, workspace, ["hooks=on"]),
+        find_env_python=lambda: fake_python,
+        check_deps=_all_present,
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["policy"]["memory"] is True  # preserved
+    assert report["policy"]["hooks"] is True  # updated
+    assert report["policy"]["mcp"] is True  # preserved
+
+
+def test_setup_no_toggle_args_never_writes(tmp_path, isolated, capsys):
+    """A no-arg run leaves a fresh settings.json UNSET (writes nothing)."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fake_python = _fake_python(tmp_path)
+
+    doctor.run_setup(
+        _ns(True, workspace), find_env_python=lambda: fake_python, check_deps=_all_present
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["policy"]["present"] is False
+    assert not _settings_file(isolated).exists()
+
+
+def test_setup_repairs_malformed_settings_with_named_keys(tmp_path, isolated, capsys):
+    """Subset args against a malformed file rewrite defaults (OFF) + the named keys."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fake_python = _fake_python(tmp_path)
+    settings = _settings_file(isolated)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text("{ not json", encoding="utf-8")
+
+    doctor.run_setup(
+        _ns(True, workspace, ["mcp=on"]),
+        find_env_python=lambda: fake_python,
+        check_deps=_all_present,
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["policy"]["malformed"] is False  # repaired
+    assert report["policy"]["memory"] is False
+    assert report["policy"]["hooks"] is False
+    assert report["policy"]["mcp"] is True
+
+
+def test_setup_malformed_settings_flags_and_fails(tmp_path, isolated, capsys):
+    """A no-arg run over a malformed file flags it, prints the full path, and fails."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    fake_python = _fake_python(tmp_path)
+    settings = _settings_file(isolated)
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"policy": {"memory": "yes"}}', encoding="utf-8")
+
+    code = doctor.run_setup(
+        _ns(True, workspace), find_env_python=lambda: fake_python, check_deps=_all_present
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["policy"]["malformed"] is True
+    assert report["ok"] is False and code == 1
+    assert report["policy"]["settings_path"].endswith("settings.json")
+
+
+@pytest.mark.parametrize("bad", [["bogus=on"], ["memory=maybe"], ["memory"]])
+def test_setup_rejects_bad_toggle_args(tmp_path, isolated, bad):
+    """An unknown toggle key or a non-on|off value is a usage error."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    with pytest.raises(ChinamaxError):
+        doctor.run_setup(
+            _ns(True, workspace, bad),
+            find_env_python=lambda: _fake_python(tmp_path),
+            check_deps=_all_present,
+        )
 
 
 def test_doctor_rerecords_stale_python(tmp_path, isolated, capsys):
@@ -884,3 +1000,66 @@ def test_codex_setup_plan_binds_prerequisite_fixes(monkeypatch, keyless_home, is
     assert plan_present["digest"] != plan_absent["digest"]
     # The rows live INSIDE the digested structure (digest placement is load-bearing).
     assert plan_present["digest_input"]["prerequisite_fixes"] == plan_present["prerequisite_fixes"]
+
+
+def test_codex_setup_plan_binds_policy_toggles(monkeypatch, keyless_home, isolated):
+    """The Codex preview shows the proposed toggle values and folds them into the digest."""
+    monkeypatch.setattr(
+        doctor, "prerequisite_status", lambda: {"bash": True, "miniconda": True}
+    )
+    codex = doctor.HostContext.from_host(doctor.Host.CODEX)
+    injected = dict(
+        context=codex,
+        find_env_python=lambda: None,
+        check_deps=lambda _p: {n: False for n in doctor.DEPS},
+    )
+    plan_off = doctor.codex_setup_plan(None, **injected)
+    plan_on = doctor.codex_setup_plan(None, policy_toggles={"memory": True}, **injected)
+
+    assert plan_off["policy_observed"]["present"] is False
+    assert plan_off["policy_proposed"] == {"memory": False, "hooks": False, "mcp": False}
+    assert plan_on["policy_proposed"] == {"memory": True, "hooks": False, "mcp": False}
+    # The toggle selection rides the digest, so a different selection needs a fresh preview.
+    assert plan_on["digest"] != plan_off["digest"]
+    assert plan_on["digest_input"]["policy"]["proposed"] == plan_on["policy_proposed"]
+
+
+def test_codex_apply_writes_settings_and_digest_aborts(
+    tmp_path, monkeypatch, keyless_home, isolated
+):
+    """Codex apply writes settings.json (in changed); a hand-edit before apply aborts."""
+    monkeypatch.setattr(
+        doctor, "prerequisite_status", lambda: {"bash": True, "miniconda": True}
+    )
+    codex = doctor.HostContext.from_host(doctor.Host.CODEX)
+    fake_python = _fake_python(tmp_path)
+    common = dict(context=codex, find_env_python=lambda: fake_python, check_deps=_all_present)
+
+    plan = doctor.codex_setup_plan(None, policy_toggles={"mcp": True}, **common)
+    result = doctor.apply_codex_setup(
+        plan,
+        plan["digest"],
+        install_agent=False,
+        context=codex,
+        find_env_python=lambda: fake_python,
+        check_deps=_all_present,
+    )
+    assert result["ok"] is True
+    assert plan["policy_settings_path"] in result["changed"]
+    written = json.loads(Path(plan["policy_settings_path"]).read_text(encoding="utf-8"))
+    assert written["policy"]["mcp"] is True
+
+    # A hand-edit between a FRESH preview and its apply changes `observed` → abort.
+    fresh = doctor.codex_setup_plan(None, policy_toggles={"mcp": True}, **common)
+    Path(fresh["policy_settings_path"]).write_text(
+        '{"policy": {"hooks": true, "mcp": true}}', encoding="utf-8"
+    )
+    with pytest.raises(ChinamaxError):
+        doctor.apply_codex_setup(
+            fresh,
+            fresh["digest"],
+            install_agent=False,
+            context=codex,
+            find_env_python=lambda: fake_python,
+            check_deps=_all_present,
+        )

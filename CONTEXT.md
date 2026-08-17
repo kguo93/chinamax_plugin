@@ -118,10 +118,21 @@ _Avoid_: system-prompt injection (it is never placed there), reminder
 **Worker MCP**:
 The per-Job connections to the Host's configured MCP servers whose tools are
 advertised to the worker alongside the native tool roster and governed by the
-same Policy hooks. A dispatch may narrow or disable the server set; the
-selection rides with the Thread.
+same Policy hooks. The per-Host `mcp` Policy toggle turns the whole capability
+on or off; when on, the RESOLVED server-name selection is pinned at dispatch and
+rides with the Thread across resumes.
 _Avoid_: conflating with the Host harness's own MCP connections (workers
-connect independently)
+connect independently); a per-dispatch `mcp=` selector (removed in 0.7.0 — the
+toggle is the sole control)
+
+**Policy toggles**:
+The three per-Host booleans — `memory`, `hooks`, `mcp` — each governing its
+ENTIRE ADR 0016 capability (Memory injection, Policy hooks, Worker MCP). They
+live in a per-Host `settings.json` under the state root, default OFF (absent
+file or key ⇒ off), and are resolved once and PINNED at dispatch so a Thread
+keeps the policy it was dispatched with. A malformed file fails a new dispatch.
+_Avoid_: conflating the toggle file with Claude's own `~/.claude/settings.json`
+(same basename, different file and schema); "flag" (they are not CLI flags)
 
 **Scratch root**:
 The Platform's temporary-file directory, which a Job's file tools may touch in

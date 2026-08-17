@@ -18,10 +18,15 @@ capabilities live here, in three clearly delimited sections:
   servers, whose tools are advertised alongside the native roster and governed by
   the same Policy hooks.
 
-The policy layer sits OUTSIDE the Registry's exception normalization and must
-NEVER raise: a discovery/translation/synthesis/dispatch failure degrades to a
-fail-open default (allow/continue) or an error-flavored observation, logged with
-a stable grep-able ``[policy]`` prefix. See ADR 0016.
+The Job-runtime policy layer — ``Policy.build`` and everything it drives (hook
+firing, Memory injection, MCP) — sits OUTSIDE the Registry's exception
+normalization and must NEVER raise: a discovery/translation/synthesis/dispatch
+failure degrades to a fail-open default (allow/continue) or an error-flavored
+observation, logged with a stable grep-able ``[policy]`` prefix. The lone
+exception is ``load_policy_settings``, the dispatch-boundary loader that
+validates the per-Host ``settings.json`` toggle file and raises
+``PolicySettingsError`` on a malformed file (default OFF when absent; ADR 0016
+amended 0.7.0). See ADR 0016.
 """
 
 from __future__ import annotations
@@ -37,9 +42,9 @@ import threading
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Mapping
 
-from chinamax import state
+from chinamax import ChinamaxError, state
 from chinamax.confinement import resolve_in_workspace
 from chinamax.host import Host, HostContext
 from chinamax.liveness import emit_event
@@ -80,6 +85,194 @@ def canonical_json(obj: object) -> str:
     the assertion form, not the wire form.
     """
     return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Section 0 — Policy toggle settings (the per-Host settings.json)
+# ════════════════════════════════════════════════════════════════════════════
+
+#: The per-Host toggle file, resolved at ``HostContext.state_root`` / this name.
+#: Its basename collides with Claude's own ``~/.claude/settings.json`` hooks
+#: source — a DIFFERENT file with a different schema — so every operator-facing
+#: surface prints its FULL path.
+SETTINGS_FILENAME = "settings.json"
+
+#: The three orthogonal Policy toggles, each governing its ENTIRE ADR 0016
+#: feature. Default OFF: an absent file or key resolves the toggle to False.
+_POLICY_TOGGLES = ("memory", "hooks", "mcp")
+
+
+class PolicySettingsError(ChinamaxError):
+    """A malformed ``settings.json`` — the one deliberate dispatch-boundary raise.
+
+    Raised only by :func:`load_policy_settings` (dispatch/exec) and the settings
+    writer, NEVER by :meth:`Policy.build` or anything downstream, whose never-raise
+    contract is intact. Subclasses ``ChinamaxError`` so the CLI boundary renders
+    it as ``chinamax: <msg>`` and exits 1 until the operator fixes the file.
+    """
+
+
+@dataclass(frozen=True)
+class PolicySettings:
+    """One Host's three resolved Policy toggles (default all OFF)."""
+
+    memory: bool = False
+    hooks: bool = False
+    mcp: bool = False
+
+
+def _settings_path(host_context: HostContext) -> Path:
+    """The Host's toggle file, beside the per-workspace state directories."""
+    return host_context.state_root / SETTINGS_FILENAME
+
+
+def _coerce_policy_settings(data: object, path: Path) -> PolicySettings:
+    """Validate a decoded settings document into resolved toggles, or raise.
+
+    Absent key ⇒ OFF; unknown extra keys are ignored (additive schema). A
+    non-object top level or ``policy`` value, or a non-boolean toggle value
+    (JSON ``null`` included — present-but-null is an error, absent is OFF), is
+    malformed.
+
+    Args:
+        data: The decoded JSON document.
+        path: The settings file, named in any error.
+
+    Returns:
+        The resolved toggles.
+
+    Raises:
+        PolicySettingsError: On a non-object document/``policy`` value, or a
+            non-boolean toggle value.
+    """
+    if not isinstance(data, dict):
+        raise PolicySettingsError(f"policy settings {path} must be a JSON object")
+    policy = data.get("policy", {})
+    if not isinstance(policy, dict):
+        raise PolicySettingsError(f"policy settings {path}: 'policy' must be an object")
+    values: dict[str, bool] = {}
+    for name in _POLICY_TOGGLES:
+        if name not in policy:
+            values[name] = False
+            continue
+        value = policy[name]
+        if not isinstance(value, bool):
+            raise PolicySettingsError(
+                f"policy settings {path}: 'policy.{name}' must be true or false, "
+                f"not {value!r}"
+            )
+        values[name] = value
+    return PolicySettings(**values)
+
+
+def load_policy_settings(host_context: HostContext) -> PolicySettings:
+    """Resolve the Host's Policy toggles, raising on a malformed file.
+
+    The dispatch/exec reader — the ONE dispatch-boundary raise. An absent file or
+    key resolves OFF; an unparseable file, a non-object document, a non-boolean
+    toggle, an unreadable file, or a directory at the path raises
+    ``PolicySettingsError`` naming the file.
+
+    Args:
+        host_context: The Host whose state root holds the file.
+
+    Returns:
+        The resolved toggles (all OFF when the file is absent).
+
+    Raises:
+        PolicySettingsError: On any malformed settings file.
+    """
+    path = _settings_path(host_context)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return PolicySettings()
+    except OSError as exc:
+        raise PolicySettingsError(f"policy settings {path} is unreadable: {exc}") from exc
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise PolicySettingsError(f"policy settings {path} is not valid JSON: {exc}") from exc
+    return _coerce_policy_settings(data, path)
+
+
+def inspect_policy_settings(host_context: HostContext) -> tuple[PolicySettings, bool]:
+    """Resolve the toggles tolerantly for status/setup — never raises.
+
+    The tolerant twin of :func:`load_policy_settings`: a malformed file becomes a
+    reported flag with OFF defaults, so status keeps listing Jobs and setup can
+    report the repair. No caller branches on a mode flag; this ONE wrapper is the
+    tolerant reader, so setup/status never grow private try/except.
+
+    Args:
+        host_context: The Host whose state root holds the file.
+
+    Returns:
+        ``(settings, malformed)`` — OFF defaults with ``malformed`` True on a bad
+        file.
+    """
+    try:
+        return load_policy_settings(host_context), False
+    except PolicySettingsError:
+        return PolicySettings(), True
+
+
+def _read_settings_document(path: Path) -> dict:
+    """The existing well-formed settings document, or ``{}`` to rebuild from scratch."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_policy_settings(
+    host_context: HostContext, updates: Mapping[str, bool]
+) -> PolicySettings:
+    """Persist a subset toggle update to the Host's ``settings.json``.
+
+    A well-formed file keeps its unknown top-level keys AND its existing toggle
+    block, updating ONLY the named toggles; an absent or malformed file is
+    (re)built from all-OFF defaults overlaid with the named toggles (the fresh
+    write and the repair). Publishes atomically via the state-write helper,
+    creating the state root first. A DIRECTORY at the path is NOT repairable —
+    ``os.replace`` cannot replace a directory — so this raises and setup asks for
+    manual removal instead.
+
+    Args:
+        host_context: The Host whose state root holds the file.
+        updates: The named toggles to set (a subset of memory/hooks/mcp).
+
+    Returns:
+        The resolved toggles after the write.
+
+    Raises:
+        PolicySettingsError: When a directory sits at the settings path.
+    """
+    path = _settings_path(host_context)
+    if path.is_dir():
+        raise PolicySettingsError(
+            f"policy settings {path} is a directory, not a file; remove it and "
+            "re-run setup"
+        )
+    _, malformed = inspect_policy_settings(host_context)
+    if malformed or not path.exists():
+        document: dict = {}
+        policy_block: dict = {name: False for name in _POLICY_TOGGLES}
+    else:
+        document = _read_settings_document(path)
+        existing = document.get("policy")
+        policy_block = dict(existing) if isinstance(existing, dict) else {}
+    for name, value in updates.items():
+        policy_block[name] = bool(value)
+    document["policy"] = policy_block
+    state.make_dir(host_context.state_root)
+    state._write_file(path, json.dumps(document, indent=2, sort_keys=True) + "\n")
+    return _coerce_policy_settings(document, path)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1037,6 +1230,7 @@ class Policy:
         transcript_path: str,
         job_id: str,
         log: PolicyLog,
+        memory_enabled: bool = False,
     ) -> None:
         self.workspace = workspace
         self.host_context = host_context
@@ -1047,6 +1241,10 @@ class Policy:
         self._job_id = job_id
         self._log = log
         self._mcp: WorkerMCP | None = None
+        #: The pinned Memory toggle. LOAD-BEARING: lazy nested-Memory injection
+        #: discovers files on demand and never reads ``self._memory``, so
+        #: ``lazy_blocks_for_path`` short-circuits on this when memory is OFF.
+        self._memory_enabled = memory_enabled
 
     @classmethod
     def build(
@@ -1061,19 +1259,43 @@ class Policy:
         workspace = Path(os.path.realpath(spec.workspace))
         if host_context is None:
             host_context = _resolve_host_context(getattr(spec, "host", None))
-        hooks = _safely(
-            lambda: discover_hooks(workspace, host_context, log),
-            HookConfig(False, (), (), ()),
-            log,
-            "hook discovery",
-        )
-        memory = _safely(
-            lambda: discover_memory(workspace, host_context, log), [], log, "memory discovery"
-        )
-        configs = _safely(
-            lambda: discover_mcp_configs(workspace, host_context, log), [], log, "MCP discovery"
-        )
-        configs = select_mcp_configs(configs, getattr(spec, "mcp", None), log)
+        # Each disabled feature SKIPS its discovery entirely (not discover-then-
+        # drop) and substitutes the empty value (ADR 0016 amended 0.7.0).
+        if spec.hooks_enabled:
+            hooks = _safely(
+                lambda: discover_hooks(workspace, host_context, log),
+                HookConfig(False, (), (), ()),
+                log,
+                "hook discovery",
+            )
+        else:
+            # Toggle OFF is NOT ``disableAllHooks``: ``disabled`` stays False and
+            # the EMPTY specs are what suppress firing (the firing logic keys on
+            # empty specs, never on ``disabled``). Do not "fix" this to True.
+            hooks = HookConfig(False, (), (), ())
+        if spec.memory_enabled:
+            memory = _safely(
+                lambda: discover_memory(workspace, host_context, log),
+                [],
+                log,
+                "memory discovery",
+            )
+        else:
+            memory = []
+        # MCP's disabled signal is the pinned list itself: only a non-empty
+        # concrete pin discovers and connects. ``[]``/None (OFF, or a legacy
+        # record coerced to []) skips discovery. An ON dispatch that discovered
+        # zero servers also skips here — behaviorally identical, accepted.
+        if spec.mcp:
+            configs = _safely(
+                lambda: discover_mcp_configs(workspace, host_context, log),
+                [],
+                log,
+                "MCP discovery",
+            )
+            configs = select_mcp_configs(configs, spec.mcp, log)
+        else:
+            configs = []
         return cls(
             workspace=workspace,
             host_context=host_context,
@@ -1083,6 +1305,7 @@ class Policy:
             transcript_path=str(spec.transcript_path),
             job_id=spec.job_id or "",
             log=log,
+            memory_enabled=bool(spec.memory_enabled),
         )
 
     # ── hooks ────────────────────────────────────────────────────────────────
@@ -1371,7 +1594,14 @@ class Policy:
         return build_memory_block(fresh)
 
     def lazy_blocks_for_path(self, name: str, value: object, injected: set[str]) -> list[str]:
-        """Assemble lazy Memory blocks for a touched subdirectory's Memory files."""
+        """Assemble lazy Memory blocks for a touched subdirectory's Memory files.
+
+        LOAD-BEARING short-circuit for memory OFF: ``_lazy_blocks`` discovers
+        Memory files on demand and never reads ``self._memory``, so without this
+        guard a memory-OFF Job would still lazy-inject on first touch.
+        """
+        if not self._memory_enabled:
+            return []
         return _safely(
             lambda: self._lazy_blocks(name, value, injected), [], self._log, "lazy memory"
         )

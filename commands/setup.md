@@ -1,7 +1,7 @@
 ---
-description: Set up the chinamax install — diagnose Prerequisites (bash, Miniconda, Git for Windows), pause for approval before installing any that are missing, then create the conda env and install the dependencies when missing, scaffold a commented ~/.claude/model-keys.env template, diagnose the API-key entries and state-dir writability, and record the resolved interpreter.
-argument-hint: "[--json] [--workspace <dir>]"
-allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/chinamax:*)
+description: Set up the chinamax install — diagnose Prerequisites (bash, Miniconda, Git for Windows), pause for approval before installing any that are missing, then create the conda env and install the dependencies when missing, scaffold a commented ~/.claude/model-keys.env template, diagnose the API-key entries and state-dir writability, choose the worker Policy toggles, and record the resolved interpreter.
+argument-hint: "[--json] [--workspace <dir>] [memory=on|off hooks=on|off mcp=on|off]"
+allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/chinamax:*), AskUserQuestion
 ---
 
 !`"${CLAUDE_PLUGIN_ROOT}/scripts/chinamax" setup "$ARGUMENTS"`
@@ -20,6 +20,7 @@ Follow this protocol on the report above. Do not summarize; the operator acts on
    Each command still triggers the Host's normal permission prompt; the word "approve" is textual consent, not a bypass. Do not widen `allowed-tools`.
 6. Re-run the launcher once (a fresh `scripts/chinamax setup` Bash call). Still missing → report and stop. Never loop.
 7. Exit 1 WITHOUT a `prerequisite_fixes` section → report the failure rows as before.
+8. Policy toggles: read the report's `policy toggles` line. If it says `UNSET` AND the operator passed no `memory=`/`hooks=`/`mcp=` argument, ask via AskUserQuestion whether to enable each of memory injection, Policy hooks, and Worker MCP for worker Jobs (each defaults OFF, off is safe), then re-run the launcher ONCE as `scripts/chinamax setup memory=<on|off> hooks=<on|off> mcp=<on|off>` with their answers and present the resulting report verbatim. If it shows the three values (already set) or `MALFORMED`, or the operator passed explicit toggle args, do NOT ask — present as-is; a MALFORMED file is fixed only by re-running with explicit toggle args.
 
 Windows-only: if the launcher itself cannot start (bash or python missing), run these natively in cmd.exe, then return to step 1:
 

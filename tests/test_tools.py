@@ -257,6 +257,7 @@ from conftest import (
     policy_spec,
     write_claude_settings,
     write_hook_script,
+    write_policy_settings,
 )
 from chinamax.policy import Policy, translate_tool
 
@@ -290,6 +291,7 @@ def test_translate_tool_full_table(native_name, native_input, claude_name, expec
 
 def test_pretooluse_deny_blocks_dispatch(job_env, keyless_home):
     """A PreToolUse deny (exit 2) stops the tool and returns its reason verbatim."""
+    write_policy_settings(hooks=True)
     hooks_dir = keyless_home / "hookdir"
     hooks_dir.mkdir()
     command = write_hook_script(hooks_dir, "deny", exit_code=2, stderr="nope, not that command")
@@ -308,8 +310,25 @@ def test_pretooluse_deny_blocks_dispatch(job_env, keyless_home):
     assert "nope, not that command" in observations[0]["content"]
 
 
+def test_hooks_off_never_fires_configured_hook(job_env, keyless_home):
+    """The default-OFF hooks toggle: a configured settings-file hook never fires."""
+    command = write_hook_script(keyless_home / "hookdir", "deny", exit_code=2, stderr="blocked")
+    write_claude_settings(
+        keyless_home / ".claude" / "settings.json",
+        pre=[hook_group(command, matcher="Bash")],
+    )
+    env = job_env(tool_script(("bash", {"command": "echo hi > out.txt"})))
+
+    assert env.run() == 0
+
+    # Hooks OFF: the deny never fired, so the bash ran and wrote the file.
+    assert "out.txt" in env.tree()
+    assert not env.observations()[0].get("is_error", False)
+
+
 def test_posttooluse_additional_context_appended(job_env, keyless_home):
     """PostToolUse additionalContext rides after the tool_result in the same turn."""
+    write_policy_settings(hooks=True)
     marker = "POLICY-EXTRA-CONTEXT-7f3a"
     stdout = json.dumps(
         {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": marker}}
@@ -444,6 +463,7 @@ def test_apply_patch_per_file_synthesis(keyless_home, tmp_path):
 
 def test_apply_patch_single_deny_vetoes(job_env, keyless_home):
     """Any single per-file PreToolUse deny vetoes the WHOLE patch (nothing applied)."""
+    write_policy_settings(hooks=True)
     command = write_hook_script(keyless_home / "hookdir", "veto", exit_code=2, stderr="no edits")
     write_claude_settings(
         keyless_home / ".claude" / "settings.json",

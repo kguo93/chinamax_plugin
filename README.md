@@ -159,25 +159,28 @@ response. Steer, resume, and cancel semantics are unchanged across Hosts and
 Platforms. Prompt/stdin transport remains quoted and Bash-oriented, including
 paths with spaces.
 
-## Worker Host-policy enforcement (0.5.0)
+## Worker Host-policy enforcement (0.5.0; per-Host toggles 0.7.0)
 
-A worker Job now runs under the same Host operator policy a native session would,
-enforced by the shared Runtime (ADR 0016):
+A worker Job can run under the same Host operator policy a native session would,
+enforced by the shared Runtime (ADR 0016). As of 0.7.0 each capability is an
+independent per-Host toggle, and **all three default OFF** — a fresh install AND
+an upgrade from 0.5/0.6 runs workers with no policy until you opt in (accepted).
+Choose the toggles in `/chinamax:setup` or by hand-editing the per-Host
+`settings.json`; `status`'s listing prints their current values and the file's
+full path.
 
-- **Policy hooks** — your Host's settings-file hooks fire at the worker's
-  PreToolUse, PostToolUse, and Stop seams, with Claude-canonical tool names so
-  existing matchers/scripts bind. Sources are settings only (Claude:
-  managed/user/project/local `settings.json`; Codex: `config.toml` hook tables);
-  plugin-registered hooks never fire for workers. Edges are fail-open (a broken
-  hook weakens, never blocks, enforcement) and logged with a `[policy]` prefix.
-- **Memory injection** — `CLAUDE.md`/`AGENTS.md` (and their `@`-imports and
-  `CLAUDE.local.md` siblings) along the workspace's ancestor chain are injected as
-  a delimited block on a fresh Job's first turn, and lazily when a subdirectory is
-  first touched. The Claude memory store (`MEMORY.md`, `memory/`) is excluded.
-- **Worker MCP** — your Host's configured stdio MCP servers are connected per Job
-  and their tools advertised as `mcp__<server>__<tool>` alongside native tools.
-  Pin the selection per dispatch with `mcp=none` or `mcp=<comma-list>` (default:
-  all discovered); the choice rides with the Thread across resumes.
+| Toggle | ON enables | OFF (default) |
+| --- | --- | --- |
+| `memory` | Memory injection — `CLAUDE.md`/`AGENTS.md` (with `@`-imports and `CLAUDE.local.md` siblings) along the workspace's ancestor chain, injected on a fresh Job's first turn and lazily on first touch of a subdirectory; the Claude memory store (`MEMORY.md`, `memory/`) is excluded | no Memory content is ever injected |
+| `hooks` | Policy hooks — your Host's settings-file hooks fire at the worker's PreToolUse, PostToolUse, and Stop seams with Claude-canonical tool names, fail-open and logged with a `[policy]` prefix (Claude: managed/user/project/local `settings.json`; Codex: `config.toml` hook tables; plugin-registered hooks never fire for workers) | no hooks are discovered or fired |
+| `mcp` | Worker MCP — your Host's configured stdio MCP servers are connected per Job and advertised as `mcp__<server>__<tool>` alongside native tools | no servers are discovered or connected |
+
+The toggles are pinned at dispatch: a Thread keeps the policy it was dispatched
+with (the resolved MCP server set rides the Thread across resumes), and later
+edits affect only new Jobs. The `settings.json` basename collides with Claude's
+own `~/.claude/settings.json` — a different file with a different schema — so
+every surface prints its full path. A malformed `settings.json` fails a new
+dispatch with a clear error until it is fixed.
 
 MCP server processes and hook commands run UNSANDBOXED with full host capability,
 independent of a Job's `--read-only` posture — the same documented residual-risk

@@ -109,7 +109,7 @@ def test_result_without_payload_still_exits_zero(dispatch_env, capsys):
 
 # ── Stop Policy hook (ADR 0016) ────────────────────────────────────────────────
 
-from conftest import hook_group, report_turn, write_claude_settings
+from conftest import hook_group, report_turn, write_claude_settings, write_policy_settings
 
 #: A Stop hook that BLOCKS the first report_result (stop_hook_active false) and
 #: ALLOWS a later one (stop_hook_active true), recording the flag it saw.
@@ -126,6 +126,7 @@ exit 2
 
 def test_stop_hook_blocks_then_releases(job_env, keyless_home, tmp_path):
     """A Stop hook rejects the first report_result; the second (stop_hook_active) completes."""
+    write_policy_settings(hooks=True)
     evidence = tmp_path / "stop.seen"
     script = tmp_path / "stop_hook.sh"
     script.write_text(_STOP_HOOK.format(evidence=evidence), encoding="utf-8")

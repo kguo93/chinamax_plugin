@@ -345,13 +345,31 @@ def test_bare_resume_takes_the_latest_thread(dispatch_env, capsys):
 import os as _os
 
 from chinamax.policy import _MEMORY_OPEN
-from conftest import memory_block_paths
+from conftest import (
+    memory_block_paths,
+    mcp_server_entry,
+    mcp_server_script,
+    write_mcp_config,
+    write_policy_settings,
+)
 
 
 def test_mcp_selection_replayed_on_resume(dispatch_env, capsys):
-    """A Thread's pinned Worker-MCP selection is replayed verbatim on resume."""
+    """A Thread's pinned Worker-MCP selection is replayed verbatim on resume.
+
+    The pin is the CONCRETE list of discovered server names, resolved once at
+    dispatch; the file can flip OFF afterward and the resume still replays the
+    same names (resumes never re-read settings).
+    """
     env = dispatch_env(bash_then_report_script())
-    code, source = env.dispatch("--mcp", "foo,bar")
+    write_policy_settings(mcp=True)
+    (env.workspace / ".claude").mkdir()
+    script = mcp_server_script(env.workspace)
+    write_mcp_config(
+        env.workspace / ".mcp.json",
+        {"foo": mcp_server_entry(script), "bar": mcp_server_entry(script)},
+    )
+    code, source = env.dispatch()
     assert code == 0
     store = env.store
     workspace = str(env.workspace)
@@ -359,6 +377,8 @@ def test_mcp_selection_replayed_on_resume(dispatch_env, capsys):
     assert finished["status"] == state.STATUS_COMPLETED, finished.get("errorMessage")
     assert finished["request"]["mcp"] == ["foo", "bar"]
 
+    # The file flips OFF, but the pin rides the Thread — resumes never re-read it.
+    write_policy_settings(mcp=False)
     env.bind([report_turn()])
     assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
     resumed = capsys.readouterr().out.strip()
@@ -368,9 +388,87 @@ def test_mcp_selection_replayed_on_resume(dispatch_env, capsys):
     assert record["request"]["mcp"] == ["foo", "bar"]
 
 
+def test_legacy_record_without_pins_resumes_off(dispatch_env, capsys):
+    """A legacy record with NO mcp/boolean pins resumes fully OFF, never all-discovered."""
+    env = dispatch_env(bash_then_report_script())
+    (env.workspace / ".claude").mkdir()
+    script = mcp_server_script(env.workspace)
+    write_mcp_config(env.workspace / ".mcp.json", {"echo": mcp_server_entry(script)})
+    code, source = env.dispatch()
+    assert code == 0
+    store = env.store
+    workspace = str(env.workspace)
+    wait_for_status(store, source, state.TERMINAL_STATUSES)
+    # Simulate a pre-0.7 record: strip every pin the dispatch wrote (the mcp list
+    # AND the memoryEnabled/hooksEnabled booleans).
+    record = store.read(source)
+    request = dict(record["request"])
+    for key in ("mcp", "memoryEnabled", "hooksEnabled"):
+        request.pop(key, None)
+    assert store.update(source, {"request": request}, expect={record["status"]}) is not None
+
+    resumed_provider = env.bind([report_turn()])
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    assert wait_for(lambda: bool(resumed_provider.requests))
+    resumed = capsys.readouterr().out.strip()
+    completed = wait_for_status(store, resumed, state.TERMINAL_STATUSES)
+    assert completed["status"] == state.STATUS_COMPLETED, completed.get("errorMessage")
+    # The absent mcp pin coerces to [] (OFF): no server is connected on resume,
+    # never the None⇒all-discovered arm.
+    names = [tool["name"] for tool in resumed_provider.requests[0]["body"]["tools"]]
+    assert not any(name.startswith("mcp__") for name in names)
+    # The absent booleans default False (None-drop → parse_spec default), and the
+    # resumed record re-pins them OFF.
+    assert completed["request"]["memoryEnabled"] is False
+    assert completed["request"]["hooksEnabled"] is False
+
+
+def test_policy_booleans_replayed_on_resume(dispatch_env, capsys):
+    """The pinned memory/hooks booleans ride the Thread — a later file flip is ignored."""
+    env = dispatch_env(bash_then_report_script())
+    write_policy_settings(memory=True, hooks=True)
+    code, source = env.dispatch()
+    assert code == 0
+    store = env.store
+    workspace = str(env.workspace)
+    finished = wait_for_status(store, source, state.TERMINAL_STATUSES)
+    assert finished["request"]["memoryEnabled"] is True
+    assert finished["request"]["hooksEnabled"] is True
+
+    # Flip the file OFF; the resume replays the ON pins (resumes never re-read).
+    write_policy_settings(memory=False, hooks=False)
+    env.bind([report_turn()])
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    resumed = capsys.readouterr().out.strip()
+    record = wait_for_status(store, resumed, state.TERMINAL_STATUSES)
+    assert record["request"]["memoryEnabled"] is True
+    assert record["request"]["hooksEnabled"] is True
+
+
+def test_policy_booleans_off_stay_off_on_resume(dispatch_env, capsys):
+    """The vice-versa: OFF pins stay OFF after the file flips ON."""
+    env = dispatch_env(bash_then_report_script())
+    code, source = env.dispatch()  # no settings file → all OFF
+    assert code == 0
+    store = env.store
+    workspace = str(env.workspace)
+    finished = wait_for_status(store, source, state.TERMINAL_STATUSES)
+    assert finished["request"]["memoryEnabled"] is False
+    assert finished["request"]["hooksEnabled"] is False
+
+    write_policy_settings(memory=True, hooks=True)
+    env.bind([report_turn()])
+    assert main(["resume", "--workspace", workspace, source, "--", FOLLOW_UP]) == 0
+    resumed = capsys.readouterr().out.strip()
+    record = wait_for_status(store, resumed, state.TERMINAL_STATUSES)
+    assert record["request"]["memoryEnabled"] is False
+    assert record["request"]["hooksEnabled"] is False
+
+
 def test_memory_not_reinjected_on_resume(dispatch_env, capsys):
     """A resumed Job never re-injects the Memory chain; the source block stands once."""
     env = dispatch_env(bash_then_report_script())
+    write_policy_settings(memory=True)
     (env.workspace / "CLAUDE.md").write_text("Workspace rule.", encoding="utf-8")
     code, source = env.dispatch()
     assert code == 0
@@ -396,6 +494,7 @@ def test_lazy_set_derived_from_replayed_transcript(dispatch_env, capsys):
     from conftest import turn as _turn
 
     env = dispatch_env(bash_then_report_script())
+    write_policy_settings(memory=True)
     sub = env.workspace / "sub"
     sub.mkdir()
     (sub / "notes.txt").write_text("data\n", encoding="utf-8")

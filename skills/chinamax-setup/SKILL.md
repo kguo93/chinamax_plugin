@@ -18,6 +18,14 @@ never persist yolo, and use the shared deterministic compiler for the managed
 overwrite confirmation. A declined agent install warns but does not disable
 dynamic Terra/low spawning.
 
+The three worker Policy toggles (memory / hooks / mcp, each default OFF) ride the
+preview and consent digest — not a per-toggle prompt. The preview's `policy`
+block shows the values that WILL be written (explicit `memory=on|off
+hooks=on|off mcp=on|off` args, else the current or OFF defaults); the digest
+folds BOTH the observed current `settings.json` and the proposed values, so a
+hand-edit between preview and apply aborts. Apply writes `settings.json` and
+lists it in `changed`. Pass the same toggle args on the apply as on the preview.
+
 Prerequisites first. The Phase A preview carries a `prerequisite_fixes` array —
 one row per missing bash / Miniconda / Git for Windows Prerequisite. When it is
 non-empty, act BEFORE any consent digest:

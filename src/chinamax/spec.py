@@ -33,6 +33,8 @@ OPTIONAL_FIELDS = (
     "backoff_cap_s",
     "host",
     "mcp",
+    "memory_enabled",
+    "hooks_enabled",
 )
 _ABSOLUTE_PATH_FIELDS = ("workspace", "transcript_path", "result_path")
 
@@ -70,6 +72,10 @@ class JobSpec:
     #: The RESOLVED Worker-MCP server-name selection pinned to the Thread: None
     #: (all discovered), ``[]`` (none), or an explicit name list.
     mcp: list[str] | None = None
+    #: The pinned Policy toggles governing Memory injection and Policy hooks
+    #: (ADR 0016, amended 0.7.0). Default OFF: an absent pin resolves to False.
+    memory_enabled: bool = False
+    hooks_enabled: bool = False
 
 
 def load_spec(path: str | Path) -> JobSpec:
@@ -150,6 +156,12 @@ def parse_spec(data: object) -> JobSpec:
     seed_transcript = data.get("seed_transcript", False)
     if not isinstance(seed_transcript, bool):
         raise ChinamaxError("job spec field 'seed_transcript' must be a boolean")
+    memory_enabled = data.get("memory_enabled", False)
+    if not isinstance(memory_enabled, bool):
+        raise ChinamaxError("job spec field 'memory_enabled' must be a boolean")
+    hooks_enabled = data.get("hooks_enabled", False)
+    if not isinstance(hooks_enabled, bool):
+        raise ChinamaxError("job spec field 'hooks_enabled' must be a boolean")
     job_id = data.get("job_id")
     if job_id is not None and not isinstance(job_id, str):
         raise ChinamaxError("job spec field 'job_id' must be a string")
@@ -189,6 +201,8 @@ def parse_spec(data: object) -> JobSpec:
         seed_transcript=seed_transcript,
         host=host,
         mcp=list(mcp) if mcp is not None else None,
+        memory_enabled=memory_enabled,
+        hooks_enabled=hooks_enabled,
         bash_timeout_s=(
             DEFAULT_BASH_TIMEOUT_S
             if bash_timeout_s is None

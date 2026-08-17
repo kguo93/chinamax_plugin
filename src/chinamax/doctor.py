@@ -74,8 +74,43 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
-PLUGIN_VERSION = "0.5.0"
+PLUGIN_VERSION = "0.7.0"
 MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
+
+#: The three per-Host Policy toggles setup can write (ADR 0016 amended 0.7.0).
+_POLICY_TOGGLE_KEYS = ("memory", "hooks", "mcp")
+
+
+def _parse_policy_toggle_args(tokens: list[str]) -> dict[str, bool]:
+    """Parse ``memory=on hooks=off mcp=on`` tokens into a validated toggle subset.
+
+    Any subset is allowed and there is no prompting; an unknown key or a value
+    other than ``on``/``off`` is a usage error.
+
+    Args:
+        tokens: The positional ``setup`` toggle tokens (possibly empty).
+
+    Returns:
+        The named toggles to write (empty when no tokens were supplied).
+
+    Raises:
+        ChinamaxError: On an unknown toggle key or a non-``on|off`` value.
+    """
+    updates: dict[str, bool] = {}
+    for token in tokens:
+        key, sep, value = token.partition("=")
+        if not sep or key not in _POLICY_TOGGLE_KEYS:
+            raise ChinamaxError(
+                f"setup toggle {token!r} must be one of memory=on|off, "
+                "hooks=on|off, mcp=on|off"
+            )
+        normalized = value.strip().lower()
+        if normalized not in ("on", "off"):
+            raise ChinamaxError(
+                f"setup toggle {key!r} must be 'on' or 'off', not {value!r}"
+            )
+        updates[key] = normalized == "on"
+    return updates
 
 # ── Git for Windows install tree ────────────────────────────────────────────
 # Git for Windows scatters these across its tree and, with the recommended
@@ -599,11 +634,15 @@ def diagnose(
     writable = _state_writable(workspace_dir)
 
     profile_rows = _profile_rows(selected)
+    policy_report = _policy_report(selected)
     ok = (
         env_present
         and all(deps[name] for name in names)
         and writable
         and all(prerequisites.values())
+        # A malformed settings.json makes dispatch unusable until it is fixed, so
+        # setup must not claim success over it (ADR 0016 amended 0.7.0).
+        and not policy_report["malformed"]
     )
 
     if record and env_present:
@@ -618,8 +657,37 @@ def diagnose(
         "env": {"present": env_present, "path": env_python},
         "deps": {name: deps[name] for name in names},
         "profiles": profile_rows,
+        "policy": policy_report,
         **({"prerequisites": prerequisites} if prerequisites else {}),
         **({"prerequisite_fixes": prerequisite_rows} if prerequisite_rows else {}),
+    }
+
+
+def _policy_report(context: HostContext) -> dict:
+    """Report the three Policy toggle values, the full settings path, and flags.
+
+    The TOLERANT settings read: a malformed file is a reported flag, never a
+    crash. ``present`` distinguishes a fresh (UNSET) file from a written one so
+    the Claude setup command knows to prompt.
+
+    Args:
+        context: The Host whose ``state_root`` holds the toggle file.
+
+    Returns:
+        A dict with ``settings_path`` (full path str), ``present`` (bool),
+        ``malformed`` (bool), and the ``memory``/``hooks``/``mcp`` booleans.
+    """
+    from chinamax import policy
+
+    settings, malformed = policy.inspect_policy_settings(context)
+    settings_path = context.state_root / policy.SETTINGS_FILENAME
+    return {
+        "settings_path": str(settings_path),
+        "present": settings_path.exists(),
+        "malformed": malformed,
+        "memory": settings.memory,
+        "hooks": settings.hooks,
+        "mcp": settings.mcp,
     }
 
 
@@ -666,6 +734,19 @@ def render_report(report: dict) -> str:
     lines.append(f"      this workspace: {report['workspace_state_dir']}")
     lines.append(f"      writable: {'yes' if report['state_writable'] else 'NO'}")
 
+    policy = report.get("policy")
+    if policy is not None:
+        lines.append(f"  policy toggles ({policy['settings_path']}):")
+        if policy["malformed"]:
+            lines.append("      MALFORMED — dispatch will error until the file is fixed")
+        elif not policy["present"]:
+            lines.append(
+                "      UNSET — choose with: setup memory=<on|off> hooks=<on|off> mcp=<on|off>"
+            )
+        else:
+            for toggle in ("memory", "hooks", "mcp"):
+                lines.append(f"      {toggle}: {'on' if policy[toggle] else 'off'}")
+
     if env["present"]:
         lines.append(f"  interpreter recorded at: {python_path_file()}")
     return "\n".join(lines) + "\n"
@@ -709,6 +790,16 @@ def run_setup(
             install_deps=install_deps,
             permission_mode=permission_mode,
         )
+
+    # Apply the Policy toggles BEFORE diagnosing so the report reflects the written
+    # values. Explicit args write (subset update, no prompting); a no-arg run never
+    # writes — a fresh file stays UNSET for the command protocol to prompt on
+    # (ADR 0016 amended 0.7.0). A directory at the path raises PolicySettingsError.
+    toggle_updates = _parse_policy_toggle_args(getattr(args, "toggles", []) or [])
+    if toggle_updates:
+        from chinamax import policy
+
+        policy.write_policy_settings(current_host(), toggle_updates)
 
     report = diagnose(
         args.workspace,
@@ -853,6 +944,7 @@ def codex_setup_plan(
     context: HostContext | None = None,
     find_env_python: EnvPythonFinder | None = None,
     check_deps: DepChecker | None = None,
+    policy_toggles: dict[str, bool] | None = None,
 ) -> dict:
     """Build a redacted, non-mutating Codex setup preview and consent digest."""
     selected = context or current_host()
@@ -923,6 +1015,31 @@ def codex_setup_plan(
         "recorded": recorded_python,
         "update": bool(python and (recorded_python != python or not _is_executable(recorded_python or ""))),
     }
+    # The Policy toggles ride the plan and digest: BOTH the observed current
+    # settings AND the proposed values are folded in, so a hand-edit between
+    # preview and apply changes `observed` and aborts (ADR 0016 amended 0.7.0).
+    from chinamax import policy as _policy
+
+    policy_toggles = dict(policy_toggles or {})
+    current_settings, policy_malformed = _policy.inspect_policy_settings(selected)
+    settings_path = selected.state_root / _policy.SETTINGS_FILENAME
+    policy_present = settings_path.exists()
+    policy_observed = {
+        "present": policy_present,
+        "malformed": policy_malformed,
+        "memory": current_settings.memory,
+        "hooks": current_settings.hooks,
+        "mcp": current_settings.mcp,
+    }
+    # Proposed = what write_policy_settings will resolve to: a well-formed present
+    # file preserves its unnamed toggles; an absent/malformed one starts all-OFF;
+    # the named toggle args override either way.
+    policy_base = (
+        {name: getattr(current_settings, name) for name in _POLICY_TOGGLE_KEYS}
+        if policy_present and not policy_malformed
+        else {name: False for name in _POLICY_TOGGLE_KEYS}
+    )
+    policy_proposed = {**policy_base, **policy_toggles}
     digest_input = {
         "host": selected.host.value,
         "paths": {
@@ -944,6 +1061,12 @@ def codex_setup_plan(
         "prerequisite_fixes": prerequisite_rows,
         "key_template": key_template,
         "interpreter": interpreter_change,
+        "policy": {
+            "path": str(settings_path),
+            "observed": policy_observed,
+            "proposed": policy_proposed,
+            "toggles": policy_toggles,
+        },
         "workspace": str(workspace) if workspace is not None else None,
     }
     canonical = json.dumps(digest_input, sort_keys=True, separators=(",", ":"))
@@ -968,6 +1091,10 @@ def codex_setup_plan(
         "key_template": key_template,
         "interpreter": interpreter_change,
         "proposed": proposed,
+        "policy_settings_path": str(settings_path),
+        "policy_observed": policy_observed,
+        "policy_proposed": policy_proposed,
+        "policy_toggles": policy_toggles,
         "workspace": str(workspace) if workspace is not None else None,
         "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         "digest_input": digest_input,
@@ -1045,8 +1172,12 @@ def run_codex_setup(
             file=sys.stderr,
         )
         return 1
+    policy_toggles = _parse_policy_toggle_args(getattr(args, "toggles", []) or [])
     plan = codex_setup_plan(
-        args.workspace, find_env_python=find_env_python, check_deps=check_deps
+        args.workspace,
+        find_env_python=find_env_python,
+        check_deps=check_deps,
+        policy_toggles=policy_toggles,
     )
     if getattr(args, "apply", False):
         if plan.get("prerequisites") and not all(plan["prerequisites"].values()):
@@ -1125,6 +1256,7 @@ def apply_codex_setup(
         context=selected,
         find_env_python=find_env_python,
         check_deps=check_deps,
+        policy_toggles=plan.get("policy_toggles"),
     )
     if consent_digest != fresh["digest"] or plan.get("digest") != fresh["digest"]:
         raise ChinamaxError(
@@ -1159,6 +1291,20 @@ def apply_codex_setup(
     if env_python and (fresh["interpreter"]["update"] or fresh["interpreter"]["recorded"] != env_python):
         _write_python_path(python_path_file(selected), env_python)
         changed.append(str(python_path_file(selected)))
+    # The Policy toggles are part of the apply transaction: write when the file is
+    # absent/malformed or the resolved values change (ADR 0016 amended 0.7.0).
+    from chinamax import policy as _policy
+
+    policy_observed = fresh["policy_observed"]
+    policy_proposed = fresh["policy_proposed"]
+    policy_current = {name: policy_observed[name] for name in _POLICY_TOGGLE_KEYS}
+    if (
+        not policy_observed["present"]
+        or policy_observed["malformed"]
+        or policy_proposed != policy_current
+    ):
+        _policy.write_policy_settings(selected, fresh["policy_toggles"])
+        changed.append(fresh["policy_settings_path"])
     if any(fresh["proposed"].values()):
         try:
             import tomlkit

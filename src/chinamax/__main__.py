@@ -126,11 +126,29 @@ def run_exec(spec_path: str | Path, config: LoopConfig | None = None) -> int:
         ChinamaxError: On any validation or configuration failure.
     """
     spec = load_spec(spec_path)
+    host_context = current_host()
     if spec.host is None:
         # `host` is optional in the public spec format; a direct `exec` spec omits
         # it and the already-bound HostContext's value is injected here so the
         # policy layer keys Memory/hook/MCP discovery on the right Host.
-        spec = replace(spec, host=current_host().host.value)
+        spec = replace(spec, host=host_context.host.value)
+    # The record-less `exec` path honors the same settings read as `task`. The
+    # toggles OVERRIDE the spec file — the settings file is the sole control, so a
+    # spec-file mcp list (or the new booleans) is replaced by the resolved pins.
+    memory_enabled, hooks_enabled, mcp_selection = _resolve_policy_pins(
+        Path(os.path.realpath(spec.workspace)), host_context
+    )
+    if spec.mcp:
+        emit_event(
+            "warning",
+            {"message": f"[policy] spec-file mcp {spec.mcp} dropped; settings toggle governs"},
+        )
+    spec = replace(
+        spec,
+        memory_enabled=memory_enabled,
+        hooks_enabled=hooks_enabled,
+        mcp=mcp_selection,
+    )
     try:
         execute_spec(spec, config=config)
     except RunFailure as failure:
@@ -158,11 +176,12 @@ def run_task(args: argparse.Namespace) -> int:
     if args.model is not None and not args.model:
         raise ChinamaxError("--model must be a non-empty string")
 
-    # The Worker-MCP selection is resolved to a CONCRETE name list here and pinned
-    # to the Thread, so a resume replays exact names and a server configured later
-    # never appears mid-Thread.
-    mcp_selection = _resolve_mcp_selection(
-        getattr(args, "mcp", None), store.workspace_root, current_host()
+    # The three Policy toggles are resolved from the Host's settings.json ONCE and
+    # pinned to the Thread (a malformed file fails the dispatch here). MCP resolves
+    # to a CONCRETE name list, so a resume replays exact names and a server
+    # configured later never appears mid-Thread.
+    memory_enabled, hooks_enabled, mcp_selection = _resolve_policy_pins(
+        store.workspace_root, current_host()
     )
 
     job_id = store.reserve_id()
@@ -177,6 +196,8 @@ def run_task(args: argparse.Namespace) -> int:
             bash_timeout_s=args.bash_timeout_s,
             model=args.model,
             mcp=mcp_selection,
+            memory_enabled=memory_enabled,
+            hooks_enabled=hooks_enabled,
             originating_session=state.session_id(),
             bridge_name=args.bridge_name,
             host=current_host().host.value,
@@ -723,15 +744,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="model string for this dispatch (default: the Profile's model); pinned to the Thread",
     )
     task_parser.add_argument(
-        "--mcp",
-        default=None,
-        metavar="SELECTION",
-        help=(
-            "Worker-MCP server selection: 'none' for no servers, a comma-separated "
-            "name list for only those, or omit for all discovered; pinned to the Thread"
-        ),
-    )
-    task_parser.add_argument(
         "prompt", nargs="*", help="the prompt; read from stdin when absent"
     )
 
@@ -822,6 +834,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup_parser.add_argument(
         "--no-agent", action="store_true", help="apply other setup changes without installing the agent"
+    )
+    setup_parser.add_argument(
+        "toggles",
+        nargs="*",
+        default=[],
+        metavar="TOGGLE",
+        help="policy toggle updates: memory=on|off hooks=on|off mcp=on|off (any subset)",
     )
 
     reap_parser = subcommands.add_parser(
@@ -1015,10 +1034,20 @@ def _worker_spec(
         "host": record.get("host"),
         # The RESOLVED Worker-MCP name list, pinned on the request block.
         "mcp": request.get("mcp"),
+        # The pinned Policy toggles. The comprehension below drops None but carries
+        # False; a legacy record (no keys → None, dropped) then relies on
+        # `parse_spec` defaulting an absent boolean to False (the `write`
+        # explicit-carry below is the precedent for a meaningful False).
+        "memory_enabled": request.get("memoryEnabled"),
+        "hooks_enabled": request.get("hooksEnabled"),
     }
     # `write` is carried separately: False is meaningful and must not be dropped.
     present = {key: value for key, value in data.items() if value is not None}
     present["write"] = bool(request.get("write", True))
+    # A legacy record predates the MCP pin; coerce an absent pin to [] (OFF),
+    # never None — None would fall through select_mcp_configs' None⇒all-discovered
+    # arm and reconnect every server on resume (ADR 0016 amended 0.7.0).
+    present.setdefault("mcp", [])
     # Set on EVERY worker spec: a pre-populated transcript — a resume copy, or a
     # relaunch on a crashed Job — is seeded rather than truncated by the
     # fresh-run default. An empty transcript seeds to nothing and runs fresh.
@@ -1029,33 +1058,45 @@ def _worker_spec(
     return parse_spec(present)
 
 
-def _resolve_mcp_selection(
-    raw: str | None, workspace_root: Path, host_context: HostContext
-) -> list[str]:
-    """Resolve the ``--mcp`` selector to a CONCRETE, pinnable server-name list.
+def _resolve_policy_pins(
+    workspace_root: Path, host_context: HostContext
+) -> tuple[bool, bool, list[str]]:
+    """Resolve the three pinned Policy toggles from the Host's ``settings.json``.
 
-    ``none`` → no servers; a comma-separated list → only those; absent → every
-    discovered server name (resolved now, so the pin is concrete and a resume
-    replays exact names).
+    Reads the toggle file ONCE at dispatch. The malformed-file case is the sole
+    deliberate dispatch raise (``PolicySettingsError``, rendered by the CLI
+    boundary as a clean exit-1 naming the file). MCP ON resolves to the CONCRETE
+    discovered server-name list so a resume replays exact names; OFF pins ``[]``.
+    A discovery failure degrades to skip-and-warn (fail-open) — the same class as
+    worker-side discovery; the settings file stays the ONLY deliberate raise.
 
     Args:
-        raw: The ``--mcp`` value, or None when the flag was omitted.
         workspace_root: The Job's resolved workspace root.
         host_context: The dispatch's Host context.
 
     Returns:
-        The resolved server-name list (possibly empty).
+        ``(memory_enabled, hooks_enabled, mcp_names)``.
+
+    Raises:
+        policy.PolicySettingsError: On a malformed settings file.
     """
     from chinamax import policy
 
-    if raw is not None and raw.strip().lower() == "none":
-        return []
-    if raw is not None and raw.strip():
-        return [name.strip() for name in raw.split(",") if name.strip()]
-    configs = policy.discover_mcp_configs(
-        Path(workspace_root), host_context, lambda _message: None
-    )
-    return [config.name for config in configs]
+    settings = policy.load_policy_settings(host_context)
+    mcp_names: list[str] = []
+    if settings.mcp:
+        try:
+            configs = policy.discover_mcp_configs(
+                Path(workspace_root), host_context, lambda _message: None
+            )
+            mcp_names = [config.name for config in configs]
+        except Exception as error:  # noqa: BLE001 - a bad .mcp.json never fails dispatch
+            print(
+                f"chinamax: [policy] MCP discovery failed ({type(error).__name__}); "
+                "dispatching with no MCP servers",
+                file=sys.stderr,
+            )
+    return settings.memory, settings.hooks, mcp_names
 
 
 def _fold_result(result_path: Path, payload: dict) -> dict:
@@ -1315,7 +1356,28 @@ def _status_list(store: state.JobStore) -> int:
             seen.add(record["id"])
     for record in sorted(shown, key=_updated_at, reverse=True):
         _print_job(store, record)
+    _print_policy_footer(store.host_context)
     return EXIT_TERMINAL
+
+
+def _print_policy_footer(host_context: HostContext) -> None:
+    """Print the three Policy toggle values, the malformed flag, and the full path.
+
+    The bare `status` listing's footer (ADR 0016 amended 0.7.0). Uses the
+    TOLERANT settings reader, so a malformed file becomes a reported flag and
+    never breaks the Job listing. The FULL settings path is printed because its
+    basename collides with Claude's own ``~/.claude/settings.json``.
+    """
+    from chinamax import policy
+
+    settings, malformed = policy.inspect_policy_settings(host_context)
+    values = "  ".join(
+        f"{name} {'on' if getattr(settings, name) else 'off'}"
+        for name in ("memory", "hooks", "mcp")
+    )
+    flag = "  (settings.json MALFORMED — dispatch will error until fixed)" if malformed else ""
+    print(f"policy: {values}{flag}")
+    print(f"policy settings: {host_context.state_root / policy.SETTINGS_FILENAME}")
 
 
 def _status_wait(store: state.JobStore, job_id: str, timeout_ms: int) -> int:

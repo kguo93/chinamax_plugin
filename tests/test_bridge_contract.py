@@ -86,9 +86,11 @@ def test_required_stanzas_present():
     assert "Profile model" in text
     assert "spaces or quote characters" in lower
 
-    # Per-dispatch Worker-MCP selection (ADR 0016): the mcp= token and its --mcp mapping.
-    assert "mcp=" in text
-    assert "--mcp" in text
+    # The per-dispatch Worker-MCP selector was REMOVED (ADR 0016 amended 0.7.0):
+    # the mcp= token and --mcp flag must be absent — the per-Host toggle is the
+    # sole control, so a dead token can never reach the Haiku Bridge.
+    assert "mcp=" not in text
+    assert "--mcp" not in text
 
     # Bridge model vs Profile model, and the never-feed rule: the Bridge model
     # never enters the Runtime --model dispatch or reaches the worker.
