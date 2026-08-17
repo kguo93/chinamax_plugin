@@ -28,9 +28,16 @@ Inventory lives in `./repo-map.md`.
   shim fast-paths in-shell: it buffers stdin and, unless the payload contains
   `chinamax`, exits 0 WITHOUT launching python — only a marked event pays the
   interpreter-resolution cost. The python side filters again on the `chinamax`
-  substring of `agent_type` (a NAMED spawn puts the teammate name,
-  `chinamax-<profile>-<slug>`, in `agent_type`, not the `chinamax:chinamax` subagent
-  type) and injects context; it NEVER blocks a call (ADR 0010, no hard blocks).
+  substring of `agent_type`. Claude Code sets `agent_type` to the subagent TYPE —
+  for this plugin's Bridge that is `chinamax:chinamax` (added to PreToolUse in CLI
+  2.1.218), NOT the assigned teammate name; the `chinamax` substring catches either
+  form. It injects context; it NEVER blocks a call (ADR 0010, no hard blocks).
+- **`SubagentStart`'s matcher keys on `agent_type` — the subagent TYPE
+  `chinamax:chinamax`, NOT the teammate name (ADR 0010, amended 2026-08-17).** The
+  matcher is `chinamax:chinamax|chinamax_bridge|chinamax[-_].*`; the earlier
+  `chinamax_bridge|chinamax[-_]` form was written for the (wrongly assumed) name and
+  silently missed the colon-form type, so the Bridge received no spawn-time contract
+  injection. Keep this matcher identical in `hooks.json` and `codex-hooks.json`.
 - **The command strings run the `scripts/` shims, not the python modules directly**
   (`"${CLAUDE_PLUGIN_ROOT}/scripts/session_end_hook"`). The shim resolves the env
   interpreter; naming `python -m …` here would skip that. Keep the hook LOGIC in

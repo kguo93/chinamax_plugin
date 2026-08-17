@@ -45,11 +45,13 @@ Inventory lives in `./repo-map.md`. Domain vocabulary lives in `../../../CONTEXT
   killer. Session liveness is tested with the `worker_gone` family (ESRCH/zombie/
   start-time), never a bare `os.kill(pid, 0)`.
 - **The bridge_contract hook is REINFORCEMENT, never a gate (ADR 0010).** It filters
-  on the `chinamax` substring of `agent_type` (a NAMED spawn puts the teammate NAME,
-  `chinamax-<profile>-<slug>`, in `agent_type`, not the `chinamax:chinamax` subagent
-  type) and injects `additionalContext`; it never emits a `decision`/deny. The
-  `CONTRACT` constant is the single source of the injected text (the test imports
-  it); do not fork a second copy in the module body.
+  on the `chinamax` substring of `agent_type` — which Claude Code sets to the subagent
+  TYPE `chinamax:chinamax` (a `chinamax-*` teammate name also carries the marker; ADR
+  0010, amended 2026-08-17) — and injects `additionalContext`; it never emits a
+  `decision`/deny. NOTE: `hooks.json`'s `SubagentStart` matcher must ALSO catch that
+  colon-form type or the spawn-time inject never fires. The `CONTRACT` constant is the
+  single source of the injected text (the test imports it); do not fork a second copy
+  in the module body.
 - **Channels are fixed:** SessionStart → the digest to STDOUT and the exports to
   `$CLAUDE_ENV_FILE` (shell-quoted with `shlex.quote`); Stop and the two injection
   hooks → a single JSON object on STDOUT (`systemMessage` for Stop; a

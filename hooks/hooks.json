@@ -70,7 +70,7 @@
     ],
     "SubagentStart": [
       {
-        "matcher": "chinamax_bridge|chinamax[-_]",
+        "matcher": "chinamax:chinamax|chinamax_bridge|chinamax[-_].*",
         "hooks": [
           {
             "type": "command",

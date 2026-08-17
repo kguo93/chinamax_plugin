@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -70,7 +71,18 @@ def test_registered_events():
     # PreToolUse is scoped to Bash (the Bridge's only tool).
     assert HOOKS["hooks"]["PreToolUse"][0]["matcher"] == "Bash"
     assert HOOKS["hooks"]["PreToolUse"][1]["matcher"] == "Agent|Bash|spawn_agent"
-    assert HOOKS["hooks"]["SubagentStart"][0]["matcher"] == "chinamax_bridge|chinamax[-_]"
+    # SubagentStart matches on the subagent's `agent_type`, which for a plugin
+    # agent is the TYPE `chinamax:chinamax` (colon-form) — NOT the assigned
+    # teammate name (ADR 0010, amended 2026-08-17). The old `chinamax[-_]` form
+    # silently missed the colon-form, so the Bridge got no spawn-time contract.
+    subagent_matcher = HOOKS["hooks"]["SubagentStart"][0]["matcher"]
+    assert subagent_matcher == "chinamax:chinamax|chinamax_bridge|chinamax[-_].*"
+    # It catches the real Claude agent_type AND a named / underscore (Codex) form,
+    # and stays silent for an unrelated subagent type.
+    assert re.search(subagent_matcher, "chinamax:chinamax")
+    assert re.search(subagent_matcher, "chinamax-deepseek-repo-report")
+    assert re.search(subagent_matcher, "chinamax_deepseek_repo_report")
+    assert not re.search(subagent_matcher, "general-purpose")
 
 
 def test_codex_registration_has_cross_platform_command_parity():
@@ -93,6 +105,12 @@ def test_codex_registration_has_cross_platform_command_parity():
                 assert "codex_hook_bash.cmd" in hook["commandWindows"]
                 assert "PLUGIN_ROOT" in hook["commandWindows"]
                 assert "powershell" not in hook["commandWindows"].lower()
+    # SubagentStart matcher parity: both Hosts must catch the colon-form agent_type
+    # (ADR 0010, amended 2026-08-17), so the Bridge's spawn-time contract injects.
+    assert (
+        CODEX_HOOKS["hooks"]["SubagentStart"][0]["matcher"]
+        == HOOKS["hooks"]["SubagentStart"][0]["matcher"]
+    )
 
 
 def test_codex_windows_commands_convert_drive_root_with_spaces(tmp_path):

@@ -2,10 +2,10 @@
 
 Fires on every Bash call in every session; the shim fast-paths past a non-Bridge
 event without launching python. Here we parse the event and, ONLY when
-``agent_type`` contains ``chinamax`` — a NAMED spawn makes Claude Code put the
-teammate NAME (``chinamax-<profile>-<slug>``) in ``agent_type``, not the
-``chinamax:chinamax`` subagent type — emit the contract as subagent-scoped
-``additionalContext``. This is REINFORCEMENT, not a gate: additionalContext lands
+``agent_type`` contains ``chinamax`` — Claude Code sets ``agent_type`` to the
+subagent TYPE, which for this plugin's Bridge is ``chinamax:chinamax`` (added to
+PreToolUse in CLI 2.1.218); a ``chinamax-<profile>-<slug>`` teammate name also
+carries the marker — emit the contract as subagent-scoped ``additionalContext``. This is REINFORCEMENT, not a gate: additionalContext lands
 for the Bridge's NEXT turn — it re-anchors a drifting haiku Bridge every poll
 cycle but cannot veto the already-chosen call. The operative first copy is the
 `commands/task.md` spawn prompt; no hard blocks (ADR 0010).
@@ -20,9 +20,10 @@ from pathlib import Path
 
 from chinamax.hooks import read_event, resolve_event_host
 
-#: A NAMED Bridge's agent_type is its teammate NAME (chinamax-<profile>-<slug>),
-#: never the "chinamax:chinamax" subagent type — Claude Code puts the name in the
-#: payload. So the filter keys on the "chinamax" substring every Bridge name carries.
+#: The Bridge's agent_type is the subagent TYPE "chinamax:chinamax" (a
+#: chinamax-<profile>-<slug> teammate name also carries the marker); either way it
+#: contains "chinamax", so the filter keys on that substring. NOTE: hooks.json's
+#: SubagentStart matcher must ALSO catch the colon-form type (ADR 0010, 2026-08-17).
 BRIDGE_AGENT_MARKER = "chinamax"
 
 def canonical_contract_path() -> Path | None:

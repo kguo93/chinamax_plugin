@@ -25,15 +25,19 @@ def run_hook(event, monkeypatch, capsys, stdin=None):
 @pytest.mark.parametrize(
     "agent_type",
     [
+        # Claude Code sets `agent_type` to the subagent TYPE for a real Bridge
+        # spawn (ADR 0010, amended 2026-08-17); the `chinamax-*` forms are the
+        # teammate-name shape and also carry the marker. Both must inject.
+        "chinamax:chinamax",
         "chinamax-deepseek-repo-summary",
         "chinamax-glm-fix-auth",
         "chinamax-minimax-migrate",
     ],
 )
 def test_contract_emitted_for_bridge(agent_type, monkeypatch, capsys):
-    """A NAMED Bridge's `agent_type` is its `chinamax-*` teammate name (Claude Code
-    puts the NAME, not the `chinamax:chinamax` subagent type, in the payload); its
-    `chinamax` marker emits the EXACT contract constant as additionalContext."""
+    """A chinamax Bridge's `agent_type` carries the `chinamax` marker — the plugin
+    subagent TYPE `chinamax:chinamax` for a real spawn, or a `chinamax-*` teammate
+    name — so the hook emits the EXACT contract constant as additionalContext."""
     code, out = run_hook(
         {
             "tool_name": "Bash",
