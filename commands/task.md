@@ -5,12 +5,12 @@ allowed-tools: Agent
 ---
 
 Make exactly one INLINE background named `Agent` call with
-`subagent_type: "chinamax:chinamax"`, explicit `model: "haiku"`, and a
+`subagent_type: "chinamax:chinamax"`, explicit `model: "sonnet"`, and a
 `name` of `chinamax-<profile>-<task-slug>`. Export `CHINAMAX_HOST=claude` and
 load the canonical `skills/chinamax-bridge/SKILL.md` from
 `$CLAUDE_PLUGIN_ROOT` in the spawn prompt before any seam call.
 
-The explicit `model: "haiku"` in the Agent call above is the Claude **Bridge
+The explicit `model: "sonnet"` in the Agent call above is the Claude **Bridge
 model** — the model that runs the Bridge itself. It is NOT the **Profile model**
 and must never be copied into the Runtime dispatch. The optional `model=<string>`
 below is the **Profile model**, the worker model string.

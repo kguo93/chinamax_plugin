@@ -6,7 +6,7 @@ event without launching python. Here we parse the event and, ONLY when
 subagent TYPE, which for this plugin's Bridge is ``chinamax:chinamax`` (added to
 PreToolUse in CLI 2.1.218); a ``chinamax-<profile>-<slug>`` teammate name also
 carries the marker — emit the contract as subagent-scoped ``additionalContext``. This is REINFORCEMENT, not a gate: additionalContext lands
-for the Bridge's NEXT turn — it re-anchors a drifting haiku Bridge every poll
+for the Bridge's NEXT turn — it re-anchors a drifting Bridge every poll
 cycle but cannot veto the already-chosen call. The operative first copy is the
 `commands/task.md` spawn prompt; no hard blocks (ADR 0010).
 """

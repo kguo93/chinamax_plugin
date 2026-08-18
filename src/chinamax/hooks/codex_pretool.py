@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 
+from chinamax.codex import codex_permission_mode
 from chinamax.hooks import read_event, resolve_event_host
 from chinamax.host import Host
 
@@ -27,7 +28,7 @@ def main() -> int:
     context = resolve_event_host(event)
     if context is None or context.host is not Host.CODEX:
         return 0
-    permission = event.get("permission_mode") or event.get("permissionMode") or ""
+    permission = codex_permission_mode(event)
     tool = str(
         event.get("tool_name")
         or event.get("toolName")

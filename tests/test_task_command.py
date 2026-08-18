@@ -51,12 +51,12 @@ def test_command_arg_mapping():
 
     # Invokes the Bridge by subagent type, INLINE (a forked general-purpose
     # subagent does not expose the Agent tool), as a BACKGROUND addressable agent
-    # (a foreground subagent could not receive a mid-run Steer), with the cheap
+    # (a foreground subagent could not receive a mid-run Steer), with the Bridge
     # model named EXPLICITLY (a named spawn ignores the agent frontmatter).
     assert "chinamax:chinamax" in text
     assert "inline" in lower
     assert "background" in lower
-    assert 'model: "haiku"' in text
+    assert 'model: "sonnet"' in text
 
     # The persistent teammate name convention (never a random suffix).
     assert "chinamax-<profile>-<task-slug>" in text
@@ -111,7 +111,7 @@ def test_mcp_selection_token_absent_from_contract_copies():
     """The Worker-MCP `mcp=`/`--mcp` selector is REMOVED (ADR 0016 amended 0.7.0).
 
     All four dispatch surfaces must drop the dead token: the per-Host `mcp`
-    toggle is the sole control, and a stray token would make the Haiku Bridge
+    toggle is the sole control, and a stray token would make the Bridge
     emit an argument the CLI no longer accepts.
     """
     task_skill = (REPO_ROOT / "skills" / "chinamax-task" / "SKILL.md").read_text(

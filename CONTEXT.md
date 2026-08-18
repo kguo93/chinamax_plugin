@@ -35,7 +35,7 @@ A named provider configuration — base URL, default model string, API-key sourc
 _Avoid_: provider (the company), model (one field of a profile)
 
 **Bridge model**:
-The model that runs the Bridge Agent itself — fixed per Host (Claude: Haiku; Codex: `gpt-5.6-terra`), never configurable by the task prompt. Distinct from the Profile model and never sent to the worker or provider endpoint.
+The model that runs the Bridge Agent itself — fixed per Host (Claude: Sonnet; Codex: `gpt-5.6-terra`), never configurable by the task prompt. Distinct from the Profile model and never sent to the worker or provider endpoint.
 _Avoid_: conflating with the Profile's `model`, "the worker model"
 
 **Profile model**:

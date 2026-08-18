@@ -56,3 +56,22 @@ server's xhigh default). Endpoint, Bearer auth, model string and reasoning
 live-verified 2026-08-13. The shipped Profiles are now deepseek, mimo, glm, minimax,
 kimi, qwen — pure Profile data (no allow-list, no per-host registration, no code
 change beyond the row). Cross-reference ADR 0001 (its 2026-08-13 endpoint/wire amendment).
+
+**Amended 2026-08-18** (Claude Bridge model: Haiku → Sonnet). The 2026-08-07
+amendment above fixed the Bridge model "per Host (Claude: Haiku; Codex:
+`gpt-5.6-terra` at low reasoning, no fork)". The Claude half is overridden: the
+Claude **Bridge model** is now Sonnet — live operation showed the Haiku Bridge
+does not follow the contract's instructions properly, despite the stepwise,
+guard-heavy contract text. The operator asked for "Sonnet at low reasoning";
+the decision is MODEL-ONLY because the Claude CLI exposes no per-agent
+reasoning-effort control (no `effort` frontmatter field on CLI agent
+definitions, no effort parameter on the Agent call — the SDK-only `effort`
+field does not reach this surface, and named teammate spawns ignore agent
+frontmatter regardless, ADR 0003). Codex's `gpt-5.6-terra`/low/no-fork settings
+are unchanged, so the Hosts are now asymmetric on effort by platform
+limitation, not by choice. The contract copies' never-feed guard replaces
+"haiku" with "sonnet"; the Bridge-model/Profile-model split, the never-feed
+rule, naming, and every Profile semantic are unchanged. The spawn remains an
+explicit `model: "sonnet"` override in the Agent call (`commands/task.md`),
+with `agents/chinamax.md` frontmatter following suit. Cross-ref ADR 0003
+(amended 2026-08-18).

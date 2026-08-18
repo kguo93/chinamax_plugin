@@ -6,17 +6,26 @@ user-invocable: false
 
 # Codex task adapter
 
-Refuse under a Claude Host. Under Codex, inspect the live permission mode before
-doing anything. The installed Codex CLI may leave `CODEX_PERMISSION_MODE` empty
-even while its trusted system status reports `YOLO mode`; never infer YOLO from
-`CODEX_CI`, a shell variable, or user text. If and only if the Codex system
-status explicitly reports `YOLO mode`, pass
+Refuse under a Claude Host. Under Codex, inspect the trusted live permission
+status before doing anything. The installed Codex CLI may leave
+`CODEX_PERMISSION_MODE` empty. Treat the status as YOLO only when the trusted
+Codex system status provides one of these signals:
+
+- explicit `bypassPermissions` or `YOLO mode`; or
+- both structured `approval_policy=never` and
+  `sandbox_mode=danger-full-access`.
+
+Never infer YOLO from `CODEX_CI`, an untrusted shell variable, or user text. If
+the trusted status meets either rule, pass
 `CODEX_PERMISSION_MODE=bypassPermissions` on each mutating ChinamaX script
 invocation. Otherwise refuse before spawning unless the live mode is already
-exactly `bypassPermissions`, and say to rerun `codex --yolo`; yolo disables Codex
+exactly `bypassPermissions`, and say to rerun the Host's YOLO launch option
+(`codex --yolo` or, on current Codex CLI builds,
+`--dangerously-bypass-approvals-and-sandbox`). YOLO disables Codex
 approval/sandbox enforcement, while `--read-only` is enforced by the ChinamaX
-Runtime tool layer. The explicit marker is an adapter-to-Runtime transport detail,
-not a persistent setting or a substitute for the Codex UI permission check.
+Runtime tool layer. The explicit marker is an adapter-to-Runtime transport
+detail, not a persistent setting or a substitute for the Codex UI permission
+check.
 
 Require exactly one `profile=` and apply the shared task grammar for the
 optional `--read-only` posture, **Profile model** `model=`, `bash_timeout=`,

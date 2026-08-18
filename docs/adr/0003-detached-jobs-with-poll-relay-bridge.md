@@ -30,3 +30,9 @@ covered — switch Profile/model, or a new unrelated task — is now folded into
 Thread as a steer/resume instead of refused; the pinned model and by-name Profile
 still govern the wire (ADR 0006, amended 2026-08-07), so such an ask is carried into
 the worker's Thread but does not itself switch the Thread's model or Profile.
+
+**Amended 2026-08-18** (Bridge model reference): the `model: haiku` spawn
+override in the 2026-07-24 amendment above is historical evidence, not current
+policy — per ADR 0006 (amended 2026-08-18) the Claude Bridge now spawns with an
+explicit `model: "sonnet"` override. The relay mechanics in this ADR are
+unchanged.

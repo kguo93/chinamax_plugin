@@ -10,6 +10,7 @@ import pytest
 from chinamax.codex import (
     CodexPermissionError,
     bridge_name,
+    codex_permission_mode,
     exact_bridge_address,
     require_bypass_permissions,
     slugify_task_name,
@@ -42,6 +43,22 @@ def test_codex_mutation_requires_yolo():
     with pytest.raises(CodexPermissionError):
         require_bypass_permissions("default")
     require_bypass_permissions("bypassPermissions")
+    require_bypass_permissions({"status": "YOLO mode"})
+    require_bypass_permissions(
+        {"approval_policy": "never", "sandbox_mode": "danger-full-access"}
+    )
+    assert codex_permission_mode({"status": "YOLO mode"}) == "bypassPermissions"
+    assert codex_permission_mode(
+        {"approval_policy": "never", "sandbox_mode": "danger-full-access"}
+    ) == "bypassPermissions"
+    with pytest.raises(CodexPermissionError):
+        require_bypass_permissions(
+            {
+                "permission_mode": "default",
+                "approval_policy": "never",
+                "sandbox_mode": "danger-full-access",
+            }
+        )
 
 
 def test_codex_pretool_is_noop_for_claude_and_blocks_mutation(monkeypatch, capsys):
@@ -65,6 +82,22 @@ def test_codex_pretool_is_noop_for_claude_and_blocks_mutation(monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload["decision"] == "block"
     assert "codex --yolo" in payload["reason"]
+
+    monkeypatch.setattr(
+        "sys.stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "host": "codex",
+                    "tool_name": "Agent",
+                    "approval_policy": "never",
+                    "sandbox_mode": "danger-full-access",
+                }
+            )
+        ),
+    )
+    assert codex_pretool.main() == 0
+    assert capsys.readouterr().out == ""
     # Library-level tests share a Python process; leave the compatibility
     # default on Claude for the existing suite's direct Runtime helpers.
     set_current_host(HostContext.from_host(Host.CLAUDE))
@@ -83,7 +116,7 @@ def test_compiled_agent_has_codex_native_settings(tmp_path):
     contract_path.write_text(contract, encoding="utf-8")
     compiled = compile_codex_agent(source)
     parsed = tomllib.loads(compiled)
-    assert "# chinamax-managed-plugin-version: 0.7.4" in compiled
+    assert "# chinamax-managed-plugin-version: 0.7.6" in compiled
     assert 'model = "gpt-5.6-terra"' in compiled
     assert 'model_reasoning_effort = "low"' in compiled
     assert parsed["developer_instructions"] == (

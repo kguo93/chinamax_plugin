@@ -4,10 +4,14 @@ description: Preview and consent to Codex Host ChinamaX setup changes.
 user-invocable: false
 ---
 
-Refuse under a Claude Host. Setup mutation requires `permission_mode` exactly
-`bypassPermissions`; otherwise tell the operator to rerun `codex --yolo`, explain
-that yolo disables approval/sandbox enforcement, and identify Runtime
-`--read-only` as the worker enforcement boundary.
+Refuse under a Claude Host. Setup mutation requires a trusted Codex status that
+normalizes to `permission_mode=bypassPermissions`: either explicit
+`bypassPermissions`/`YOLO mode`, or the structured pair
+`approval_policy=never` and `sandbox_mode=danger-full-access`. Otherwise tell the
+operator to rerun the Host's YOLO launch option (`codex --yolo` or, on current
+Codex CLI builds, `--dangerously-bypass-approvals-and-sandbox`), explain that
+YOLO disables approval/sandbox enforcement, and identify Runtime `--read-only`
+as the worker enforcement boundary.
 
 Run the Codex setup planner first. It must be genuinely non-mutating, show a
 redacted content-addressed preview and consent digest, and ask one explicit

@@ -88,7 +88,7 @@ def test_required_stanzas_present():
 
     # The per-dispatch Worker-MCP selector was REMOVED (ADR 0016 amended 0.7.0):
     # the mcp= token and --mcp flag must be absent — the per-Host toggle is the
-    # sole control, so a dead token can never reach the Haiku Bridge.
+    # sole control, so a dead token can never reach the Bridge.
     assert "mcp=" not in text
     assert "--mcp" not in text
 

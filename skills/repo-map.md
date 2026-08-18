@@ -4,8 +4,9 @@ Claude Code and Codex skills the plugin ships. The loader discovers each `skills
 
 - `chinamax-bridge/SKILL.md` — canonical Host-neutral Bridge contract (`user-invocable: false`).
 - `chinamax-task/SKILL.md` — Codex yolo-only task adapter with underscore-safe
-  naming, `--read-only` forwarding, and an explicit UI-to-Runtime permission-mode
-  transport for CLI builds that do not export `CODEX_PERMISSION_MODE`.
+  naming, `--read-only` forwarding, and an explicit trusted-status-to-Runtime
+  permission-mode transport for CLI builds that do not export
+  `CODEX_PERMISSION_MODE`.
 - `chinamax-status/SKILL.md` — Codex diagnostic/status adapter.
 - `chinamax-profiles/SKILL.md` — Codex diagnostic Profile adapter.
 - `chinamax-setup/SKILL.md` — Codex preview/consent setup adapter.

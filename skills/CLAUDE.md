@@ -7,10 +7,12 @@ Inventory lives in `./repo-map.md`.
   root skills are thin adapters and must not copy the contract.
 - `chinamax-task` is mutation/yolo-gated; status, profiles, and setup are
   diagnostic surfaces. The task adapter uses Codex's trusted YOLO status as the
-  permission signal and transports `bypassPermissions` explicitly to the
-  Runtime when the CLI leaves its mode environment variable empty. It must also
-  preserve the operator's optional `--read-only` posture when forwarding the
-  task. Keep exact underscore-safe Codex naming in the adapter.
+  permission signal, including the structured `approval_policy=never` plus
+  `sandbox_mode=danger-full-access` status pair, and transports
+  `bypassPermissions` explicitly to the Runtime when the CLI leaves its mode
+  environment variable empty. It must also preserve the operator's optional
+  `--read-only` posture when forwarding the task. Keep exact underscore-safe
+  Codex naming in the adapter.
 
 - **The loader discovers `skills/<name>/SKILL.md` only.** A file at this ROOT (this
   trio) is not a `SKILL.md`, so it is never mistaken for a skill — which is why the

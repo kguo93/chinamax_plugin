@@ -7,6 +7,7 @@ live Codex session.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import re
 
 
@@ -14,9 +15,47 @@ class CodexPermissionError(RuntimeError):
     """Raised before a Codex mutating adapter action outside yolo."""
 
 
-def require_bypass_permissions(permission_mode: str | None) -> None:
-    """Require Codex's live ``bypassPermissions`` mode for mutation."""
-    if permission_mode != "bypassPermissions":
+def codex_permission_mode(status: object) -> str | None:
+    """Normalize a trusted Codex permission status to its runtime mode.
+
+    Recent Codex hosts may omit ``CODEX_PERMISSION_MODE`` while exposing the
+    trusted state as structured status.  Only an explicit bypass mode, an
+    explicit YOLO status, or the complete trusted ``never`` +
+    ``danger-full-access`` pair is accepted.  Callers must pass host-provided
+    status here; user text and arbitrary environment values are not evidence.
+    """
+    if isinstance(status, str):
+        value = status.strip()
+        if value in {"bypassPermissions", "YOLO mode", "yolo"}:
+            return "bypassPermissions"
+        return value or None
+    if not isinstance(status, Mapping):
+        return None
+
+    for key in ("permission_mode", "permissionMode", "status", "mode"):
+        value = status.get(key)
+        if value is not None:
+            return codex_permission_mode(value)
+
+    nested = status.get("permission") or status.get("permissions")
+    if isinstance(nested, Mapping):
+        nested_mode = codex_permission_mode(nested)
+        if nested_mode is not None:
+            return nested_mode
+
+    if status.get("yolo") is True or status.get("is_yolo") is True:
+        return "bypassPermissions"
+
+    approval_policy = status.get("approval_policy") or status.get("approvalPolicy")
+    sandbox_mode = status.get("sandbox_mode") or status.get("sandboxMode")
+    if approval_policy == "never" and sandbox_mode == "danger-full-access":
+        return "bypassPermissions"
+    return None
+
+
+def require_bypass_permissions(permission_status: object) -> None:
+    """Require Codex's trusted live ``bypassPermissions`` mode for mutation."""
+    if codex_permission_mode(permission_status) != "bypassPermissions":
         raise CodexPermissionError(
             "ChinamaX task/setup mutation requires codex --yolo; yolo disables "
             "Codex approval/sandbox enforcement. --read-only is enforced by the "
@@ -70,4 +109,3 @@ def exact_bridge_address(message: str, live_names: set[str] | frozenset[str]) ->
     """Return exactly one complete live Bridge name mentioned by a message."""
     matches = [name for name in live_names if name and name in message]
     return matches[0] if len(matches) == 1 else None
-

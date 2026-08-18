@@ -94,7 +94,9 @@ Conda environment, installs the package and its conditional dependencies, record
 the selected interpreter, scaffolds a commented key template, and checks profiles.
 
 - Claude: `/chinamax:setup`
-- Codex: `$chinamax-setup` under `codex --yolo` when applying mutations
+- Codex: `$chinamax-setup` under the Host's YOLO mode (`codex --yolo`, or
+  `--dangerously-bypass-approvals-and-sandbox` on current Codex CLI builds) when
+  applying mutations
 
 When a Prerequisite (`bash`, Miniconda, or Git for Windows) is missing, setup
 pauses and lists each missing tool with the exact install commands. Reply
@@ -106,9 +108,11 @@ Rectification DOES download that installer — so it is no longer true that setu
 downloads no installers; it downloads none without your approval.
 
 Codex setup is preview-first and content-addressed. A preview is non-mutating;
-apply only the exact consent digest from that preview. The yolo permission is
-used only for Codex setup mutation. Runtime `--read-only` remains ChinamaX's
-tool-layer policy and is not replaced by a Host sandbox.
+apply only the exact consent digest from that preview. The adapter accepts the
+trusted YOLO status directly, including the structured `approval_policy=never`
+and `sandbox_mode=danger-full-access` pair, then transports the exact
+`bypassPermissions` marker only for the setup mutation. Runtime `--read-only`
+remains ChinamaX's tool-layer policy and is not replaced by a Host sandbox.
 
 ## Keys and native data paths
 

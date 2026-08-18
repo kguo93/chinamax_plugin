@@ -18,3 +18,12 @@ Native Windows Codex workers and SessionEnd reapers use detached Windows process
 creation flags, Windows lifecycle cleanup uses `psutil`, and Codex hook
 registration is split into a file with `commandWindows`. Codex setup's yolo
 boundary and the Runtime's own read-only policy remain unchanged.
+
+**Amended 2026-08-18 (0.7.5):** Codex CLI builds may omit
+`CODEX_PERMISSION_MODE` even while the trusted Host status reports YOLO. Native
+Codex mutation gates therefore accept the trusted `bypassPermissions`/`YOLO
+mode` status or the complete structured pair `approval_policy=never` and
+`sandbox_mode=danger-full-access`, then transport only the exact
+`bypassPermissions` marker to the Runtime. User text, `CODEX_CI`, and arbitrary
+environment values remain insufficient evidence; Runtime `--read-only` remains
+independent and authoritative.

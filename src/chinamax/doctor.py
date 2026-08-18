@@ -74,7 +74,7 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
-PLUGIN_VERSION = "0.7.4"
+PLUGIN_VERSION = "0.7.6"
 MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
 
 #: The three per-Host Policy toggles setup can write (ADR 0016 amended 0.7.0).
@@ -759,7 +759,7 @@ def run_setup(
     check_deps: DepChecker | None = None,
     create_env: EnvCreator | None = None,
     install_deps: DepInstaller | None = None,
-    permission_mode: str | None = None,
+    permission_mode: object | None = None,
 ) -> int:
     """Diagnose, fix what is missing, re-diagnose, and report; return the exit code.
 
@@ -1167,12 +1167,20 @@ def run_codex_setup(
     check_deps: DepChecker,
     create_env: EnvCreator,
     install_deps: DepInstaller,
-    permission_mode: str | None = None,
+    permission_mode: object | None = None,
 ) -> int:
     """Render a Codex preview or apply one only with explicit consent."""
-    live_permission = permission_mode or getattr(args, "permission_mode", None) or os.environ.get(
-        "CODEX_PERMISSION_MODE"
-    )
+    trusted_status = permission_mode
+    if trusted_status is None:
+        trusted_status = getattr(args, "permission_mode", None)
+    if trusted_status is not None:
+        from chinamax.codex import codex_permission_mode
+
+        live_permission = codex_permission_mode(trusted_status)
+    else:
+        # The environment variable is a narrow transport marker.  It is not
+        # trusted status and therefore accepts only the exact runtime value.
+        live_permission = os.environ.get("CODEX_PERMISSION_MODE")
     if getattr(args, "apply", False) and live_permission != "bypassPermissions":
         print(
             "chinamax: Codex setup mutation requires codex --yolo "

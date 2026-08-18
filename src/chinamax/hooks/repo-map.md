@@ -37,8 +37,9 @@ mutation guard.
   dispatch a fresh task`, never the idle follow-up advice. No output when
   the session owns no bridge-named Jobs.
 - `codex_pretool.py` — the Codex-only PreToolUse mutation backstop: strict Claude
-  no-op, denies ChinamaX Agent/setup mutation unless permission mode is
-  `bypassPermissions`, and never claims to replace Runtime read-only policy.
+  no-op, denies ChinamaX Agent/setup mutation unless trusted status resolves to
+  `bypassPermissions` (including the structured YOLO status pair), and never
+  claims to replace Runtime read-only policy.
 - `bridge_contract.py` — the PreToolUse(Bash) entrypoint: for an `agent_type`
   carrying the `chinamax` substring only (a NAMED spawn puts the teammate name,
   `chinamax-<profile>-<slug>`, in `agent_type`, not the `chinamax:chinamax` subagent

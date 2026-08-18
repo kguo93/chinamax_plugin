@@ -618,6 +618,44 @@ def test_run_codex_setup_reports_missing_prerequisites(monkeypatch, capsys, keyl
     assert "chinamax:" in err and doctor._GIT_FOR_WINDOWS_URL in err
 
 
+def test_run_codex_setup_accepts_structured_trusted_yolo_status(
+    monkeypatch, capsys, keyless_home, isolated
+):
+    """Codex setup accepts trusted host status when its mode env is empty."""
+    monkeypatch.setattr(
+        doctor,
+        "codex_setup_plan",
+        lambda *a, **k: {"prerequisites": {"bash": True, "miniconda": True}},
+    )
+    monkeypatch.setattr(
+        doctor,
+        "apply_codex_setup",
+        lambda *a, **k: {"ok": True, "changed": [], "digest": "digest", "fixes": []},
+    )
+    args = argparse.Namespace(
+        workspace=None,
+        json=True,
+        apply=True,
+        consent_digest="digest",
+        toggles=[],
+        confirm_overwrite=False,
+        no_agent=False,
+    )
+    code = doctor.run_codex_setup(
+        args,
+        find_env_python=lambda: None,
+        check_deps=_all_present,
+        create_env=lambda: (True, ""),
+        install_deps=lambda _python: (True, ""),
+        permission_mode={
+            "approval_policy": "never",
+            "sandbox_mode": "danger-full-access",
+        },
+    )
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["ok"] is True
+
+
 def test_apply_codex_setup_raises_missing_prerequisites(monkeypatch, keyless_home, isolated):
     monkeypatch.setattr(doctor.sys, "platform", "win32")
     # The stub plan omits prerequisite_fixes, so apply_codex_setup recomputes them;
