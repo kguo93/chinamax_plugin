@@ -1062,6 +1062,42 @@ def test_codex_setup_plan_binds_policy_toggles(monkeypatch, keyless_home, isolat
     assert plan_on["digest_input"]["policy"]["proposed"] == plan_on["policy_proposed"]
 
 
+def test_codex_setup_plan_emits_config_consequences(
+    monkeypatch, keyless_home, isolated
+):
+    """The Codex preview carries a terse consequences note only when a config
+    change is proposed; empty when all three flags are already true."""
+    monkeypatch.setattr(
+        doctor, "prerequisite_status", lambda: {"bash": True, "miniconda": True}
+    )
+    codex = doctor.HostContext.from_host(doctor.Host.CODEX)
+    injected = dict(
+        context=codex,
+        find_env_python=lambda: None,
+        check_deps=lambda _p: {n: False for n in doctor.DEPS},
+    )
+
+    # No config.toml exists -> all three proposed True -> note populated.
+    plan_change = doctor.codex_setup_plan(None, **injected)
+    note = plan_change["config_consequences"]
+    assert "~/.codex/config.toml" in note
+    assert "ALL Codex sessions" in note
+    assert "config.toml.bak" in note
+    # It must NOT ride the consent digest (fixed prose, not a written value).
+    assert "config_consequences" not in plan_change["digest_input"]
+
+    # All three flags already true -> nothing proposed -> empty note.
+    config_path = codex.keys_path.parent / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "[features]\nhooks = true\nmulti_agent = true\n[agents]\nenabled = true\n",
+        encoding="utf-8",
+    )
+    plan_noop = doctor.codex_setup_plan(None, **injected)
+    assert plan_noop["config_consequences"] == ""
+    assert plan_noop["config_diff"] == ""  # sanity: truly no change proposed
+
+
 def test_codex_apply_writes_settings_and_digest_aborts(
     tmp_path, monkeypatch, keyless_home, isolated
 ):

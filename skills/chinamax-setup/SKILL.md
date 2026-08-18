@@ -15,7 +15,10 @@ as the worker enforcement boundary.
 
 Run the Codex setup planner first. It must be genuinely non-mutating, show a
 redacted content-addressed preview and consent digest, and ask one explicit
-yes/no question. Apply only after consent and a matching recomputed digest.
+yes/no question. When the preview's `config_consequences` is non-empty, show it
+verbatim to the operator before the yes/no question — it states that enabling the
+three Codex feature flags changes global Codex behavior for all sessions.
+Apply only after consent and a matching recomputed digest.
 Preserve TOML comments and unrelated config, never copy or print credentials,
 never persist yolo, and use the shared deterministic compiler for the managed
 `~/.codex/agents/chinamax_bridge.toml`. An unmanaged collision needs a second

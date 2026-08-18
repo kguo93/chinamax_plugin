@@ -74,7 +74,7 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
-PLUGIN_VERSION = "0.7.6"
+PLUGIN_VERSION = "0.7.7"
 MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
 
 #: The three per-Host Policy toggles setup can write (ADR 0016 amended 0.7.0).
@@ -1007,6 +1007,15 @@ def codex_setup_plan(
         "agents.enabled": agents.get("enabled"),
     }
     config_diff = _codex_config_diff(config_path, observed, proposed)
+    config_consequences = (
+        "Enabling edits ~/.codex/config.toml globally (ALL Codex sessions, "
+        "not just chinamax): agents.enabled=custom agents load; "
+        "features.multi_agent=sessions spawn subagents; "
+        "features.hooks=Codex fires hooks. Existing config backed up to "
+        "config.toml.bak."
+        if any(proposed.values())
+        else ""
+    )
     keys_path = profiles.keys_path(selected)
     overlay_path = profiles.overlay_path(selected)
     interpreter_path = python_path_file(selected)
@@ -1088,6 +1097,7 @@ def codex_setup_plan(
         "prerequisite_fixes": prerequisite_rows,
         "config_path": str(config_path),
         "config_diff": config_diff,
+        "config_consequences": config_consequences,
         "agent_path": str(target),
         "agent_status": status,
         "keys_path": str(keys_path),
