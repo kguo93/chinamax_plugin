@@ -112,29 +112,14 @@ tool-layer policy and is not replaced by a Host sandbox.
 
 ## Keys and native data paths
 
-Add one `NAME=value` line per provider key. Values never appear in diagnostics.
+Add one `NAME=value` line per provider key to `model-keys.env`. Each cell is
+the default keys/profiles path and the app-data root for that Host and OS.
 
-| Host | Configuration/keys | Linux fallback state | macOS fallback state | Windows fallback state |
-|---|---|---|---|---|
-| Claude | `~/.claude/model-keys.env`, `~/.claude/chinamax-profiles.json` | `$XDG_STATE_HOME/chinamax` or `~/.local/state/chinamax` | `~/Library/Application Support/chinamax` | `%LOCALAPPDATA%\\chinamax` |
-| Codex | `~/.codex/model-keys.env`, `~/.codex/chinamax-profiles.json` | `$XDG_STATE_HOME/chinamax-codex` or `~/.local/state/chinamax-codex` | `~/Library/Application Support/chinamax-codex` | `%LOCALAPPDATA%\\chinamax-codex` |
-
-Host-provided plugin-data variables always take precedence:
-
-- Claude: `CLAUDE_PLUGIN_DATA`
-- Codex: `PLUGIN_DATA`
-
-On Windows, `%USERPROFILE%\\AppData\\Local` is the fallback when
-`%LOCALAPPDATA%` is absent. A Git Bash `HOME=/c/Users/...` does not override a
-native `USERPROFILE`. Claude and Codex roots never cross.
-
-The 0.4.3 macOS and Windows implementation assumes a fresh install. It does
-not read, merge, or migrate experimental state from another location. Existing
-Linux state and Linux XDG behavior remain unchanged.
-
-POSIX directories/files are still created with `0700`/`0600` on Linux and
-macOS. Windows inherits the ACLs of the user-owned parent directory; ChinamaX
-does not rewrite ACLs with `icacls`.
+| OS | Claude | Codex |
+|---|---|---|
+| Linux | `~/.claude/model-keys.env`, `~/.claude/chinamax-profiles.json`<br>`~/.local/state/chinamax` | `~/.codex/model-keys.env`, `~/.codex/chinamax-profiles.json`<br>`~/.local/state/chinamax-codex` |
+| macOS | `~/.claude/model-keys.env`, `~/.claude/chinamax-profiles.json`<br>`~/Library/Application Support/chinamax` | `~/.codex/model-keys.env`, `~/.codex/chinamax-profiles.json`<br>`~/Library/Application Support/chinamax-codex` |
+| Windows | `~/.claude/model-keys.env`, `~/.claude/chinamax-profiles.json`<br>`%LOCALAPPDATA%\chinamax` | `~/.codex/model-keys.env`, `~/.codex/chinamax-profiles.json`<br>`%LOCALAPPDATA%\chinamax-codex` |
 
 ## Use
 

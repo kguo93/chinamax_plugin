@@ -74,7 +74,7 @@ DepInstaller = Callable[[str], "tuple[bool, str]"]
 #: Ceiling on each fix subprocess (conda create / pip install). Generous —
 #: solver and wheel builds are slow — but bounded, so setup can never hang.
 FIX_TIMEOUT_S = 900
-PLUGIN_VERSION = "0.7.3"
+PLUGIN_VERSION = "0.7.4"
 MANAGED_AGENT_MARKER = "# chinamax-managed-plugin-version:"
 
 #: The three per-Host Policy toggles setup can write (ADR 0016 amended 0.7.0).
@@ -851,7 +851,7 @@ def _agent_source_path(context: HostContext | None = None) -> Path:
 def compile_codex_agent(
     source: Path | None = None, *, version: str = PLUGIN_VERSION
 ) -> str:
-    """Compile the shared Markdown agent adapter into deterministic TOML."""
+    """Compile the Markdown adapter and canonical Bridge contract into TOML."""
     source = source or _agent_source_path()
     text = source.read_text(encoding="utf-8")
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", text, re.S)
@@ -866,6 +866,14 @@ def compile_codex_agent(
     if not description:
         raise ChinamaxError(f"{source}: missing agent description")
     body = body.strip() + "\n"
+    # The generated custom-agent configuration is the persistent Codex
+    # developer layer for every Bridge model request, including later
+    # inter-agent messages and turns restored after compaction.  Read the
+    # maintained contract from the plugin tree at compile time so Codex never
+    # grows a second, shortened copy.
+    contract_path = source.parent.parent / "skills" / "chinamax-bridge" / "SKILL.md"
+    contract = contract_path.read_text(encoding="utf-8")
+    developer_instructions = body + "\n" + contract
     # JSON's escaping is the TOML basic-string escape set for this generated
     # body, and keeps delimiters/newlines from changing the TOML structure.
     return (
@@ -874,7 +882,8 @@ def compile_codex_agent(
         f"description = {json.dumps(description, ensure_ascii=False)}\n"
         'model = "gpt-5.6-terra"\n'
         'model_reasoning_effort = "low"\n'
-        f"developer_instructions = {json.dumps(body, ensure_ascii=False)}\n"
+        "developer_instructions = "
+        f"{json.dumps(developer_instructions, ensure_ascii=False)}\n"
     )
 
 

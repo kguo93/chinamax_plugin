@@ -8,6 +8,16 @@ A dual-Host plugin that exposes non-Claude worker models (DeepSeek, MiMo, GLM, M
 The Host-facing persistent teammate — Claude agent type `chinamax:chinamax` or a Codex native Bridge, exactly one instance per Thread, named by the selected Host's safe convention — that dispatches a task to the Runtime and then serves its Thread for the Thread's whole life: it classifies every later operator message (Steer while the Job runs; resume when it has ended; cancel on explicit abandon intent), always waits for the resulting Job to end, and delivers exactly one Relay per Job it supervises. It stays silent otherwise and never edits files, runs the task itself, or spawns another agent. A Bridge that dies or abandons its poll loop forfeits its Jobs: each is reaped (interrupted) and its Thread stranded, continued only by a fresh dispatch.
 _Avoid_: wrapper agent, proxy, "the deepseek agent" (DeepSeek is one Profile among many)
 
+**Inbound Bridge message**:
+Externally authored text accepted for model presentation in a Bridge Thread,
+including initial spawn, idle follow-up, running queue/steer delivery, and any
+future supported direct Bridge route. Tool results, hook context, status,
+Bridge output, and compaction without new external text are not inbound
+messages. A Codex Bridge is bound by its persistent custom-agent developer
+contract before the next model request; native queue/interrupt semantics remain
+unchanged.
+_Avoid_: turn (queued messages may share a turn id), tool result, hook context
+
 **Relay**:
 The Bridge Agent's single terminal message delivering a Job's outcome to the operator: the worker's final response untouched when the Job completed, or the failure report otherwise. Exactly one per Job, sent only when the Job ends — never a progress update, never an acknowledgment. The operator reads the worker's response as if they had dispatched the worker model themselves.
 _Avoid_: progress message, notification, status update (none of these are ever sent)

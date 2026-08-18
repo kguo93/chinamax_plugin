@@ -1,6 +1,6 @@
 {
   "name": "chinamax",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Dispatch worker models through a shared durable Bridge Runtime from Claude Code or Codex.",
   "homepage": "https://github.com/kguo93/chinamax_plugin",
   "repository": "https://github.com/kguo93/chinamax_plugin",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -70,16 +71,37 @@ def test_codex_pretool_is_noop_for_claude_and_blocks_mutation(monkeypatch, capsy
 
 
 def test_compiled_agent_has_codex_native_settings(tmp_path):
-    source = tmp_path / "agent.md"
+    source = tmp_path / "agents" / "chinamax.md"
+    source.parent.mkdir()
     source.write_text(
         "---\nname: chinamax\ndescription: test adapter\n---\n\nLoad the canonical skill.\n",
         encoding="utf-8",
     )
+    contract = "# Bridge contract\n\nKeep \\\"exact\\\" bytes. Δ\n"
+    contract_path = tmp_path / "skills" / "chinamax-bridge" / "SKILL.md"
+    contract_path.parent.mkdir(parents=True)
+    contract_path.write_text(contract, encoding="utf-8")
     compiled = compile_codex_agent(source)
-    assert "# chinamax-managed-plugin-version: 0.7.3" in compiled
+    parsed = tomllib.loads(compiled)
+    assert "# chinamax-managed-plugin-version: 0.7.4" in compiled
     assert 'model = "gpt-5.6-terra"' in compiled
     assert 'model_reasoning_effort = "low"' in compiled
-    assert "developer_instructions" in compiled
+    assert parsed["developer_instructions"] == (
+        "Load the canonical skill.\n\n" + contract
+    )
+    assert parsed["developer_instructions"].endswith(contract)
+    assert parsed["developer_instructions"].count(contract) == 1
+
+
+def test_compiled_agent_requires_the_canonical_bridge_contract(tmp_path):
+    source = tmp_path / "agents" / "chinamax.md"
+    source.parent.mkdir()
+    source.write_text(
+        "---\nname: chinamax\ndescription: test adapter\n---\n\nAdapter.\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(FileNotFoundError):
+        compile_codex_agent(source)
 
 
 def test_codex_task_skill_preserves_read_only_posture():
