@@ -1,6 +1,6 @@
 {
   "name": "chinamax",
-  "version": "0.7.7",
+  "version": "0.7.8",
   "description": "Dispatch worker models through one shared durable Bridge Runtime from Claude Code or Codex.",
   "author": {
     "name": "Kevin Guo"

@@ -75,3 +75,5 @@ rule, naming, and every Profile semantic are unchanged. The spawn remains an
 explicit `model: "sonnet"` override in the Agent call (`commands/task.md`),
 with `agents/chinamax.md` frontmatter following suit. Cross-ref ADR 0003
 (amended 2026-08-18).
+
+**Amended 2026-09-02** (glm default model changed). The glm Profile's shipped `model` was `glm-5.2`; it is now **`glm-5.3`** (GA 2026-08-18). Endpoint (`https://api.z.ai/api/anthropic`), key var (`GLM_API_KEY`), and the `request_extras` thinking policy (`{"thinking": {"type": "enabled"}}`) are unchanged. The `glm-5.3[1m]` variant was rejected upstream (Z.AI error 1214 — the Anthropic dialect relays the model string byte-for-byte after prefix strip), so the pin stays a plain model string. The shipped row remains guarded by `test_profiles.py`'s exact `SHIPPED` dict, and the `CONTEXT.md` "Default model" glossary entry now carries `glm-5.3`. Mirrors chinamaxM ADR 0003 (amended 2026-09-02).

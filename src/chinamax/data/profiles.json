@@ -16,7 +16,7 @@
   {
     "name": "glm",
     "base_url": "https://api.z.ai/api/anthropic",
-    "model": "glm-5.2",
+    "model": "glm-5.3",
     "api_key_env": "GLM_API_KEY",
     "request_extras": {"thinking": {"type": "enabled"}}
   },

@@ -116,7 +116,7 @@ def test_compiled_agent_has_codex_native_settings(tmp_path):
     contract_path.write_text(contract, encoding="utf-8")
     compiled = compile_codex_agent(source)
     parsed = tomllib.loads(compiled)
-    assert "# chinamax-managed-plugin-version: 0.7.7" in compiled
+    assert "# chinamax-managed-plugin-version: 0.7.8" in compiled
     assert 'model = "gpt-5.6-terra"' in compiled
     assert 'model_reasoning_effort = "low"' in compiled
     assert parsed["developer_instructions"] == (

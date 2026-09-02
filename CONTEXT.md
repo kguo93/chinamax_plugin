@@ -55,7 +55,7 @@ A message sent to a running Job — an operator message the Bridge Agent classif
 _Avoid_: interrupt (cancellation is a different action), follow-up (a follow-up starts a new turn on a finished Thread)
 
 **Default model**:
-The model string a Profile resolves to (shipped row, overlay-adjustable) — what every dispatch that names no model runs against (deepseek-v4-pro[1m], mimo-v2.5-pro, glm-5.2, MiniMax-M3[1m], kimi-k3, qwen3.8-max). A dispatch may name any other model string; the provider endpoint is the only judge of validity. Tier names (pro, flash, ultraspeed) are marketing labels, not plugin concepts.
+The model string a Profile resolves to (shipped row, overlay-adjustable) — what every dispatch that names no model runs against (deepseek-v4-pro[1m], mimo-v2.5-pro, glm-5.3, MiniMax-M3[1m], kimi-k3, qwen3.8-max). A dispatch may name any other model string; the provider endpoint is the only judge of validity. Tier names (pro, flash, ultraspeed) are marketing labels, not plugin concepts.
 _Avoid_: pro/flash/ultraspeed as selection concepts (marketing labels), tier
 
 **Pinned model**:

@@ -10,7 +10,7 @@ from conftest import OMIT, bash_then_report_script, write_keys, write_overlay
 SHIPPED = {
     "deepseek": ("https://api.deepseek.com/anthropic", "deepseek-v4-pro[1m]", "DEEPSEEK_API_KEY"),
     "mimo": ("https://api.xiaomimimo.com/anthropic", "mimo-v2.5-pro", "MIMO_API_KEY"),
-    "glm": ("https://api.z.ai/api/anthropic", "glm-5.2", "GLM_API_KEY"),
+    "glm": ("https://api.z.ai/api/anthropic", "glm-5.3", "GLM_API_KEY"),
     "minimax": ("https://api.minimax.io/anthropic", "MiniMax-M3[1m]", "MINIMAX_API_KEY"),
     "kimi": ("https://api.moonshot.ai/anthropic", "kimi-k3", "KIMI_API_KEY"),
     "qwen": ("https://dashscope-intl.aliyuncs.com/apps/anthropic", "qwen3.8-max", "QWEN_API_KEY"),
